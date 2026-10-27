@@ -2,6 +2,7 @@ package clickup
 
 import (
 	"encoding/json"
+	"strconv"
 
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 )
@@ -36,6 +37,27 @@ func Parser(rawBody []byte) (normalizedEvent relay.NormalizedEvent, err error) {
 		return relay.NormalizedEvent{}, err
 	}
 
-	var event relay.NormalizedEvent{}
-	return event,nil;
+	var content, senderID, senderName string
+	for _, item := range payload.History {
+		if item.Field == "comment" {
+			content = item.Comment.TextContent
+			senderName = item.Comment.User.Username
+			senderID = strconv.Itoa(item.Comment.User.ID)
+			break
+		}
+	}
+	event := relay.NormalizedEvent{
+		WorkspaceID:   "default_workspace",
+		IntegrationID: "clickup_default",
+		Source:        relay.SourceClickup,
+		ExternalID:    payload.TaskID,
+		Title:         payload.Task.Name,
+		SenderID:      senderID,
+		SenderName:    senderName,
+		Content:       content,
+		Metadata: map[string]string{
+			"event_type": payload.Event,
+		},
+	}
+	return event, nil
 }
