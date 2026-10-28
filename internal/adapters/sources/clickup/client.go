@@ -31,7 +31,7 @@ func NewClickUpParser() *ClickUpParser {
 	return &ClickUpParser{}
 }
 
-func Parser(rawBody []byte) (normalizedEvent relay.NormalizedEvent, err error) {
+func (h *ClickUpParser) Parser(rawBody []byte) (normalizedEvent relay.NormalizedEvent, err error) {
 	var payload ClickUpWebhookPayload
 	if err := json.Unmarshal(rawBody, &payload); err != nil {
 		return relay.NormalizedEvent{}, err
