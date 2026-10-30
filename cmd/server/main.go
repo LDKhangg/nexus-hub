@@ -7,6 +7,7 @@ import (
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/sources/clickup"
 	"github.com/LDKhangg/nexus-hub/internal/delivery/http"
+	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -19,8 +20,8 @@ func main() {
 	e.Use(middleware.RequestLogger())
 	e.Use(middleware.Recover())
 	// create CallBack func
-	onFlushCallback := func(ctx context.Context, event relay.NormalizedEvent) {
-		log.Printf("[FLUSH] [Workspace: %s] [Task/ID: %s] Nội dung gom nhóm:\n%s\n---------------------------------------- %s",
+	onFlushCallback := func(ctx context.Context, event domain.NormalizedEvent) {
+		log.Printf("[FLUSH] [Workspace: %s][Source: %s][Task/ID: %s] Nội dung gom nhóm:\n\n---------------------------------------- %s",
 			event.WorkspaceID, event.Source, event.ExternalID, event.Content)
 	}
 	// init debounceManage
@@ -28,7 +29,7 @@ func main() {
 	// init wh factory
 	factory := http.NewWebhookFactory()
 	clickupParser := clickup.NewClickUpParser()
-	factory.Register(relay.SourceClickup, clickupParser)
+	factory.Register(domain.SourceClickup, clickupParser)
 
 	// init wh handler
 	wbHandler := http.NewWebhookHandler(factory, debounceManage)

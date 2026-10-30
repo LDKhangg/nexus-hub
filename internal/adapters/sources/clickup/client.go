@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 
-	"github.com/LDKhangg/nexus-hub/internal/relay"
+	"github.com/LDKhangg/nexus-hub/internal/domain"
 )
 
 type ClickUpWebhookPayload struct {
@@ -31,10 +31,10 @@ func NewClickUpParser() *ClickUpParser {
 	return &ClickUpParser{}
 }
 
-func (h *ClickUpParser) Parser(rawBody []byte) (normalizedEvent relay.NormalizedEvent, err error) {
+func (h *ClickUpParser) Parser(rawBody []byte) (normalizedEvent domain.NormalizedEvent, err error) {
 	var payload ClickUpWebhookPayload
 	if err := json.Unmarshal(rawBody, &payload); err != nil {
-		return relay.NormalizedEvent{}, err
+		return domain.NormalizedEvent{}, err
 	}
 
 	var content, senderID, senderName string
@@ -46,10 +46,10 @@ func (h *ClickUpParser) Parser(rawBody []byte) (normalizedEvent relay.Normalized
 			break
 		}
 	}
-	event := relay.NormalizedEvent{
+	event := domain.NormalizedEvent{
 		WorkspaceID:   "default_workspace",
 		IntegrationID: "clickup_default",
-		Source:        relay.SourceClickup,
+		Source:        domain.SourceClickup,
 		ExternalID:    payload.TaskID,
 		Title:         payload.Task.Name,
 		SenderID:      senderID,

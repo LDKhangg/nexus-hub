@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/labstack/echo/v4"
 )
@@ -24,12 +25,12 @@ func NewWebhookHandler(parserFactory *WebhookFactory, debouncerMgr *relay.Deboun
 }
 
 func (h *WebhookHandler) HandleWebhook(c echo.Context) error {
-	ctx := c.Request().Context()
+	ctx := Context.WithoutCancel(c.Request().Context())
 
 	// lay source tu request
 
 	sourceParam := c.Param("source")
-	source := relay.ChannelSource(sourceParam)
+	source := domain.ChannelSource(sourceParam)
 
 	rawBody, err := io.ReadAll(c.Request().Body)
 	if err != nil {

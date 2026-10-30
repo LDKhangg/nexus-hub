@@ -1,9 +1,6 @@
-package relay
+package domain
 
-import (
-	"context"
-	"time"
-)
+import "time"
 
 type ChannelSource string
 
@@ -37,21 +34,4 @@ type NormalizedEvent struct {
 
 func (e NormalizedEvent) DebounceKey() string {
 	return e.WorkspaceID + ": " + string(e.Source) + ": " + e.ExternalID
-}
-
-type SourcePort interface {
-	Platform() ChannelSource
-	Acknowledge(ctx context.Context, externalID string) error
-	PostReply(ctx context.Context, externalID string, message string) error
-	UpdateState(ctx context.Context, externalID string, newState string) error
-}
-
-type ControlPlanePort interface {
-	EnsureThread(ctx context.Context, event NormalizedEvent) (controlThreadID string, err error)
-	NotifyHuman(ctx context.Context, controlThreadID string, summary string, drafter string) error
-}
-
-type ThreadRepository interface {
-	GetControlThreadID(ctx context.Context, workspaceID string, source ChannelSource, externalID string) (string, error)
-	SaveMapping(ctx context.Context, workspaceID string, source ChannelSource, externalID string, controlThreadID string) error
 }
