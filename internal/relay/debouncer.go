@@ -37,7 +37,7 @@ func (d *MemoryDebouncer) Push(ctx context.Context, event domain.NormalizedEvent
 
 	key := event.DebounceKey()
 	if existing, exists := d.accumulater[key]; exists {
-		event.Content = existing.Content + "n" + event.Content
+		event.Content = existing.Content + "\n" + event.Content
 	}
 	d.accumulater[key] = event
 	if t, exists := d.timers[key]; exists {

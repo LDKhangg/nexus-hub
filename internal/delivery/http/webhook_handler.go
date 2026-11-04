@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"io"
 	"net/http"
 
@@ -25,7 +26,7 @@ func NewWebhookHandler(parserFactory *WebhookFactory, debouncerMgr *relay.Deboun
 }
 
 func (h *WebhookHandler) HandleWebhook(c echo.Context) error {
-	ctx := Context.WithoutCancel(c.Request().Context())
+	ctx := context.WithoutCancel(c.Request().Context())
 
 	// lay source tu request
 
