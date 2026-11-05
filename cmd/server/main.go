@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
-	"time"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/sources/clickup"
-	"github.com/LDKhangg/nexus-hub/internal/delivery/http"
+	"github.com/LDKhangg/nexus-hub/internal/config"
+	httpdelivery "github.com/LDKhangg/nexus-hub/internal/delivery/http"
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/labstack/echo/v4"
@@ -14,30 +19,47 @@ import (
 )
 
 func main() {
-	// init new Echo framework
+	cfg := config.Load()
+
 	e := echo.New()
-	// 2 fundamental middleware
+	e.HideBanner = true
 	e.Use(middleware.RequestLogger())
 	e.Use(middleware.Recover())
-	// create CallBack func
-	onFlushCallback := func(ctx context.Context, event domain.NormalizedEvent) {
-		log.Printf("[FLUSH] [Workspace: %s][Source: %s][Task/ID: %s] Nội dung gom nhóm:\n\n---------------------------------------- %s",
+	e.Use(middleware.BodyLimit(cfg.Server.BodyLimit))
+
+	onFlush := func(ctx context.Context, event domain.NormalizedEvent) {
+		log.Printf("[FLUSH] [Workspace: %s][Source: %s][Task/ID: %s] Nội dung gom nhóm:\n----------------------------------------\n%s",
 			event.WorkspaceID, event.Source, event.ExternalID, event.Content)
 	}
-	// init debounceManage
-	debounceManage := relay.NewDebounceManage(8*time.Second, onFlushCallback)
-	// init wh factory
-	factory := http.NewWebhookFactory()
-	clickupParser := clickup.NewClickUpParser()
-	factory.Register(domain.SourceClickup, clickupParser)
+	debounceManage := relay.NewDebounceManage(cfg.Relay.DebounceWindow, cfg.Relay.MaxWait, onFlush)
 
-	// init wh handler
-	wbHandler := http.NewWebhookHandler(factory, debounceManage)
-	// register route for echo
-	e.POST("/webhook/:source", wbHandler.HandleWebhook)
-	// start sever at port 8080
-	port := ":8080"
-	if err := e.Start(port); err != nil {
-		log.Fatalf("Không thể khởi động server: %v", err)
+	if cfg.ClickUp.WebhookSecret == "" {
+		log.Println("[WARN] CLICKUP_WEBHOOK_SECRET trống: KHÔNG verify chữ ký webhook ClickUp (chỉ dùng cho dev)")
 	}
+	factory := httpdelivery.NewWebhookFactory()
+	factory.Register(domain.SourceClickup, clickup.NewClickUpParser(cfg.ClickUp.WebhookSecret))
+
+	wbHandler := httpdelivery.NewWebhookHandler(factory, debounceManage)
+	e.POST("/webhook/:source", wbHandler.HandleWebhook)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		if err := e.Start(cfg.Server.Port); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("Không thể khởi động server: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Println("Đang shutdown server...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
+	defer cancel()
+	if err := e.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Shutdown lỗi: %v", err)
+	}
+	// Server đã ngừng nhận request: flush nốt các event đang chờ trong debounce window.
+	debounceManage.FlushAll()
+	log.Println("Đã shutdown xong")
 }

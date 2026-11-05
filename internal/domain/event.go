@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 type ChannelSource string
 
@@ -14,9 +17,13 @@ type EventType string
 const (
 	EventCommandPosted EventType = "command_posted"
 	EventStatusChanged EventType = "status_changed"
-	Eventmentioned     EventType = "mentioned"
+	EventMentioned     EventType = "mentioned"
 	EventPRUpdated     EventType = "pr_updated"
 )
+
+// ErrIgnoredEvent được parser trả về khi webhook hợp lệ nhưng không cần xử lý
+// (ví dụ: event không chứa comment). Handler sẽ trả 200 và không queue.
+var ErrIgnoredEvent = errors.New("event ignored")
 
 type NormalizedEvent struct {
 	WorkspaceID   string            `json:"workspace_id"`
@@ -33,5 +40,5 @@ type NormalizedEvent struct {
 }
 
 func (e NormalizedEvent) DebounceKey() string {
-	return e.WorkspaceID + ": " + string(e.Source) + ": " + e.ExternalID
+	return e.WorkspaceID + ":" + string(e.Source) + ":" + e.ExternalID
 }

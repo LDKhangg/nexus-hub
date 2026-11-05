@@ -8,60 +8,103 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 )
 
-// interface cho phase 2 scale redis
+type FlushFunc func(ctx context.Context, event domain.NormalizedEvent)
+
+// EventDebounce là interface để phase 2 thay bằng Redis.
 type EventDebounce interface {
 	Push(ctx context.Context, event domain.NormalizedEvent)
+	// FlushAll flush ngay mọi event đang chờ (dùng khi shutdown).
+	FlushAll()
+}
+
+type pending struct {
+	ctx       context.Context
+	event     domain.NormalizedEvent
+	gen       uint64
+	firstSeen time.Time
+	timer     *time.Timer
 }
 
 type MemoryDebouncer struct {
-	duration    time.Duration
-	mu          sync.Mutex
-	timers      map[string]*time.Timer
-	accumulater map[string]domain.NormalizedEvent
-	onFlush     func(ctx context.Context, event domain.NormalizedEvent)
+	duration time.Duration
+	maxWait  time.Duration // 0 = không giới hạn
+	onFlush  FlushFunc
+
+	mu      sync.Mutex
+	pending map[string]*pending
 }
 
-func NewMemoryDebouncer(duration time.Duration, onFlushFunc func(ctx context.Context, event domain.NormalizedEvent)) *MemoryDebouncer {
+func NewMemoryDebouncer(duration, maxWait time.Duration, onFlush FlushFunc) *MemoryDebouncer {
 	return &MemoryDebouncer{
-		duration:    duration,
-		onFlush:     onFlushFunc,
-		timers:      make(map[string]*time.Timer),
-		accumulater: make(map[string]domain.NormalizedEvent),
+		duration: duration,
+		maxWait:  maxWait,
+		onFlush:  onFlush,
+		pending:  make(map[string]*pending),
 	}
 }
 
 func (d *MemoryDebouncer) Push(ctx context.Context, event domain.NormalizedEvent) {
 	d.mu.Lock()
-
 	defer d.mu.Unlock()
 
 	key := event.DebounceKey()
-	if existing, exists := d.accumulater[key]; exists {
-		event.Content = existing.Content + "\n" + event.Content
+	now := time.Now()
+
+	p, ok := d.pending[key]
+	if ok {
+		p.timer.Stop()
+		if event.Content != "" && p.event.Content != "" {
+			event.Content = p.event.Content + "\n" + event.Content
+		} else if event.Content == "" {
+			event.Content = p.event.Content
+		}
+	} else {
+		p = &pending{firstSeen: now}
+		d.pending[key] = p
 	}
-	d.accumulater[key] = event
-	if t, exists := d.timers[key]; exists {
-		t.Stop()
+	p.ctx = ctx
+	p.event = event
+	// Mỗi lần Push tăng gen; timer cũ (nếu đã fire và đang chờ lock) sẽ thấy gen lệch và bỏ qua.
+	p.gen++
+	gen := p.gen
+
+	delay := d.duration
+	if d.maxWait > 0 {
+		if remaining := p.firstSeen.Add(d.maxWait).Sub(now); remaining < delay {
+			delay = max(remaining, 0)
+		}
 	}
-	d.timers[key] = time.AfterFunc(d.duration, func() {
-		d.flushKey(ctx, key)
-	})
+	p.timer = time.AfterFunc(delay, func() { d.flushKey(key, gen) })
 }
 
-func (d *MemoryDebouncer) flushKey(ctx context.Context, key string) {
+func (d *MemoryDebouncer) flushKey(key string, gen uint64) {
 	d.mu.Lock()
-	// tim voi key do thi Event don dc cai gi roi lay ra
-	event, exist := d.accumulater[key]
-	if !exist {
-		defer d.mu.Unlock()
+	p, ok := d.pending[key]
+	if !ok || p.gen != gen {
+		d.mu.Unlock()
 		return
 	}
-	// clear trong debounce
-	delete(d.accumulater, key)
-	delete(d.timers, key)
+	delete(d.pending, key)
 	d.mu.Unlock()
-	// goi callback
+
 	if d.onFlush != nil {
-		d.onFlush(ctx, event)
+		d.onFlush(p.ctx, p.event)
+	}
+}
+
+func (d *MemoryDebouncer) FlushAll() {
+	d.mu.Lock()
+	all := d.pending
+	d.pending = make(map[string]*pending)
+	for _, p := range all {
+		p.timer.Stop()
+	}
+	d.mu.Unlock()
+
+	if d.onFlush == nil {
+		return
+	}
+	for _, p := range all {
+		d.onFlush(p.ctx, p.event)
 	}
 }

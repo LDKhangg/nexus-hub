@@ -1,36 +1,52 @@
 package relay
 
 import (
-	"context"
 	"sync"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 )
 
+// DebounceManage giữ một debouncer cho mỗi source, để sau này mỗi source
+// có thể dùng window riêng.
 type DebounceManage struct {
-	registry map[domain.ChannelSource]EventDebounce
 	mu       sync.Mutex
+	registry map[domain.ChannelSource]EventDebounce
 	duration time.Duration
-	onFlush  func(ctx context.Context, event domain.NormalizedEvent)
+	maxWait  time.Duration
+	onFlush  FlushFunc
 }
 
-func NewDebounceManage(duration time.Duration, fc func(ctx context.Context, event domain.NormalizedEvent)) *DebounceManage {
+func NewDebounceManage(duration, maxWait time.Duration, onFlush FlushFunc) *DebounceManage {
 	return &DebounceManage{
 		duration: duration,
-		onFlush:  fc,
+		maxWait:  maxWait,
+		onFlush:  onFlush,
 		registry: make(map[domain.ChannelSource]EventDebounce),
 	}
 }
 
-func (m *DebounceManage) GetOrCreate(Channel domain.ChannelSource) EventDebounce {
+func (m *DebounceManage) GetOrCreate(channel domain.ChannelSource) EventDebounce {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if debounce, exists := m.registry[Channel]; exists {
-		return debounce
+	if d, ok := m.registry[channel]; ok {
+		return d
 	}
-	debounce := NewMemoryDebouncer(m.duration, m.onFlush)
-	m.registry[Channel] = debounce
-	return debounce
+	d := NewMemoryDebouncer(m.duration, m.maxWait, m.onFlush)
+	m.registry[channel] = d
+	return d
+}
+
+func (m *DebounceManage) FlushAll() {
+	m.mu.Lock()
+	all := make([]EventDebounce, 0, len(m.registry))
+	for _, d := range m.registry {
+		all = append(all, d)
+	}
+	m.mu.Unlock()
+
+	for _, d := range all {
+		d.FlushAll()
+	}
 }

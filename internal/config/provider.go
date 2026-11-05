@@ -1,22 +1,20 @@
 package config
 
-import (
-	"time"
-)
+import "time"
 
 type LLMConfig struct {
 	DefaultProvider string
+	Timeout         time.Duration
 	Anthropic       AnthropicConfig
 	OpenAI          OpenAIConfig
-	Timeout         time.Duration
 }
 
 type AnthropicConfig struct {
-	APIKey       string
-	DefaultModel string
-	MaxRetries   int
-	Timeout      time.Duration
-	BaseUrl      string
+	APIKey           string
+	DefaultModel     string
+	DefaultMaxTokens int64
+	MaxRetries       int
+	BaseURL          string
 }
 
 type OpenAIConfig struct {

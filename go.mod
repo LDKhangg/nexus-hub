@@ -2,10 +2,12 @@ module github.com/LDKhangg/nexus-hub
 
 go 1.27.0
 
-require github.com/labstack/echo/v4 v4.16.2
+require (
+	github.com/anthropics/anthropic-sdk-go/v2 v2.4.0
+	github.com/labstack/echo/v4 v4.16.2
+)
 
 require (
-	github.com/anthropics/anthropic-sdk-go/v2 v2.4.0 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect

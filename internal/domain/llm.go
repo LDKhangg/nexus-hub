@@ -3,8 +3,8 @@ package domain
 type Role string
 
 const (
-	UserRole Role = "UserRole"
-	AIRole   Role = "AiRole"
+	UserRole Role = "user"
+	AIRole   Role = "assistant"
 )
 
 type Message struct {
@@ -13,9 +13,10 @@ type Message struct {
 }
 
 type LLMRequest struct {
-	Model    string
-	MaxToken int32
-	Messages []Message
+	Model     string
+	System    string
+	MaxTokens int64
+	Messages  []Message
 }
 
 type LLMResponse struct {

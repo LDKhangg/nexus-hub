@@ -1,13 +1,21 @@
 package http
 
 import (
-	"fmt"
+	"errors"
+	"net/http"
 
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 )
 
+var ErrUnknownSource = errors.New("unknown webhook source")
+
 type EventParser interface {
 	Parser(rawBody []byte) (domain.NormalizedEvent, error)
+}
+
+// SignatureVerifier là interface tuỳ chọn: parser nào implement thì handler sẽ verify trước khi parse.
+type SignatureVerifier interface {
+	Verify(header http.Header, rawBody []byte) error
 }
 
 type WebhookFactory struct {
@@ -15,9 +23,7 @@ type WebhookFactory struct {
 }
 
 func NewWebhookFactory() *WebhookFactory {
-	return &WebhookFactory{
-		parsers: make(map[domain.ChannelSource]EventParser),
-	}
+	return &WebhookFactory{parsers: make(map[domain.ChannelSource]EventParser)}
 }
 
 func (f *WebhookFactory) Register(source domain.ChannelSource, parser EventParser) {
@@ -25,9 +31,9 @@ func (f *WebhookFactory) Register(source domain.ChannelSource, parser EventParse
 }
 
 func (f *WebhookFactory) GetParser(source domain.ChannelSource) (EventParser, error) {
-	parser, exists := f.parsers[source]
-	if !exists {
-		return nil, fmt.Errorf("cant find parser factory")
+	parser, ok := f.parsers[source]
+	if !ok {
+		return nil, ErrUnknownSource
 	}
 	return parser, nil
 }
