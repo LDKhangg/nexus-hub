@@ -8,12 +8,16 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 )
 
-const signatureHeader = "X-Signature"
+const (
+	signatureHeader = "X-Signature"
+	botMarker       = "\U0001F916"
+)
 
 var ErrInvalidSignature = errors.New("clickup: invalid webhook signature")
 
@@ -44,11 +48,15 @@ var eventTypes = map[string]domain.EventType{
 
 type ClickUpParser struct {
 	webhookSecret string
+	ownSenderID   string
 }
 
 // NewClickUpParser: secret rỗng = tắt verify chữ ký (chỉ dùng cho dev).
-func NewClickUpParser(webhookSecret string) *ClickUpParser {
-	return &ClickUpParser{webhookSecret: webhookSecret}
+func NewClickUpParser(webhookSecret string, ownSenderID string) *ClickUpParser {
+	return &ClickUpParser{
+		webhookSecret: webhookSecret,
+		ownSenderID:   ownSenderID,
+	}
 }
 
 // Verify kiểm tra header X-Signature = hex(HMAC-SHA256(secret, body)).
@@ -97,6 +105,8 @@ func (p *ClickUpParser) Parser(rawBody []byte) (domain.NormalizedEvent, error) {
 		return domain.NormalizedEvent{}, domain.ErrIgnoredEvent
 	}
 
+	isMyOwnBot := senderID == p.ownSenderID && strings.HasPrefix(content, botMarker)
+
 	return domain.NormalizedEvent{
 		WorkspaceID:   "default_workspace",
 		IntegrationID: "clickup_default",
@@ -109,5 +119,6 @@ func (p *ClickUpParser) Parser(rawBody []byte) (domain.NormalizedEvent, error) {
 		Content:       content,
 		Metadata:      map[string]string{"event_type": payload.Event},
 		OccurredAt:    occurredAt,
+		FromOwnBot:    isMyOwnBot,
 	}, nil
 }

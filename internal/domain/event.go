@@ -37,6 +37,7 @@ type NormalizedEvent struct {
 	Content       string            `json:"content"`
 	Metadata      map[string]string `json:"metadata"`
 	OccurredAt    time.Time         `json:"occurred_at"`
+	FromOwnBot    bool              `json:"from_own_bot"`
 }
 
 func (e NormalizedEvent) DebounceKey() string {

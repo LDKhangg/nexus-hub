@@ -17,11 +17,11 @@ const maxBodyBytes = 1 << 20
 // WebhookHandler là tầng controller: nhận request -> chọn parser theo source -> đẩy vào debouncer.
 type WebhookHandler struct {
 	parserFactory *WebhookFactory
-	debouncerMgr  *relay.DebounceManage
+	ingestor      *relay.Ingestor
 }
 
-func NewWebhookHandler(parserFactory *WebhookFactory, debouncerMgr *relay.DebounceManage) *WebhookHandler {
-	return &WebhookHandler{parserFactory: parserFactory, debouncerMgr: debouncerMgr}
+func NewWebhookHandler(parserFactory *WebhookFactory, ingestor *relay.Ingestor) *WebhookHandler {
+	return &WebhookHandler{parserFactory: parserFactory, ingestor: ingestor}
 }
 
 func (h *WebhookHandler) HandleWebhook(c echo.Context) error {
@@ -57,6 +57,6 @@ func (h *WebhookHandler) HandleWebhook(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "failed to parse event"})
 	}
 
-	h.debouncerMgr.GetOrCreate(event.Source).Push(ctx, event)
+	h.ingestor.Push(ctx, event)
 	return c.JSON(http.StatusOK, map[string]string{"status": "queued"})
 }

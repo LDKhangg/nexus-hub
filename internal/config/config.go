@@ -25,10 +25,10 @@ type RelayConfig struct {
 }
 
 type ClickUpConfig struct {
-	WebhookSecret string
+	APIKey        string
+	PublicBaseURL string
 }
 
-// Load đọc cấu hình từ biến môi trường, có default hợp lý cho môi trường dev.
 func Load() Config {
 	return Config{
 		Server: ServerConfig{
@@ -41,7 +41,8 @@ func Load() Config {
 			MaxWait:        getDuration("DEBOUNCE_MAX_WAIT", 30*time.Second),
 		},
 		ClickUp: ClickUpConfig{
-			WebhookSecret: os.Getenv("CLICKUP_WEBHOOK_SECRET"),
+			APIKey:        os.Getenv("CLICKUP_API"),
+			PublicBaseURL: os.Getenv("PUBLIC_BASE_URL"),
 		},
 		LLM: LLMConfig{
 			DefaultProvider: getEnv("LLM_DEFAULT_PROVIDER", "anthropic"),

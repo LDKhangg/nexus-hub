@@ -33,13 +33,12 @@ func main() {
 	}
 	debounceManage := relay.NewDebounceManage(cfg.Relay.DebounceWindow, cfg.Relay.MaxWait, onFlush)
 
-	if cfg.ClickUp.WebhookSecret == "" {
-		log.Println("[WARN] CLICKUP_WEBHOOK_SECRET trống: KHÔNG verify chữ ký webhook ClickUp (chỉ dùng cho dev)")
-	}
+	log.Println("[WARN] devmode not have public_base_url,clickup_api_key")
 	factory := httpdelivery.NewWebhookFactory()
-	factory.Register(domain.SourceClickup, clickup.NewClickUpParser(cfg.ClickUp.WebhookSecret))
-
-	wbHandler := httpdelivery.NewWebhookHandler(factory, debounceManage)
+	// TODO(F): lấy wh secret và selfUserID từ clickup lúc khởi động
+	factory.Register(domain.SourceClickup, clickup.NewClickUpParser("", ""))
+	ingestor := relay.NewIngestor(debounceManage)
+	wbHandler := httpdelivery.NewWebhookHandler(factory, ingestor)
 	e.POST("/webhook/:source", wbHandler.HandleWebhook)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -59,7 +58,6 @@ func main() {
 	if err := e.Shutdown(shutdownCtx); err != nil {
 		log.Printf("Shutdown lỗi: %v", err)
 	}
-	// Server đã ngừng nhận request: flush nốt các event đang chờ trong debounce window.
 	debounceManage.FlushAll()
 	log.Println("Đã shutdown xong")
 }
