@@ -1,4 +1,4 @@
-.PHONY: all run build tidy clean test
+.PHONY: all run build tidy clean test migration-create generate
 
 all: tidy build
 
@@ -16,3 +16,10 @@ clean:
 
 test:
 	go test -v ./...
+
+migration-create:
+	@test -n "$(name)" || (echo "Usage: make migration-create name=create_hub_threads"; exit 1)
+	goose -dir db/migrations -s create "$(name)" sql
+
+generate:
+	sqlc generate
