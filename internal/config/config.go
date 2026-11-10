@@ -11,6 +11,7 @@ type Config struct {
 	Relay   RelayConfig
 	ClickUp ClickUpConfig
 	LLM     LLMConfig
+	DB      DatabaseConfig
 }
 
 type ServerConfig struct {
@@ -27,6 +28,10 @@ type RelayConfig struct {
 type ClickUpConfig struct {
 	APIKey        string
 	PublicBaseURL string
+}
+
+type DatabaseConfig struct {
+	DatabaseURL string
 }
 
 func Load() Config {
@@ -54,6 +59,9 @@ func Load() Config {
 				MaxRetries:       getInt("ANTHROPIC_MAX_RETRIES", 2),
 				BaseURL:          os.Getenv("ANTHROPIC_BASE_URL"),
 			},
+		},
+		DB: DatabaseConfig{
+			DatabaseURL: os.Getenv("DATABASE_URL"),
 		},
 	}
 }

@@ -36,3 +36,91 @@ func (q *Queries) CreateWorkspace(ctx context.Context, arg CreateWorkspaceParams
 	)
 	return i, err
 }
+
+const deleteWorkspace = `-- name: DeleteWorkspace :one
+DELETE FROM public.workspaces WHERE id = $1 RETURNING id
+`
+
+func (q *Queries) DeleteWorkspace(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, deleteWorkspace, id)
+	var id_2 pgtype.UUID
+	err := row.Scan(&id_2)
+	return id_2, err
+}
+
+const getWorkspaceByID = `-- name: GetWorkspaceByID :one
+SELECT id,display_name, created_at, updated_at
+FROM public.workspaces ws
+WHERE ws.id = $1
+`
+
+func (q *Queries) GetWorkspaceByID(ctx context.Context, id pgtype.UUID) (Workspace, error) {
+	row := q.db.QueryRow(ctx, getWorkspaceByID, id)
+	var i Workspace
+	err := row.Scan(
+		&i.ID,
+		&i.DisplayName,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const listWorkspaces = `-- name: ListWorkspaces :many
+SELECT  id, display_name, created_at, updated_at
+FROM public.workspaces
+ORDER BY updated_at DESC, id DESC
+LIMIT $1 OFFSET $2
+`
+
+type ListWorkspacesParams struct {
+	Limit  int32
+	Offset int32
+}
+
+func (q *Queries) ListWorkspaces(ctx context.Context, arg ListWorkspacesParams) ([]Workspace, error) {
+	rows, err := q.db.Query(ctx, listWorkspaces, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Workspace
+	for rows.Next() {
+		var i Workspace
+		if err := rows.Scan(
+			&i.ID,
+			&i.DisplayName,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const updateWorkspace = `-- name: UpdateWorkspace :one
+UPDATE public.workspaces SET display_name = $2, updated_at = now()
+WHERE id = $1 RETURNING id, display_name, created_at, updated_at
+`
+
+type UpdateWorkspaceParams struct {
+	ID          pgtype.UUID
+	DisplayName string
+}
+
+func (q *Queries) UpdateWorkspace(ctx context.Context, arg UpdateWorkspaceParams) (Workspace, error) {
+	row := q.db.QueryRow(ctx, updateWorkspace, arg.ID, arg.DisplayName)
+	var i Workspace
+	err := row.Scan(
+		&i.ID,
+		&i.DisplayName,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}

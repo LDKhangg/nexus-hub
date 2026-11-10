@@ -8,6 +8,7 @@ import (
 
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
+	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/labstack/echo/v4"
 )
 
@@ -18,10 +19,11 @@ const maxBodyBytes = 1 << 20
 type WebhookHandler struct {
 	parserFactory *WebhookFactory
 	ingestor      *relay.Ingestor
+	integrations  WebhookIntegrationLookup
 }
 
-func NewWebhookHandler(parserFactory *WebhookFactory, ingestor *relay.Ingestor) *WebhookHandler {
-	return &WebhookHandler{parserFactory: parserFactory, ingestor: ingestor}
+func NewWebhookHandler(parserFactory *WebhookFactory, ingestor *relay.Ingestor, integration WebhookIntegrationLookup) *WebhookHandler {
+	return &WebhookHandler{parserFactory: parserFactory, ingestor: ingestor, integrations: integration}
 }
 
 func (h *WebhookHandler) HandleWebhook(c echo.Context) error {
@@ -59,4 +61,10 @@ func (h *WebhookHandler) HandleWebhook(c echo.Context) error {
 
 	h.ingestor.Push(ctx, event)
 	return c.JSON(http.StatusOK, map[string]string{"status": "queued"})
+}
+
+type WebhookIntegrationLookup interface {
+	LookupWebhookIntegration(
+		ctx context.Context, id string,
+	) (tenant.WebhookIntegration, error)
 }

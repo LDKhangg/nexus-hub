@@ -1,6 +1,9 @@
 package tenant
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // Workspace is the tenant boundary for integrations, threads and their data.
 type Workspace struct {
@@ -10,3 +13,7 @@ type Workspace struct {
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
+
+var ErrWorkspaceNotFound = errors.New(
+	"workspace not found",
+)

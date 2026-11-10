@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/sources/clickup"
+	"github.com/LDKhangg/nexus-hub/internal/adapters/storage"
 	"github.com/LDKhangg/nexus-hub/internal/config"
 	httpdelivery "github.com/LDKhangg/nexus-hub/internal/delivery/http"
 	"github.com/LDKhangg/nexus-hub/internal/domain"
@@ -20,6 +22,21 @@ import (
 
 func main() {
 	cfg := config.Load()
+
+	startupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	dbpool, err := storage.NewPostgresPool(startupCtx, cfg.DB.DatabaseURL)
+	cancel()
+
+	if err != nil {
+		log.Printf("Khong the kohi dong sever : %v", err)
+		return
+	}
+	defer dbpool.Close()
+	integrations, err := storage.NewIntegrationRepository(dbpool)
+	if err != nil {
+		log.Printf("initialize integration repository: %v", err)
+		return
+	}
 
 	e := echo.New()
 	e.HideBanner = true
@@ -38,7 +55,7 @@ func main() {
 	// TODO(F): lấy wh secret và selfUserID từ clickup lúc khởi động
 	factory.Register(domain.SourceClickup, clickup.NewClickUpParser("", ""))
 	ingestor := relay.NewIngestor(debounceManage)
-	wbHandler := httpdelivery.NewWebhookHandler(factory, ingestor)
+	wbHandler := httpdelivery.NewWebhookHandler(factory, ingestor, integrations)
 	e.POST("/webhook/:source", wbHandler.HandleWebhook)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
