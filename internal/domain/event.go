@@ -26,18 +26,20 @@ const (
 var ErrIgnoredEvent = errors.New("event ignored")
 
 type NormalizedEvent struct {
-	WorkspaceID   string            `json:"workspace_id"`
-	IntegrationID string            `json:"integration_id"`
-	Source        ChannelSource     `json:"source"`
-	EventType     EventType         `json:"event_type"`
-	ExternalID    string            `json:"external_id"`
-	Title         string            `json:"title"`
-	SenderID      string            `json:"sender_id"`
-	SenderName    string            `json:"sender_name"`
-	Content       string            `json:"content"`
-	Metadata      map[string]string `json:"metadata"`
-	OccurredAt    time.Time         `json:"occurred_at"`
-	FromOwnBot    bool              `json:"from_own_bot"`
+	EventKey          string            `json:"event_key"`
+	ExternalMessageID string            `json:"external_message_id"`
+	WorkspaceID       string            `json:"workspace_id"`
+	IntegrationID     string            `json:"integration_id"`
+	Source            ChannelSource     `json:"source"`
+	EventType         EventType         `json:"event_type"`
+	ExternalID        string            `json:"external_id"`
+	Title             string            `json:"title"`
+	SenderID          string            `json:"sender_id"`
+	SenderName        string            `json:"sender_name"`
+	Content           string            `json:"content"`
+	Metadata          map[string]string `json:"metadata"`
+	OccurredAt        time.Time         `json:"occurred_at"`
+	FromOwnBot        bool              `json:"from_own_bot"`
 }
 
 func (e NormalizedEvent) DebounceKey() string {

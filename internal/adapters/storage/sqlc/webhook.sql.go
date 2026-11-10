@@ -12,7 +12,7 @@ import (
 )
 
 const lookupWebhookIntegration = `-- name: LookupWebhookIntegration :one
-SELECT id, workspace_id, platform, role, is_enabled
+SELECT id, workspace_id, platform, role, is_enabled, config
 FROM public.integrations
 WHERE id = $1
 `
@@ -23,6 +23,7 @@ type LookupWebhookIntegrationRow struct {
 	Platform    string
 	Role        string
 	IsEnabled   bool
+	Config      []byte
 }
 
 func (q *Queries) LookupWebhookIntegration(ctx context.Context, id pgtype.UUID) (LookupWebhookIntegrationRow, error) {
@@ -34,6 +35,7 @@ func (q *Queries) LookupWebhookIntegration(ctx context.Context, id pgtype.UUID) 
 		&i.Platform,
 		&i.Role,
 		&i.IsEnabled,
+		&i.Config,
 	)
 	return i, err
 }

@@ -134,11 +134,16 @@ func (r *IntegrationRepository) LookupWebhookIntegration(
 			tenant.ErrIntegrationNotFound,
 		)
 	}
+	var config map[string]any
+	if err := json.Unmarshal(row.Config, &config); err != nil {
+		return tenant.WebhookIntegration{}, fmt.Errorf("decode webhook config: %w", err)
+	}
 	return tenant.WebhookIntegration{
 		ID:          row.ID.String(),
 		WorkspaceID: row.WorkspaceID.String(),
 		Platform:    row.Platform,
 		Role:        tenant.IntegrationRole(row.Role),
 		IsEnabled:   row.IsEnabled,
+		Config:      config,
 	}, nil
 }

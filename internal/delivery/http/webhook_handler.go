@@ -12,59 +12,87 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-// maxBodyBytes là chốt chặn thứ hai, ngoài middleware BodyLimit ở main.
 const maxBodyBytes = 1 << 20
 
-// WebhookHandler là tầng controller: nhận request -> chọn parser theo source -> đẩy vào debouncer.
-type WebhookHandler struct {
-	parserFactory *WebhookFactory
-	ingestor      *relay.Ingestor
-	integrations  WebhookIntegrationLookup
+type WebhookIntegrationLookup interface {
+	LookupWebhookIntegration(context.Context, string) (tenant.WebhookIntegration, error)
 }
 
-func NewWebhookHandler(parserFactory *WebhookFactory, ingestor *relay.Ingestor, integration WebhookIntegrationLookup) *WebhookHandler {
-	return &WebhookHandler{parserFactory: parserFactory, ingestor: ingestor, integrations: integration}
+type WebhookHandler struct {
+	integrations WebhookIntegrationLookup
+	parsers      VerifiedParserFactory
+	acceptor     relay.NoticeAcceptor
+}
+
+func NewWebhookHandler(integrations WebhookIntegrationLookup, parsers VerifiedParserFactory, acceptor relay.NoticeAcceptor) *WebhookHandler {
+	return &WebhookHandler{integrations: integrations, parsers: parsers, acceptor: acceptor}
 }
 
 func (h *WebhookHandler) HandleWebhook(c echo.Context) error {
-	// Event được flush sau khi request kết thúc, nên bỏ cancel của request.
-	ctx := context.WithoutCancel(c.Request().Context())
-
-	source := domain.ChannelSource(c.Param("source"))
-	parser, err := h.parserFactory.GetParser(source)
+	respond := func(code int, message string) error { return c.JSON(code, map[string]string{"error": message}) }
+	id := c.Param("integrationID")
+	if !tenant.ValidUUID(id) {
+		return respond(http.StatusBadRequest, "invalid integration")
+	}
+	if c.Param("source") != "clickup" {
+		return respond(http.StatusNotFound, "unknown integration")
+	}
+	ctx := c.Request().Context()
+	integration, err := h.integrations.LookupWebhookIntegration(ctx, id)
+	if errors.Is(err, tenant.ErrIntegrationNotFound) {
+		return respond(http.StatusNotFound, "unknown integration")
+	}
 	if err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "unsupported source"})
+		return respond(http.StatusServiceUnavailable, "service unavailable")
 	}
-
-	rawBody, err := io.ReadAll(io.LimitReader(c.Request().Body, maxBodyBytes+1))
+	if tenant.ValidateClickUpSource(integration) != nil {
+		return respond(http.StatusNotFound, "unknown integration")
+	}
+	cfg, err := tenant.ParseClickUpNoticeConfig(integration.Config)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return respond(http.StatusServiceUnavailable, "service unavailable")
 	}
-	if len(rawBody) > maxBodyBytes {
-		return c.JSON(http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+	parser, err := h.parsers.ForIntegration(integration)
+	if err != nil {
+		return respond(http.StatusServiceUnavailable, "service unavailable")
 	}
-
-	if v, ok := parser.(SignatureVerifier); ok {
-		if err := v.Verify(c.Request().Header, rawBody); err != nil {
-			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid signature"})
+	raw, err := io.ReadAll(io.LimitReader(c.Request().Body, maxBodyBytes+1))
+	if err != nil {
+		if errors.Is(err, echo.ErrStatusRequestEntityTooLarge) {
+			return respond(http.StatusRequestEntityTooLarge, "body too large")
 		}
+		return respond(http.StatusBadRequest, "invalid body")
 	}
-
-	event, err := parser.Parser(rawBody)
+	if len(raw) > maxBodyBytes {
+		return respond(http.StatusRequestEntityTooLarge, "body too large")
+	}
+	if parser.Verify(c.Request().Header, raw) != nil {
+		return respond(http.StatusUnauthorized, "invalid signature")
+	}
+	events, err := parser.Parser(raw)
 	if errors.Is(err, domain.ErrIgnoredEvent) {
 		return c.JSON(http.StatusOK, map[string]string{"status": "ignored"})
 	}
 	if err != nil {
-		c.Logger().Warnf("parse %s webhook: %v", source, err)
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "failed to parse event"})
+		return respond(http.StatusBadRequest, "invalid event")
 	}
-
-	h.ingestor.Push(ctx, event)
-	return c.JSON(http.StatusOK, map[string]string{"status": "queued"})
-}
-
-type WebhookIntegrationLookup interface {
-	LookupWebhookIntegration(
-		ctx context.Context, id string,
-	) (tenant.WebhookIntegration, error)
+	for i := range events {
+		if events[i].Metadata["webhook_id"] != cfg.WebhookID {
+			return respond(http.StatusUnauthorized, "invalid signature")
+		}
+		events[i].WorkspaceID = integration.WorkspaceID
+		events[i].IntegrationID = integration.ID
+	}
+	result, err := h.acceptor.Accept(ctx, events)
+	if err != nil {
+		return respond(http.StatusServiceUnavailable, "service unavailable")
+	}
+	status := "queued"
+	if result.Accepted == 0 {
+		status = "ignored"
+		if result.Duplicates > 0 {
+			status = "duplicate"
+		}
+	}
+	return c.JSON(http.StatusOK, map[string]any{"status": status, "accepted": result.Accepted, "duplicates": result.Duplicates, "ignored": result.Ignored})
 }

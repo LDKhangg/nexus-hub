@@ -6,4 +6,5 @@ type WebhookIntegration struct {
 	Platform    string
 	Role        IntegrationRole
 	IsEnabled   bool
+	Config      map[string]any
 }

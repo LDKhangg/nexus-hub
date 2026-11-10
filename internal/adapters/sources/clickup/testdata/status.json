@@ -1,0 +1,1 @@
+{"webhook_id":"w1","event":"taskStatusUpdated","task_id":"t1","history_items":[{"id":"h1","field":"status","date":"1700000000000","user":{"id":7,"username":"Author"},"before":{"status":"open"},"after":{"status":"in progress"}},{"id":"h2","field":"status","date":"1700000001000","before":null,"after":{"status":"closed"}}]}

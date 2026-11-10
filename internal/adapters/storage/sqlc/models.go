@@ -54,6 +54,27 @@ type MessageLog struct {
 	Metadata   []byte
 }
 
+// Backend-only durable notices. Claims are fenced; ambiguous remote delivery can duplicate.
+type NotificationOutbox struct {
+	ID                  int64
+	WorkspaceID         pgtype.UUID
+	SourceIntegrationID pgtype.UUID
+	TargetIntegrationID pgtype.UUID
+	EventKey            string
+	Event               []byte
+	MessageID           int64
+	Status              string
+	Attempts            int32
+	NextAttemptAt       pgtype.Timestamptz
+	LockedUntil         pgtype.Timestamptz
+	ClaimToken          pgtype.UUID
+	TelegramMessageID   pgtype.Int8
+	LastErrorCode       pgtype.Text
+	CreatedAt           pgtype.Timestamptz
+	UpdatedAt           pgtype.Timestamptz
+	SentAt              pgtype.Timestamptz
+}
+
 // Explicit same-workspace related-to links. A link neither authorizes access nor automatically merges context. Metadata may record the confirmed URL or human decision.
 type ThreadLink struct {
 	WorkspaceID    pgtype.UUID

@@ -1,0 +1,1 @@
+{"webhook_id":"w1","event":"taskCommentPosted","task_id":"t1","history_items":[{"id":"h1","field":"comment","date":"1700000000000","comment":{"id":"c1","text_content":"Xin chào 👋","user":{"id":7,"username":"Author"}}},{"id":"h2","field":"comment","date":"1700000001000","comment":{"id":"c2","text_content":"Second comment"}}]}

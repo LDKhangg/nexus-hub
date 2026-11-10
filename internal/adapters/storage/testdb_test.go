@@ -74,13 +74,19 @@ func testDB(t *testing.T) (context.Context, *pgxpool.Pool) {
 	}
 	t.Cleanup(pool.Close)
 	_, file, _, _ := runtime.Caller(0)
-	migration, err := os.ReadFile(filepath.Join(filepath.Dir(file), "../../../db/migrations/00001_create_hub_threads.sql"))
+	files, err := filepath.Glob(filepath.Join(filepath.Dir(file), "../../../db/migrations/*.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	up, _, _ := strings.Cut(string(migration), "-- +goose Down")
-	if _, err := pool.Exec(ctx, up); err != nil {
-		t.Fatal(err)
+	for _, path := range files {
+		migration, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		up, _, _ := strings.Cut(string(migration), "-- +goose Down")
+		if _, err := pool.Exec(ctx, up); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return ctx, pool
 }
