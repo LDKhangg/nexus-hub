@@ -106,26 +106,15 @@ Comment ClickUp
 
 **Kiểm chứng cuối:** `goose validate`, `make generate` chạy 2 lần không đổi, `gofmt`, `go vet`, `go test -race ./...` với PostgreSQL thật. Yêu cầu 0 skip.
 
-## 8. Câu hỏi còn mở (cần trả lời trước hoặc khi bắt đầu triển khai)
+## 8. Hạng mục để sau
 
-**Chiều ngược lại: ra lệnh từ Telegram**, ví dụ "đăng *bai bai mọi người* lên channel general". Plan hiện **chưa** hỗ trợ việc này. Nếu thêm vào Phase 2, cần:
-
-- Telegram long-poll, chỉ nhận lệnh từ `owner_user_ids` trong đúng nhóm đã cấu hình.
-- Mỗi lệnh thành một agent job, chạy Tier-2 với các tool đã cấp quyền và báo kết quả về Telegram.
-- Tool ghi mới, ví dụ `clickup_chat_post`: chỉ đăng vào channel có trong allowlist, ngân sách ghi, dry-run, sanitizer.
-
-Cần user quyết định:
-
-1. Có thêm phần này vào Phase 2 không?
-2. Bot đăng luôn rồi báo lại, hay phải gõ "ok" sau khi xem dry-run?
-3. "Channel general" nằm ở đâu: ClickUp Chat, Telegram, Slack...?
-
-## 9. Hạng mục để sau
-
-- **Phase 3:** nghiệm thu thật (cần một task ClickUp được phép dùng để test), review độc lập.
+- **Phase 3:**
+  - Nghiệm thu thật. Cần một task ClickUp được phép dùng để test.
+  - Review độc lập.
+  - Chiều ngược lại: owner ra lệnh từ Telegram, ví dụ "đăng *bai bai mọi người* lên channel general". Phần này gồm Telegram long-poll chỉ nhận lệnh từ owner, mỗi lệnh thành một agent job, và tool đăng tin lên channel có allowlist. Đến Phase 3 sẽ chốt ba điểm: bot đăng ngay hay chờ owner gõ "ok" sau khi xem dry-run, channel nằm trên nền tảng nào, và có cho phép `@mention` hay không.
 - **Các phase sau:** reply/duyệt bằng nút Telegram, AI comment lên ClickUp, Auto-Pilot, GitHub làm nguồn webhook, agent tự `git fetch`, agent sửa code, pgvector RAG, BYOI/mã hoá credential, nhiều provider LLM, deploy VPS.
 
-## 10. Lưu ý môi trường
+## 9. Lưu ý môi trường
 
 - Trong shell có các alias nguy hiểm: `git`→`lgtm`, `ss`→`git stash save --include-untracked`, `cp`→`git cherry-pick`, `mv`→`git merge`, `wc`→`git clean --dry-run`, `cat`→`bat`, `ls`→`eza`. Khi chạy script luôn dùng `command <tên lệnh>`.
 - PostgreSQL local của app: container `nexus-phase1-postgres` (127.0.0.1:5433, DB `nexus_hub_dev`, đã migrate tới version 2). Bản ghi định tuyến Phase 1 đã tạo sẵn:
