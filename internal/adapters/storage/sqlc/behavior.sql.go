@@ -128,6 +128,29 @@ func (q *Queries) CancelPendingBehaviorRun(ctx context.Context, arg CancelPendin
 	return result.RowsAffected(), nil
 }
 
+const claimBehaviorMessage = `-- name: ClaimBehaviorMessage :one
+
+INSERT INTO public.behavior_messages(workspace_id, run_id, msg_key)
+VALUES ($1, $2, $3)
+ON CONFLICT (run_id, msg_key) DO NOTHING
+RETURNING id
+`
+
+type ClaimBehaviorMessageParams struct {
+	WorkspaceID pgtype.UUID
+	RunID       int64
+	MsgKey      string
+}
+
+// Engine Telegram messages.
+// Claims a message key of a run once; a repeat returns no row.
+func (q *Queries) ClaimBehaviorMessage(ctx context.Context, arg ClaimBehaviorMessageParams) (int64, error) {
+	row := q.db.QueryRow(ctx, claimBehaviorMessage, arg.WorkspaceID, arg.RunID, arg.MsgKey)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
 const claimBehaviorRunByID = `-- name: ClaimBehaviorRunByID :one
 UPDATE public.behavior_runs AS r SET status = 'running', attempts = r.attempts + 1,
   claim_token = $1::uuid,
@@ -688,6 +711,32 @@ func (q *Queries) GetBehaviorByName(ctx context.Context, arg GetBehaviorByNamePa
 		&i.DraftSource,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getBehaviorMessage = `-- name: GetBehaviorMessage :one
+SELECT id, workspace_id, run_id, msg_key, telegram_message_id, created_at, sent_at FROM public.behavior_messages
+WHERE workspace_id = $1 AND run_id = $2 AND msg_key = $3
+`
+
+type GetBehaviorMessageParams struct {
+	WorkspaceID pgtype.UUID
+	RunID       int64
+	MsgKey      string
+}
+
+func (q *Queries) GetBehaviorMessage(ctx context.Context, arg GetBehaviorMessageParams) (BehaviorMessage, error) {
+	row := q.db.QueryRow(ctx, getBehaviorMessage, arg.WorkspaceID, arg.RunID, arg.MsgKey)
+	var i BehaviorMessage
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.RunID,
+		&i.MsgKey,
+		&i.TelegramMessageID,
+		&i.CreatedAt,
+		&i.SentAt,
 	)
 	return i, err
 }
@@ -1653,6 +1702,28 @@ func (q *Queries) RateRunItem(ctx context.Context, arg RateRunItemParams) (int64
 	return result.RowsAffected(), nil
 }
 
+const releaseBehaviorMessage = `-- name: ReleaseBehaviorMessage :execrows
+DELETE FROM public.behavior_messages
+WHERE workspace_id = $1 AND run_id = $2 AND msg_key = $3
+  AND telegram_message_id IS NULL
+`
+
+type ReleaseBehaviorMessageParams struct {
+	WorkspaceID pgtype.UUID
+	RunID       int64
+	MsgKey      string
+}
+
+// Drops a claim whose send failed before Telegram took it, so a retry may
+// send again. A recorded message is never released.
+func (q *Queries) ReleaseBehaviorMessage(ctx context.Context, arg ReleaseBehaviorMessageParams) (int64, error) {
+	result, err := q.db.Exec(ctx, releaseBehaviorMessage, arg.WorkspaceID, arg.RunID, arg.MsgKey)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const retryBehaviorRun = `-- name: RetryBehaviorRun :execrows
 UPDATE public.behavior_runs SET status = 'pending', run_at = $1::timestamptz, claim_token = NULL,
   locked_until = NULL, error_code = $2::text, updated_at = now()
@@ -1808,6 +1879,32 @@ type SetApprovalReplyMessageParams struct {
 // Free-text mode: only an open approval takes a reply message.
 func (q *Queries) SetApprovalReplyMessage(ctx context.Context, arg SetApprovalReplyMessageParams) (int64, error) {
 	result, err := q.db.Exec(ctx, setApprovalReplyMessage, arg.MessageID, arg.WorkspaceID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const setBehaviorMessageSent = `-- name: SetBehaviorMessageSent :execrows
+UPDATE public.behavior_messages SET telegram_message_id = $1::bigint, sent_at = now()
+WHERE workspace_id = $2 AND run_id = $3 AND msg_key = $4
+  AND telegram_message_id IS NULL
+`
+
+type SetBehaviorMessageSentParams struct {
+	MessageID   int64
+	WorkspaceID pgtype.UUID
+	RunID       int64
+	MsgKey      string
+}
+
+func (q *Queries) SetBehaviorMessageSent(ctx context.Context, arg SetBehaviorMessageSentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setBehaviorMessageSent,
+		arg.MessageID,
+		arg.WorkspaceID,
+		arg.RunID,
+		arg.MsgKey,
+	)
 	if err != nil {
 		return 0, err
 	}

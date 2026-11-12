@@ -93,6 +93,12 @@ const (
 	ApprovalItemAnswer    ApprovalKind = "item_answer"
 	ApprovalPostDraft     ApprovalKind = "post_draft"
 	ApprovalConfirmAction ApprovalKind = "confirm_action"
+	// ApprovalFeedback is the handle of the 👍/👎 buttons on a message that
+	// decides nothing (a digest or FYI about one item).
+	ApprovalFeedback ApprovalKind = "feedback"
+	// ApprovalFeedbackReason waits for the owner's optional free-text reason
+	// for a 👎.
+	ApprovalFeedbackReason ApprovalKind = "feedback_reason"
 )
 
 // Decision is an approval's outcome.

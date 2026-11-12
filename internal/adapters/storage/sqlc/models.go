@@ -74,6 +74,17 @@ type Behavior struct {
 	UpdatedAt   pgtype.Timestamptz
 }
 
+// One row per engine Telegram message of a run; holds identifiers only, never message text.
+type BehaviorMessage struct {
+	ID                int64
+	WorkspaceID       pgtype.UUID
+	RunID             int64
+	MsgKey            string
+	TelegramMessageID pgtype.Int8
+	CreatedAt         pgtype.Timestamptz
+	SentAt            pgtype.Timestamptz
+}
+
 type BehaviorRun struct {
 	ID                int64
 	WorkspaceID       pgtype.UUID

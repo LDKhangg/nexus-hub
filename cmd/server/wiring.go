@@ -74,6 +74,9 @@ func buildTools(s settings.Settings, resolver *secrets.Resolver, redactor *agent
 	all = append(all, githubtools.NewWriteTools(gh, redactor)...)
 	all = append(all, githubtools.NewDangerousTools(gh, redactor)...)
 	all = append(all, clickuptools.NewTaskTool(apiClient, resolver))
+	// ClickUp writes of the behavior action library: tier write, not repo
+	// scoped, so agent jobs can never call them (no repo grant allows them).
+	all = append(all, clickuptools.NewWriteTools(apiClient, resolver)...)
 	if gitPath, err := resolveGit(s.GitPath); err != nil {
 		log.Print("git not found; code and workspace tools disabled")
 	} else if runner, err := execrunner.New(gitPath, s.TmpDir); err != nil {
@@ -137,26 +140,87 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider}, nil
 }
 
-// buildRunWorker wires the behavior run executor: the shared tool registry
-// and LLM client, a tool-run audit scoped to behavior runs, and the
-// workspace's ClickUp source agent config as the run's grants. The action
-// library (dispatcher) and the Telegram failure notice come later; until
-// then items stay drafted and failures are logged by code.
-func buildRunWorker(pool *pgxpool.Pool, s settings.Settings, store *storage.BehaviorStore, integrations *storage.IntegrationRepository, ag agentServices, redactor *agent.Redactor) (*behavior.RunWorker, error) {
+// buildBehaviorEngine wires the behavior run executor and the action
+// library: the shared tool registry and LLM client, one tool-run audit
+// scoped to behavior runs (reads and action writes), the workspace's
+// ClickUp source agent config as the run's grants and credential, and the
+// owner's Telegram chat. The action engine is the run worker's dispatcher
+// and failure notifier, the inbox's callback handler and undoer, and a
+// service worker of its own (the approval expiry sweep).
+func buildBehaviorEngine(pool *pgxpool.Pool, s settings.Settings, store *storage.BehaviorStore, integrations *storage.IntegrationRepository, ag agentServices, redactor *agent.Redactor, resolver *secrets.Resolver, messenger behavior.Messenger) (*behavior.RunWorker, *behavior.Engine, error) {
 	audit, err := storage.NewBehaviorToolRunStore(pool)
 	if err != nil {
-		return nil, errors.New("behavior tool run store startup failed")
+		return nil, nil, errors.New("behavior tool run store startup failed")
 	}
-	return behavior.NewRunWorker(behavior.RunWorkerDeps{
+	policies := behaviorPolicies{integrations: integrations, known: ag.known}
+	engine, err := behavior.NewEngine(behavior.ActionDeps{
+		Store: store, Defs: store, Profiles: store, Policies: policies,
+		Tasks:     taskReader{r: clickuptools.NewTaskReader(netguard.Client(s.ToolTimeout, netguard.DefaultHosts), resolver)},
+		Chats:     ownerChats{integrations: integrations, ownerChatID: s.OwnerTelegramChatID},
+		Messenger: messenger,
+		Callers:   behavior.ActionExecutorFactory(ag.reg, audit, redactor, ag.limits),
+		Redactor:  redactor,
+	}, behavior.ActionSettings{OwnerClickUpUserID: s.OwnerClickUpUserID, RequestTimeout: s.NoticeRequestTimeout})
+	if err != nil {
+		return nil, nil, errors.New("behavior action engine startup failed")
+	}
+	runs := behavior.NewRunWorker(behavior.RunWorkerDeps{
 		Runs: store, Defs: store, Profiles: store,
-		Policies: behaviorPolicies{integrations: integrations, known: ag.known},
-		Models:   ag.provider,
-		Callers:  behavior.ExecutorFactory(ag.reg, audit, redactor, ag.limits),
-		Redactor: redactor,
+		Policies:   policies,
+		Models:     ag.provider,
+		Callers:    behavior.ExecutorFactory(ag.reg, audit, redactor, ag.limits),
+		Dispatcher: engine,
+		Notifier:   engine,
+		Redactor:   redactor,
 	}, behavior.RunWorkerSettings{
 		Workers: int(s.BehaviorWorkers), PollInterval: s.BehaviorPollInterval,
 		DefaultModel: s.ActorModel, DefaultMaxTokens: int(s.BehaviorMaxTokens), MaxOutputTokens: int(s.MaxOutputTokens),
-	}), nil
+	})
+	return runs, engine, nil
+}
+
+// taskReader adapts the ClickUp exact task reader to the engine.
+type taskReader struct{ r *clickuptools.TaskReader }
+
+func (t taskReader) ReadTask(ctx context.Context, workspaceID, tokenRef, taskID string) (behavior.TaskState, error) {
+	st, err := t.r.ReadTask(ctx, workspaceID, tokenRef, taskID)
+	if err != nil {
+		return behavior.TaskState{}, err
+	}
+	return behavior.TaskState{ID: st.ID, Status: st.Status, AssigneeIDs: st.AssigneeIDs, Description: st.Description, Markdown: st.Markdown}, nil
+}
+
+// ownerChats reaches the owner: through the bot and chat a Telegram command
+// came from, otherwise through the workspace's first enabled Telegram
+// control integration and the owner_telegram_chat_id setting.
+type ownerChats struct {
+	integrations *storage.IntegrationRepository
+	ownerChatID  int64
+}
+
+func telegramControl(in tenant.Integration) bool {
+	return in.IsEnabled && in.Platform == "telegram" && (in.Role == tenant.IntegrationRoleControl || in.Role == tenant.IntegrationRoleBoth)
+}
+
+func (o ownerChats) OwnerChat(ctx context.Context, workspaceID string, t behavior.TriggerData) (behavior.ChatRef, error) {
+	if t.TelegramChatID != 0 && t.IntegrationID != "" {
+		if in, err := o.integrations.Get(ctx, workspaceID, t.IntegrationID); err == nil && telegramControl(in) {
+			return behavior.ChatRef{WorkspaceID: workspaceID, IntegrationID: in.ID, ChatID: t.TelegramChatID}, nil
+		}
+	}
+	if o.ownerChatID == 0 {
+		return behavior.ChatRef{}, errors.New("owner_telegram_chat_id is not set")
+	}
+	list, err := o.integrations.List(ctx, workspaceID, 100, 0)
+	if err != nil {
+		return behavior.ChatRef{}, err
+	}
+	for _, in := range list {
+		if telegramControl(in) {
+			return behavior.ChatRef{WorkspaceID: workspaceID, IntegrationID: in.ID, ChatID: o.ownerChatID}, nil
+		}
+	}
+	return behavior.ChatRef{}, errors.New("no Telegram control integration in workspace")
 }
 
 // behaviorPolicies finds a run's grants: the agent config of the ClickUp

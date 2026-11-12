@@ -333,3 +333,28 @@ LEFT JOIN public.run_items i ON i.workspace_id = r.workspace_id AND i.run_id = r
 WHERE v.workspace_id = sqlc.arg(workspace_id) AND v.behavior_id = sqlc.arg(behavior_id)
 GROUP BY v.id, v.version
 ORDER BY v.version;
+
+-- Engine Telegram messages.
+
+-- name: ClaimBehaviorMessage :one
+-- Claims a message key of a run once; a repeat returns no row.
+INSERT INTO public.behavior_messages(workspace_id, run_id, msg_key)
+VALUES (sqlc.arg(workspace_id), sqlc.arg(run_id), sqlc.arg(msg_key))
+ON CONFLICT (run_id, msg_key) DO NOTHING
+RETURNING id;
+
+-- name: GetBehaviorMessage :one
+SELECT * FROM public.behavior_messages
+WHERE workspace_id = sqlc.arg(workspace_id) AND run_id = sqlc.arg(run_id) AND msg_key = sqlc.arg(msg_key);
+
+-- name: SetBehaviorMessageSent :execrows
+UPDATE public.behavior_messages SET telegram_message_id = sqlc.arg(message_id)::bigint, sent_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND run_id = sqlc.arg(run_id) AND msg_key = sqlc.arg(msg_key)
+  AND telegram_message_id IS NULL;
+
+-- name: ReleaseBehaviorMessage :execrows
+-- Drops a claim whose send failed before Telegram took it, so a retry may
+-- send again. A recorded message is never released.
+DELETE FROM public.behavior_messages
+WHERE workspace_id = sqlc.arg(workspace_id) AND run_id = sqlc.arg(run_id) AND msg_key = sqlc.arg(msg_key)
+  AND telegram_message_id IS NULL;

@@ -120,6 +120,12 @@ type Executor struct {
 	// IDs of another kind of run (for example behavior runs) never share
 	// keys with agent jobs of the same numeric ID. Empty keeps CanonicalKey.
 	KeyScope string
+	// UnscopedWrites names write-tier tools that are not repo scoped (for
+	// example ClickUp writes) and may run without a repo grant. Only the
+	// behavior engine's action library sets it, for the one action it runs;
+	// agent jobs never do, so their policy is unchanged. A listed tool must
+	// still be enabled, and pass budgets, audit and idempotency.
+	UnscopedWrites []string
 
 	mu           sync.Mutex
 	calls        int
@@ -231,7 +237,9 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 	}
 	start.Tier = tier
 	if tier != tenant.TierRead {
-		if call.Repo == nil || !slices.Contains(call.Repo.Allow, name) {
+		_, scoped := tool.(RepoScoped)
+		unscoped := !scoped && tier == tenant.TierWrite && slices.Contains(e.UnscopedWrites, name)
+		if !unscoped && (call.Repo == nil || !slices.Contains(call.Repo.Allow, name)) {
 			return e.deny(ctx, start, "tool_not_allowed")
 		}
 		if tier == tenant.TierDangerous && !e.allowDangerous {
