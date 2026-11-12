@@ -29,6 +29,23 @@ Lead and Implementer may only run these to prove the code compiles:
 `go vet` also compiles test files, so a production change that breaks a test's
 build is caught here.
 
+## CI
+
+`.github/workflows/ci.yml` runs on every push and PR: gofmt, `go vet`,
+`go build`, then the full suite with `-race` against a throwaway PostgreSQL
+(fakes only, no secrets). Go modules, the build cache and Docker layers are
+cached. Each run uploads `test-logs-<sha>` (test.log, test.json, junit.xml,
+kept 14 days) and writes failed/skipped tests, races and panics to the run
+summary. On `main` and `v*` tags it publishes `ghcr.io/<repo>` tagged with
+the short SHA (and `latest` on main). Deploying to the VPS is a later phase.
+
+- The Tester may report a CI run on the brief's head instead of a local run
+  (see `TESTER.md`).
+- The Lead may read CI results (`gh run view`, `gh run download`) to judge a
+  report; reading CI is not running tests. A red `check` job on a Lead or
+  Implementer commit is fixed before the Phase Brief.
+- Pushing a branch to trigger CI still needs the owner's OK.
+
 ## Loop
 
 1. **Plan.** The Lead writes `docs/superpowers/plans/<date>-<topic>.md`: a

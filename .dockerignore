@@ -1,0 +1,12 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+.superpowers
+.serena
+.obsidian
+.lgtm
+bin
+docs
+testdata

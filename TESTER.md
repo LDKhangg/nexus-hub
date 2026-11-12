@@ -97,6 +97,23 @@ set -o pipefail; . ./.superpowers/testdb.env && go test -race ./... -count=1 -v 
 Run it once. Do not rerun to get green. If something looks flaky, run that
 test once more with `-run '^TestX$' -count=5`, and report both results.
 
+**CI instead of a local run.** When the owner pushes the branch, GitHub
+Actions (`.github/workflows/ci.yml`) runs the same suite (`-race -count=1`,
+PostgreSQL 17 with `nexus_storage_test`) on every push. You may report that
+run instead of a local one: wait for it, then read it with
+
+```sh
+gh run list --branch <branch> --limit 3        # find the run for your head
+gh run view <run-id>                           # job results
+gh run download <run-id> -n test-logs-<head-sha> -D /tmp/nexus-ci
+```
+
+`test.log` is the full output, `test.json` the `go test -json` stream,
+`junit.xml` the per-test result. The run's summary page lists failed and
+skipped tests, races and panics. In the report, give the run URL and the
+head SHA it tested under "Anything unusual"; the head must equal the brief's
+head. A cancelled or errored CI run is `ERROR`, not `PASS`.
+
 ## Step 4: Test Report (send to the owner)
 
 Result values:
