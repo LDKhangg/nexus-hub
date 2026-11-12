@@ -28,6 +28,9 @@ const (
 	apiBase          = "https://api.clickup.com"
 	maxResponseBytes = 2 << 20
 	maxDescRunes     = 1500
+	// maxDescRunesLimit caps description_chars, the optional larger clip a
+	// caller with its own output budget (a behavior read) may ask for.
+	maxDescRunesLimit = 1 << 20
 )
 
 var taskIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -53,7 +56,7 @@ func (t *taskTool) Spec() tools.ToolSpec {
 	return tools.ToolSpec{
 		Name:        "clickup_get_task",
 		Description: "Fetch a ClickUp task: name, status, priority, assignees, due date, tags, URL and a clipped description.",
-		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"task_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,64}$"}},"required":["task_id"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"task_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,64}$"},"description_chars":{"type":"integer","minimum":1,"maximum":1048576}},"required":["task_id"]}`),
 		Tier:        tenant.TierRead,
 	}
 }
@@ -66,12 +69,20 @@ func toolErr(code string, retryable bool) error {
 
 func (t *taskTool) Run(ctx context.Context, c tools.Call) (tools.ToolOutput, error) {
 	var in struct {
-		TaskID string `json:"task_id"`
+		TaskID           string `json:"task_id"`
+		DescriptionChars *int   `json:"description_chars"`
 	}
 	dec := json.NewDecoder(bytes.NewReader(c.Input))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&in); err != nil || !taskIDRe.MatchString(in.TaskID) {
 		return tools.ToolOutput{}, toolErr("invalid_input", false)
+	}
+	descRunes := maxDescRunes
+	if in.DescriptionChars != nil {
+		if *in.DescriptionChars < 1 || *in.DescriptionChars > maxDescRunesLimit {
+			return tools.ToolOutput{}, toolErr("invalid_input", false)
+		}
+		descRunes = *in.DescriptionChars
 	}
 	if t.resolver == nil || c.ClickUpTokenRef == "" {
 		return tools.ToolOutput{}, toolErr("missing_credentials", false)
@@ -107,8 +118,12 @@ func (t *taskTool) Run(ctx context.Context, c tools.Call) (tools.ToolOutput, err
 		DueDate                    string `json:"due_date"`
 		Status                     struct{ Status string }
 		Priority                   *struct{ Priority string }
-		Assignees                  []struct{ Username string }
-		Tags                       []struct{ Name string }
+		Assignees                  []struct {
+			ID       any
+			Username string
+		}
+		Tags []struct{ Name string }
+		List *struct{ ID any }
 	}
 	if err := json.Unmarshal(data, &task); err != nil {
 		return tools.ToolOutput{}, toolErr("invalid_response", false)
@@ -128,19 +143,50 @@ func (t *taskTool) Run(ctx context.Context, c tools.Call) (tools.ToolOutput, err
 	if ms, err := strconv.ParseInt(task.DueDate, 10, 64); err == nil && ms > 0 {
 		due = time.UnixMilli(ms).UTC().Format("2006-01-02")
 	}
+	// The first two lines carry identifiers only (never task text), so a
+	// caller can check the list and assignees without trusting anything a
+	// task author wrote; the name is kept on one line.
+	listID := ""
+	if task.List != nil {
+		listID = idString(task.List.ID)
+	}
 	var sb strings.Builder
+	fmt.Fprintf(&sb, "list_id: %s\nassignee_ids: %s\n", listID,
+		names(len(task.Assignees), func(i int) string { return idString(task.Assignees[i].ID) }))
+	task.Name = strings.Join(strings.Fields(task.Name), " ")
 	fmt.Fprintf(&sb, "%s (%s)\nstatus: %s | priority: %s | due: %s\nassignees: %s\ntags: %s\n%s\n",
 		task.Name, task.ID, task.Status.Status, priority, due,
 		names(len(task.Assignees), func(i int) string { return task.Assignees[i].Username }),
 		names(len(task.Tags), func(i int) string { return task.Tags[i].Name }), task.URL)
 	if d := strings.TrimSpace(task.Description); d != "" {
 		r := []rune(d)
-		if len(r) > maxDescRunes {
-			d = string(r[:maxDescRunes]) + "…"
+		if len(r) > descRunes {
+			d = string(r[:descRunes]) + "…"
 		}
 		sb.WriteString("description:\n" + d)
 	}
 	return tools.ToolOutput{Text: sb.String(), Summary: "task " + task.ID + " " + task.Status.Status}, nil
+}
+
+// idString renders a ClickUp ID (a JSON number or string) and returns ""
+// for anything that is not a plain identifier.
+func idString(v any) string {
+	var s string
+	switch x := v.(type) {
+	case string:
+		s = x
+	case float64:
+		if x < 0 || x != float64(int64(x)) {
+			return ""
+		}
+		s = strconv.FormatInt(int64(x), 10)
+	default:
+		return ""
+	}
+	if !taskIDRe.MatchString(s) {
+		return ""
+	}
+	return s
 }
 
 func statusCode(s int) (string, bool, bool) {

@@ -27,4 +27,5 @@ type Store interface {
 var Kinds = map[string]bool{
 	"telegram_bot": true, "clickup_token": true, "clickup_webhook": true,
 	"github_pat": true, "github_app_key": true, "anthropic_key": true,
+	"telegram_webhook": true, // behavior.CredentialKindTelegramWebhook
 }

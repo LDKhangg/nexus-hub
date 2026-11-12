@@ -11,11 +11,32 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countBehaviorRunBudgetRuns = `-- name: CountBehaviorRunBudgetRuns :one
+SELECT COUNT(*)::int AS writes,
+       COUNT(*) FILTER (WHERE tier = 'dangerous')::int AS dangerous
+FROM public.tool_runs
+WHERE behavior_run_id = $1::bigint AND tier <> 'read'
+  AND status IN ('started','ok','timeout','unknown_outcome','dry_run')
+`
+
+type CountBehaviorRunBudgetRunsRow struct {
+	Writes    int32
+	Dangerous int32
+}
+
+// The same count as CountJobBudgetRuns for the tool runs of a behavior run.
+func (q *Queries) CountBehaviorRunBudgetRuns(ctx context.Context, behaviorRunID int64) (CountBehaviorRunBudgetRunsRow, error) {
+	row := q.db.QueryRow(ctx, countBehaviorRunBudgetRuns, behaviorRunID)
+	var i CountBehaviorRunBudgetRunsRow
+	err := row.Scan(&i.Writes, &i.Dangerous)
+	return i, err
+}
+
 const countJobBudgetRuns = `-- name: CountJobBudgetRuns :one
 SELECT COUNT(*)::int AS writes,
        COUNT(*) FILTER (WHERE tier = 'dangerous')::int AS dangerous
 FROM public.tool_runs
-WHERE agent_job_id = $1 AND tier <> 'read'
+WHERE agent_job_id = $1::bigint AND tier <> 'read'
   AND status IN ('started','ok','timeout','unknown_outcome','dry_run')
 `
 
@@ -87,15 +108,18 @@ func (q *Queries) FinishToolRun(ctx context.Context, arg FinishToolRunParams) (i
 }
 
 const insertToolRun = `-- name: InsertToolRun :one
-INSERT INTO public.tool_runs(workspace_id, agent_job_id, step, tool, tier, repo, account, idempotency_key, input_redacted, status, error_code)
-VALUES ($1, $2, $3, $4, $5,
-        $6, $7, $8, $9, $10, $11)
+INSERT INTO public.tool_runs(workspace_id, agent_job_id, behavior_run_id, step, tool, tier, repo, account, idempotency_key, input_redacted, status, error_code, correlation_id)
+VALUES ($1, $2, $3, $4, $5, $6,
+        $7, $8, $9, $10, $11, $12,
+        (SELECT r.correlation_id FROM public.behavior_runs r
+         WHERE r.id = $3 AND r.workspace_id = $1))
 RETURNING id
 `
 
 type InsertToolRunParams struct {
 	WorkspaceID    pgtype.UUID
-	AgentJobID     int64
+	AgentJobID     pgtype.Int8
+	BehaviorRunID  pgtype.Int8
 	Step           int32
 	Tool           string
 	Tier           string
@@ -107,10 +131,12 @@ type InsertToolRunParams struct {
 	ErrorCode      pgtype.Text
 }
 
+// A behavior run's row takes the run's correlation ID.
 func (q *Queries) InsertToolRun(ctx context.Context, arg InsertToolRunParams) (int64, error) {
 	row := q.db.QueryRow(ctx, insertToolRun,
 		arg.WorkspaceID,
 		arg.AgentJobID,
+		arg.BehaviorRunID,
 		arg.Step,
 		arg.Tool,
 		arg.Tier,
@@ -126,9 +152,63 @@ func (q *Queries) InsertToolRun(ctx context.Context, arg InsertToolRunParams) (i
 	return id, err
 }
 
+const listToolRunsForBehaviorRun = `-- name: ListToolRunsForBehaviorRun :many
+SELECT t.id, t.step, t.tool, t.tier, t.status, COALESCE(t.error_code, '')::text AS error_code,
+       COALESCE(t.duration_ms, 0)::bigint AS duration_ms, t.created_at
+FROM public.tool_runs t
+WHERE t.workspace_id = $1 AND t.behavior_run_id = $2::bigint
+ORDER BY t.id
+`
+
+type ListToolRunsForBehaviorRunParams struct {
+	WorkspaceID   pgtype.UUID
+	BehaviorRunID int64
+}
+
+type ListToolRunsForBehaviorRunRow struct {
+	ID         int64
+	Step       int32
+	Tool       string
+	Tier       string
+	Status     string
+	ErrorCode  string
+	DurationMs int64
+	CreatedAt  pgtype.Timestamptz
+}
+
+// The audit rows of one behavior run, without inputs or result text.
+func (q *Queries) ListToolRunsForBehaviorRun(ctx context.Context, arg ListToolRunsForBehaviorRunParams) ([]ListToolRunsForBehaviorRunRow, error) {
+	rows, err := q.db.Query(ctx, listToolRunsForBehaviorRun, arg.WorkspaceID, arg.BehaviorRunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListToolRunsForBehaviorRunRow
+	for rows.Next() {
+		var i ListToolRunsForBehaviorRunRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Step,
+			&i.Tool,
+			&i.Tier,
+			&i.Status,
+			&i.ErrorCode,
+			&i.DurationMs,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listToolRunsForJob = `-- name: ListToolRunsForJob :many
 SELECT id, step, tool, tier, status, COALESCE(error_code, '')::text AS error_code, COALESCE(result_summary, '')::text AS result_summary, duration_ms
-FROM public.tool_runs WHERE agent_job_id = $1 ORDER BY id
+FROM public.tool_runs WHERE agent_job_id = $1::bigint ORDER BY id
 `
 
 type ListToolRunsForJobRow struct {

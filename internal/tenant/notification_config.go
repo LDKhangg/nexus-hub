@@ -104,3 +104,12 @@ func ValidateTelegramTarget(source, target WebhookIntegration) error {
 	}
 	return nil
 }
+
+// ValidateTelegramControl checks that an integration is an enabled Telegram
+// bot that may receive the owner's commands.
+func ValidateTelegramControl(i WebhookIntegration) error {
+	if !i.IsEnabled || i.Platform != "telegram" || (i.Role != IntegrationRoleControl && i.Role != IntegrationRoleBoth) {
+		return errors.New("ineligible Telegram control integration")
+	}
+	return nil
+}

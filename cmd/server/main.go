@@ -15,6 +15,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/adapters/netguard"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage"
 	"github.com/LDKhangg/nexus-hub/internal/agent"
+	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/config"
 	httpdelivery "github.com/LDKhangg/nexus-hub/internal/delivery/http"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
@@ -82,11 +83,36 @@ func run() error {
 	workerSettings := relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout}
 	sender := telegram.NewClient(netguard.Client(s.NoticeRequestTimeout, netguard.DefaultHosts), resolver)
 	worker := relay.NewNoticeWorker(notices, sender, workerSettings)
-	ag, err := buildAgent(pool, s, resolver, redactor, sender)
+	behaviors, err := storage.NewBehaviorStore(pool)
+	if err != nil {
+		return errors.New("behavior store startup failed")
+	}
+	// memory_search reads the workspace's decision memory; it is a read
+	// tool of the shared registry like any other.
+	ag, err := buildAgent(pool, s, resolver, redactor, sender, behavior.NewMemorySearchTool(behaviors))
 	if err != nil {
 		return err
 	}
 	notices.SetKnownTools(ag.known)
+	// Telegram inbound: the handler only verifies, gates and stores; the
+	// inbox worker does the work. Behavior commands create pending runs;
+	// buttons, replies and /undo go to the action engine; /trace answers
+	// "not available" until it is wired.
+	telegramHandler := httpdelivery.NewTelegramHandler(integrations, resolver, behaviors, behaviors, s.OwnerTelegramChatID)
+	commands, err := behavior.NewCommandRunner(behaviors, behaviors)
+	if err != nil {
+		return errors.New("behavior command runner startup failed")
+	}
+	messenger := telegram.NewMessenger(sender, integrations)
+	runs, engine, err := buildBehaviorEngine(pool, s, behaviors, integrations, ag, redactor, resolver, messenger)
+	if err != nil {
+		return err
+	}
+	inbox := behavior.NewInboxWorker(behavior.InboxDeps{
+		Inbox: behaviors, Approvals: behaviors, Defs: behaviors, Messenger: messenger,
+		Commands: commands, Undoer: engine, Callbacks: engine,
+		Tracer: &behavior.TraceService{Store: behaviors, Profiles: behaviors},
+	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
 	handler := httpdelivery.NewWebhookHandler(integrations, httpdelivery.NewVerifiedParserFactory(resolver), relay.NewNoticeService(notices))
 	e := echo.New()
 	e.HideBanner = true
@@ -94,10 +120,11 @@ func run() error {
 	e.Use(middleware.Recover())
 	e.Use(middleware.BodyLimit(bodyLimit))
 	e.Server.ReadHeaderTimeout = 5 * time.Second
+	e.POST("/webhook/telegram/:integrationID", telegramHandler.Handle)
 	e.POST("/webhook/:source/:integrationID", handler.HandleWebhook)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runServices(ctx, e, []serviceWorker{worker, ag.orchestrator, ag.actions}, s.ListenAddr, shutdownTimeout)
+	return runServices(ctx, e, []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine}, s.ListenAddr, shutdownTimeout)
 }
 
 type serviceWorker interface{ Run(context.Context) error }

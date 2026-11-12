@@ -116,6 +116,16 @@ type Executor struct {
 
 	// ClickUpTokenRef is passed to tools that call ClickUp.
 	ClickUpTokenRef string
+	// KeyScope, when set, namespaces idempotency keys (ScopedKey) so the
+	// IDs of another kind of run (for example behavior runs) never share
+	// keys with agent jobs of the same numeric ID. Empty keeps CanonicalKey.
+	KeyScope string
+	// UnscopedWrites names write-tier tools that are not repo scoped (for
+	// example ClickUp writes) and may run without a repo grant. Only the
+	// behavior engine's action library sets it, for the one action it runs;
+	// agent jobs never do, so their policy is unchanged. A listed tool must
+	// still be enabled, and pass budgets, audit and idempotency.
+	UnscopedWrites []string
 
 	mu           sync.Mutex
 	calls        int
@@ -227,7 +237,9 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 	}
 	start.Tier = tier
 	if tier != tenant.TierRead {
-		if call.Repo == nil || !slices.Contains(call.Repo.Allow, name) {
+		_, scoped := tool.(RepoScoped)
+		unscoped := !scoped && tier == tenant.TierWrite && slices.Contains(e.UnscopedWrites, name)
+		if !unscoped && (call.Repo == nil || !slices.Contains(call.Repo.Allow, name)) {
 			return e.deny(ctx, start, "tool_not_allowed")
 		}
 		if tier == tenant.TierDangerous && !e.allowDangerous {
@@ -255,7 +267,7 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 			e.mu.Unlock()
 			// The budget is usually spent by this very call's earlier
 			// attempt; report that run (ok or unknown outcome), not a denial.
-			if prior := e.findPrior(ctx, CanonicalKey(e.jobID, name, input)); prior != nil {
+			if prior := e.findPrior(ctx, e.key(name, input)); prior != nil {
 				return replayResult(prior, tier)
 			}
 			return e.deny(ctx, start, over)
@@ -267,7 +279,7 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 		e.mu.Unlock()
 	}
 	// 7-8. idempotency and record started
-	start.Key = CanonicalKey(e.jobID, name, input)
+	start.Key = e.key(name, input)
 	runID, prior, err := e.store.Begin(ctx, start)
 	if err != nil {
 		return CallResult{Content: "error: audit_unavailable", IsError: true, Status: StatusError, Tier: tier}
@@ -432,9 +444,25 @@ func (e *Executor) redactInput(input json.RawMessage) json.RawMessage {
 	return b
 }
 
-// CanonicalKey identifies a call independently of JSON key order and
-// whitespace: sha256(jobID | tool | canonical JSON).
-func CanonicalKey(jobID int64, tool string, input json.RawMessage) string {
+// key is the idempotency key of a call in this executor's scope.
+func (e *Executor) key(name string, input json.RawMessage) string {
+	if e.KeyScope == "" {
+		return CanonicalKey(e.jobID, name, input)
+	}
+	return ScopedKey(e.KeyScope, e.jobID, name, input)
+}
+
+// ScopedKey is CanonicalKey inside a named scope:
+// sha256(scope | id | tool | canonical JSON). Different scopes never share
+// keys, even for the same numeric ID.
+func ScopedKey(scope string, id int64, tool string, input json.RawMessage) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d|%s|%s", scope, id, tool, canonicalJSON(input))))
+	return hex.EncodeToString(sum[:])
+}
+
+// canonicalJSON re-encodes input with sorted keys and no whitespace, or
+// returns it unchanged when it does not decode.
+func canonicalJSON(input json.RawMessage) []byte {
 	canon := []byte(input)
 	var v any
 	dec := json.NewDecoder(bytes.NewReader(input))
@@ -444,7 +472,13 @@ func CanonicalKey(jobID int64, tool string, input json.RawMessage) string {
 			canon = b
 		}
 	}
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%d|%s|%s", jobID, tool, canon)))
+	return canon
+}
+
+// CanonicalKey identifies a call independently of JSON key order and
+// whitespace: sha256(jobID | tool | canonical JSON).
+func CanonicalKey(jobID int64, tool string, input json.RawMessage) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d|%s|%s", jobID, tool, canonicalJSON(input))))
 	return hex.EncodeToString(sum[:])
 }
 

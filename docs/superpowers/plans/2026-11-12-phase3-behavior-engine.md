@@ -97,7 +97,7 @@ Change from draft v1: the owner rejected a hard-coded spec-review feature
     `/review <task>`.
   An event can start several behaviors; each starts at most one run per
   (behavior version, subject, subject revision). (FR-078, FR-018)
-- REQ-5: `POST /webhooks/telegram` accepts an update only with the right
+- REQ-5: `POST /webhook/telegram/:integrationID` accepts an update only with the right
   `X-Telegram-Bot-Api-Secret-Token` (constant time). Otherwise it returns 401
   and stores nothing. Updates from other chats than the owner's have no effect
   and get no reply. A repeated `update_id` has one effect. The handler answers

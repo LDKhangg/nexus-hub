@@ -19,6 +19,9 @@ const (
 	EventStatusChanged EventType = "status_changed"
 	EventMentioned     EventType = "mentioned"
 	EventPRUpdated     EventType = "pr_updated"
+	// EventAssigneeChanged is a ClickUp assignee addition. It only feeds
+	// behavior triggers; it never produces a notice or an agent job.
+	EventAssigneeChanged EventType = "assignee_changed"
 )
 
 // ErrIgnoredEvent được parser trả về khi webhook hợp lệ nhưng không cần xử lý

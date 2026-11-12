@@ -1,0 +1,92 @@
+# Spec review: when a ClickUp task assigned to me reaches the review status
+# (or is assigned to me, or I send /review <task>), review the tech-spec PR
+# against the task's user story, answer the open questions that the
+# evidence answers, and ask me only the real decisions.
+schema: 1
+name: "spec-review"
+description: "Review the tech-spec PR of a task against its user story and answer its open questions."
+
+triggers:
+  - type: "clickup.task_status_changed"
+    filter:
+      to_status: ["{{vars.review_status}}"]
+      assignee: "me"
+  - type: "clickup.task_assigned"
+    filter:
+      assignee: "me"
+  - type: "telegram.command"
+    command: "/review"
+    args: ["task"]
+
+reads:
+  - tool: "clickup_get_task"
+  - tool: "github_pr_view"
+  - tool: "github_pr_files"
+  - tool: "github_issue_view"
+  - tool: "memory_search"
+
+instructions: |
+  You review a technical specification for one ClickUp task.
+
+  1. Read the task with clickup_get_task. From its description extract:
+     - the user story (who, what, why);
+     - the acceptance criteria;
+     - the open questions: the items under the heading that contains
+       "{{vars.oq_heading}}". Keep each question's own wording and number.
+  2. Find the tech-spec pull request linked from the task (a GitHub PR URL
+     in the description or its links). Read it with github_pr_view and
+     github_pr_files; use github_issue_view for a linked issue. The spec may
+     add open questions of its own: extract those too.
+  3. Search earlier decisions with memory_search (the topic and key words of
+     each question) and cite a matching decision as evidence.
+  4. Review the spec against the user story. Report one item for each
+     finding: a gap (a part of the story or a criterion the spec does not
+     cover), a contradiction, a missing acceptance criterion, or a risk.
+     A finding is informational unless it needs a change or a decision.
+  5. For each open question, propose an answer only from the evidence you
+     read (task, spec, PR files, past decisions), with citations that quote
+     the exact lines. If the evidence does not answer it, say what is
+     missing and give the options you see; do not guess.
+  6. Topic: set the item's topic to exactly one of these words when the
+     question or finding is about it: scope, business_rule, priority,
+     deadline, cost, security_tradeoff, people. Otherwise use a short topic
+     such as api, data_model, error_handling, testing or performance.
+
+  Item keys: "oq-<number>" for an open question from the task,
+  "spec-oq-<number>" for one from the spec, "finding-<short-slug>" for a
+  review finding. The label is the question or the finding in one line.
+  Write text and proposals in Vietnamese, short and concrete. A proposal is
+  the answer as it should appear under the question in the task.
+
+autonomy:
+  confidence_threshold: 0.8
+  always_ask_topics: ["scope", "business_rule", "priority", "deadline", "cost", "security_tradeoff", "people"]
+  require_citations: true
+
+actions:
+  auto:
+    - type: "clickup.description_block"
+      params:
+        block: "oq-answers"
+    - type: "telegram.message"
+  notify:
+    - type: "telegram.message"
+  ask:
+    - type: "clickup.description_block"
+      params:
+        block: "oq-answers"
+    - type: "telegram.message"
+
+dry_run: true
+ask_expiry_hours: 72
+
+profile:
+  language: "vi"
+
+vars:
+  review_status:
+    description: "ClickUp status that starts a review"
+    default: "tech spec review"
+  oq_heading:
+    description: "Text in the description heading above the open questions"
+    default: "Open Question"
