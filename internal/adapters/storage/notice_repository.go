@@ -136,6 +136,7 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 		return result, err
 	}
 	agentEnabled := r.agentEnabledAtIngest(integration)
+	triggers := newIngestTriggers(q, workspace)
 	ordered := append([]domain.NormalizedEvent(nil), events...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		if ordered[i].ExternalID == ordered[j].ExternalID {
@@ -146,6 +147,21 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 	for _, e := range ordered {
 		if e.Metadata["webhook_id"] != config.WebhookID {
 			return result, errors.New("webhook identity mismatch")
+		}
+		// Behavior runs commit with the rest of the callback.
+		started, err := triggers.start(ctx, e)
+		if err != nil {
+			return result, err
+		}
+		if e.EventType == domain.EventAssigneeChanged {
+			// Assignee events only feed behaviors: no thread, notice or
+			// agent job, exactly as when they were ignored.
+			if started > 0 {
+				result.Accepted++
+			} else {
+				result.Ignored++
+			}
+			continue
 		}
 		id, err := r.newID()
 		if err != nil {

@@ -285,7 +285,7 @@ func (w *InboxWorker) command(ctx context.Context, u InboundUpdate, to ChatRef, 
 		reply, err = w.d.Undoer.Undo(hctx, UndoRequest{WorkspaceID: u.WorkspaceID, RunID: id, Actor: actor, CorrelationID: corr})
 	default:
 		reply, err = w.d.Commands.TriggerCommand(hctx, CommandRequest{
-			WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID,
+			WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, UpdateID: u.UpdateID,
 			Command: u.Command, Args: args, Actor: actor, CorrelationID: corr,
 		})
 	}

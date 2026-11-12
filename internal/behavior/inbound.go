@@ -35,6 +35,7 @@ type CommandRequest struct {
 	WorkspaceID   string
 	IntegrationID string
 	ChatID        int64
+	UpdateID      int64  // the Telegram update_id; each update is one run revision
 	Command       string // "/name", lower case
 	Args          string // trimmed, at most 512 characters
 	Actor         string // "telegram:<user id>"

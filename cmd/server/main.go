@@ -93,11 +93,16 @@ func run() error {
 		return errors.New("behavior store startup failed")
 	}
 	// Telegram inbound: the handler only verifies, gates and stores; the
-	// inbox worker does the work. Engine handlers not wired yet answer
-	// "not available".
+	// inbox worker does the work. Behavior commands create pending runs;
+	// engine handlers not wired yet answer "not available".
 	telegramHandler := httpdelivery.NewTelegramHandler(integrations, resolver, behaviors, behaviors, s.OwnerTelegramChatID)
+	commands, err := behavior.NewCommandRunner(behaviors, behaviors)
+	if err != nil {
+		return errors.New("behavior command runner startup failed")
+	}
 	inbox := behavior.NewInboxWorker(behavior.InboxDeps{
 		Inbox: behaviors, Approvals: behaviors, Defs: behaviors, Messenger: telegram.NewMessenger(sender, integrations),
+		Commands: commands,
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
 	handler := httpdelivery.NewWebhookHandler(integrations, httpdelivery.NewVerifiedParserFactory(resolver), relay.NewNoticeService(notices))
 	e := echo.New()

@@ -27,25 +27,52 @@ type webhookUser struct {
 	ID       int64  `json:"id"`
 	Username string `json:"username"`
 }
+
+// flexID accepts a JSON string or number and never fails: any other value
+// (null, object, bool) reads as empty, so an unexpected shape cannot reject
+// an otherwise valid callback.
+type flexID string
+
+func (f *flexID) UnmarshalJSON(b []byte) error {
+	*f = ""
+	var s string
+	if json.Unmarshal(b, &s) == nil {
+		*f = flexID(strings.TrimSpace(s))
+		return nil
+	}
+	var n json.Number
+	if json.Unmarshal(b, &n) == nil {
+		*f = flexID(n.String())
+	}
+	return nil
+}
+
+// historyValue is a history item's before/after value: a status object for
+// status changes, a user object for assignee changes.
+type historyValue struct {
+	Status string `json:"status"`
+	ID     flexID `json:"id"`
+}
+
 type ClickUpWebhookPayload struct {
 	Event     string `json:"event"`
 	TaskID    string `json:"task_id"`
 	WebhookID string `json:"webhook_id"`
 	Task      struct {
 		Name string `json:"name"`
+		List struct {
+			ID flexID `json:"id"`
+		} `json:"list"`
 	} `json:"task"`
 	History []struct {
-		ID     string      `json:"id"`
-		Field  string      `json:"field"`
-		Date   string      `json:"date"`
-		User   webhookUser `json:"user"`
-		Before *struct {
-			Status string `json:"status"`
-		} `json:"before"`
-		After *struct {
-			Status string `json:"status"`
-		} `json:"after"`
-		Comment struct {
+		ID       string        `json:"id"`
+		Field    string        `json:"field"`
+		Date     string        `json:"date"`
+		ParentID flexID        `json:"parent_id"`
+		User     webhookUser   `json:"user"`
+		Before   *historyValue `json:"before"`
+		After    *historyValue `json:"after"`
+		Comment  struct {
 			ID          string      `json:"id"`
 			TextContent string      `json:"text_content"`
 			User        webhookUser `json:"user"`
@@ -89,6 +116,8 @@ func (p *ClickUpParser) Parser(raw []byte) ([]domain.NormalizedEvent, error) {
 		kind, field = domain.EventCommandPosted, "comment"
 	case "taskStatusUpdated":
 		kind, field = domain.EventStatusChanged, "status"
+	case "taskAssigneeUpdated":
+		kind, field = domain.EventAssigneeChanged, "assignee_add"
 	default:
 		return nil, domain.ErrIgnoredEvent
 	}
@@ -103,13 +132,27 @@ func (p *ClickUpParser) Parser(raw []byte) ([]domain.NormalizedEvent, error) {
 		if item.ID == "" {
 			return nil, errors.New("clickup: missing history identity")
 		}
+		listID := string(payload.Task.List.ID)
+		if listID == "" {
+			listID = string(item.ParentID)
+		}
+		extra := map[string]string{}
 		actor, content, messageID := item.User, "", "status:"+item.ID
-		if field == "comment" {
+		switch field {
+		case "assignee_add":
+			// Only additions start anything; an item without a user ID
+			// is skipped (no notice path exists for assignee events).
+			if item.After == nil || item.After.ID == "" {
+				continue
+			}
+			messageID = "assignee:" + item.ID
+			extra["assignee_added"] = string(item.After.ID)
+		case "comment":
 			if item.Comment.ID == "" {
 				return nil, errors.New("clickup: missing comment identity")
 			}
 			actor, content, messageID = item.Comment.User, item.Comment.TextContent, "comment:"+item.Comment.ID
-		} else {
+		default:
 			if item.After == nil || item.After.Status == "" {
 				return nil, errors.New("clickup: missing new status")
 			}
@@ -118,6 +161,13 @@ func (p *ClickUpParser) Parser(raw []byte) ([]domain.NormalizedEvent, error) {
 				before = item.Before.Status
 			}
 			content = before + " → " + item.After.Status
+			extra["status_to"] = item.After.Status
+			if item.Before != nil && item.Before.Status != "" {
+				extra["status_from"] = item.Before.Status
+			}
+		}
+		if listID != "" {
+			extra["list_id"] = listID
 		}
 		id := ""
 		if actor.ID != 0 {
@@ -135,7 +185,15 @@ func (p *ClickUpParser) Parser(raw []byte) ([]domain.NormalizedEvent, error) {
 			}
 			when = time.UnixMilli(ms).UTC()
 		}
-		events = append(events, domain.NormalizedEvent{Source: domain.SourceClickup, EventType: kind, ExternalID: payload.TaskID, EventKey: payload.WebhookID + ":" + item.ID, ExternalMessageID: messageID, Title: payload.Task.Name, SenderID: id, SenderName: name, Content: content, OccurredAt: when, FromOwnBot: p.ownSenderID != "" && id == p.ownSenderID && strings.HasPrefix(content, botMarker), Metadata: map[string]string{"event_type": payload.Event, "webhook_id": payload.WebhookID, "task_url": "https://app.clickup.com/t/" + url.PathEscape(payload.TaskID)}})
+		metadata := map[string]string{"event_type": payload.Event, "webhook_id": payload.WebhookID, "task_url": "https://app.clickup.com/t/" + url.PathEscape(payload.TaskID)}
+		for k, v := range extra {
+			metadata[k] = v
+		}
+		events = append(events, domain.NormalizedEvent{Source: domain.SourceClickup, EventType: kind, ExternalID: payload.TaskID, EventKey: payload.WebhookID + ":" + item.ID, ExternalMessageID: messageID, Title: payload.Task.Name, SenderID: id, SenderName: name, Content: content, OccurredAt: when, FromOwnBot: p.ownSenderID != "" && id == p.ownSenderID && strings.HasPrefix(content, botMarker), Metadata: metadata})
+	}
+	if len(events) == 0 && kind == domain.EventAssigneeChanged {
+		// Only removals, or additions without a user: nothing to do.
+		return nil, domain.ErrIgnoredEvent
 	}
 	if len(events) == 0 {
 		return nil, errors.New("clickup: missing matching history")

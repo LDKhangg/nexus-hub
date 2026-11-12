@@ -423,6 +423,12 @@ func (s *BehaviorStore) CreateRun(ctx context.Context, workspaceID string, r beh
 	if err != nil {
 		return behavior.Run{}, false, err
 	}
+	return createRun(ctx, s.q, ws, r)
+}
+
+// createRun stores a pending run once per (version, subject, revision) with
+// q, which may be bound to the caller's transaction.
+func createRun(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, r behavior.NewRun) (behavior.Run, bool, error) {
 	switch {
 	case r.BehaviorID == 0 || r.VersionID == 0 || r.Version < 1:
 		return behavior.Run{}, false, invalid("version")
@@ -453,7 +459,7 @@ func (s *BehaviorStore) CreateRun(ctx context.Context, workspaceID string, r beh
 	if runAt.IsZero() {
 		runAt = time.Now()
 	}
-	row, err := s.q.CreateBehaviorRun(ctx, sqlc.CreateBehaviorRunParams{
+	row, err := q.CreateBehaviorRun(ctx, sqlc.CreateBehaviorRunParams{
 		WorkspaceID: ws, BehaviorID: r.BehaviorID, BehaviorVersionID: r.VersionID, Version: int32(r.Version),
 		TriggerKind: r.TriggerKind, Trigger: trigger, Subject: r.Subject, Revision: r.Revision, CorrelationID: corrID, RunAt: ts(runAt),
 	})
@@ -463,7 +469,7 @@ func (s *BehaviorStore) CreateRun(ctx context.Context, workspaceID string, r beh
 	if !isNoRows(err) {
 		return behavior.Run{}, false, err
 	}
-	existing, err := s.q.GetBehaviorRunByDedupe(ctx, sqlc.GetBehaviorRunByDedupeParams{
+	existing, err := q.GetBehaviorRunByDedupe(ctx, sqlc.GetBehaviorRunByDedupeParams{
 		WorkspaceID: ws, BehaviorVersionID: r.VersionID, Subject: r.Subject, Revision: r.Revision,
 	})
 	if err != nil {
