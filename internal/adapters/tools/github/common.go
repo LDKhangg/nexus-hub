@@ -53,6 +53,12 @@ func deniedErr(code string) error { return &tools.ToolError{Code: code, Denied: 
 // netguardDenied are the client codes for a destination the dialer blocked.
 var netguardDenied = map[string]bool{"host_denied": true, "address_denied": true}
 
+// ambiguousCodes are client codes after which the request may have reached
+// GitHub and taken effect: a transport failure once sending began, a 5xx,
+// or a 2xx whose body could not be decoded. Netguard denials, missing
+// credentials and 4xx responses are definite failures.
+var ambiguousCodes = map[string]bool{"network_error": true, "server_error": true, "invalid_response": true}
+
 // decode validates the common {repo, number} shape and rejects unknown keys.
 func decode(raw json.RawMessage, allowed ...string) (input, error) {
 	var probe map[string]json.RawMessage
@@ -124,7 +130,7 @@ func (b *base) do(ctx context.Context, c tools.Call, in input, perms map[string]
 	err := b.api.Do(ctx, c.WorkspaceID, *c.Account, in.Repo, perms, method, path, body, out)
 	var ge *github.GitHubError
 	if errors.As(err, &ge) {
-		return &tools.ToolError{Code: ge.Code, Retryable: ge.Retryable, Denied: netguardDenied[ge.Code]}
+		return &tools.ToolError{Code: ge.Code, Retryable: ge.Retryable, Denied: netguardDenied[ge.Code], Ambiguous: ambiguousCodes[ge.Code]}
 	}
 	return err
 }

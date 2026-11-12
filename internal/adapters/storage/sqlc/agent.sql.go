@@ -43,33 +43,45 @@ func (q *Queries) AddAgentUsage(ctx context.Context, arg AddAgentUsageParams) (i
 	return result.RowsAffected(), nil
 }
 
-const claimAgentJob = `-- name: ClaimAgentJob :one
-WITH candidate AS (
- SELECT j.id FROM public.agent_jobs j
- WHERE ((j.status = 'pending' AND j.run_at <= $2::timestamptz)
-     OR (j.status = 'processing' AND j.locked_until <= $2::timestamptz))
-   AND NOT EXISTS (SELECT 1 FROM public.agent_jobs p
-                   WHERE p.thread_id = j.thread_id AND p.id <> j.id AND p.status = 'processing'
-                     AND p.locked_until > $2::timestamptz)
- ORDER BY (j.status = 'processing') DESC, j.run_at, j.id
- FOR UPDATE SKIP LOCKED LIMIT 1
-)
+const checkAgentThreadLease = `-- name: CheckAgentThreadLease :one
+SELECT EXISTS (SELECT 1 FROM public.agent_jobs p
+               WHERE p.thread_id = $1::uuid AND p.id <> $2
+                 AND p.status = 'processing' AND p.locked_until > $3::timestamptz)::bool AS busy
+`
+
+type CheckAgentThreadLeaseParams struct {
+	ThreadID pgtype.UUID
+	ID       int64
+	AtTime   pgtype.Timestamptz
+}
+
+// Whether another job of the thread holds a live processing lease, seen in
+// a fresh snapshot after the thread lock was taken.
+func (q *Queries) CheckAgentThreadLease(ctx context.Context, arg CheckAgentThreadLeaseParams) (bool, error) {
+	row := q.db.QueryRow(ctx, checkAgentThreadLease, arg.ThreadID, arg.ID, arg.AtTime)
+	var busy bool
+	err := row.Scan(&busy)
+	return busy, err
+}
+
+const claimAgentJobByID = `-- name: ClaimAgentJobByID :one
 UPDATE public.agent_jobs AS jobs SET status = 'processing', attempts = jobs.attempts + 1,
   claim_token = $1::uuid,
   locked_until = $2::timestamptz + make_interval(secs => $3::float8),
   updated_at = now()
-FROM candidate WHERE jobs.id = candidate.id
+WHERE jobs.id = $4
 RETURNING jobs.id, jobs.workspace_id, jobs.source_integration_id, jobs.thread_id, jobs.attempts,
   jobs.input_tokens, jobs.output_tokens, jobs.cache_read_tokens, jobs.cache_write_tokens
 `
 
-type ClaimAgentJobParams struct {
+type ClaimAgentJobByIDParams struct {
 	Token     pgtype.UUID
 	AtTime    pgtype.Timestamptz
 	LeaseSecs float64
+	ID        int64
 }
 
-type ClaimAgentJobRow struct {
+type ClaimAgentJobByIDRow struct {
 	ID                  int64
 	WorkspaceID         pgtype.UUID
 	SourceIntegrationID pgtype.UUID
@@ -81,11 +93,14 @@ type ClaimAgentJobRow struct {
 	CacheWriteTokens    int32
 }
 
-// A due pending job, or a processing job whose lease (or retry wait) ended;
-// never while another job of the same thread holds a live lease.
-func (q *Queries) ClaimAgentJob(ctx context.Context, arg ClaimAgentJobParams) (ClaimAgentJobRow, error) {
-	row := q.db.QueryRow(ctx, claimAgentJob, arg.Token, arg.AtTime, arg.LeaseSecs)
-	var i ClaimAgentJobRow
+func (q *Queries) ClaimAgentJobByID(ctx context.Context, arg ClaimAgentJobByIDParams) (ClaimAgentJobByIDRow, error) {
+	row := q.db.QueryRow(ctx, claimAgentJobByID,
+		arg.Token,
+		arg.AtTime,
+		arg.LeaseSecs,
+		arg.ID,
+	)
+	var i ClaimAgentJobByIDRow
 	err := row.Scan(
 		&i.ID,
 		&i.WorkspaceID,
@@ -356,6 +371,33 @@ func (q *Queries) SaveThreadSummary(ctx context.Context, arg SaveThreadSummaryPa
 	return result.RowsAffected(), nil
 }
 
+const selectAgentClaimCandidate = `-- name: SelectAgentClaimCandidate :one
+SELECT j.id, j.thread_id FROM public.agent_jobs j
+WHERE ((j.status = 'pending' AND j.run_at <= $1::timestamptz)
+    OR (j.status = 'processing' AND j.locked_until <= $1::timestamptz))
+  AND NOT EXISTS (SELECT 1 FROM public.agent_jobs p
+                  WHERE p.thread_id = j.thread_id AND p.id <> j.id AND p.status = 'processing'
+                    AND p.locked_until > $1::timestamptz)
+ORDER BY (j.status = 'processing') DESC, j.run_at, j.id
+FOR UPDATE SKIP LOCKED LIMIT 1
+`
+
+type SelectAgentClaimCandidateRow struct {
+	ID       int64
+	ThreadID pgtype.UUID
+}
+
+// A due pending job, or a processing job whose lease (or retry wait) ended;
+// never while another job of the same thread holds a live lease. The row
+// lock alone does not serialize a thread: Claim also takes the thread's
+// advisory lock and re-checks with CheckAgentThreadLease.
+func (q *Queries) SelectAgentClaimCandidate(ctx context.Context, atTime pgtype.Timestamptz) (SelectAgentClaimCandidateRow, error) {
+	row := q.db.QueryRow(ctx, selectAgentClaimCandidate, atTime)
+	var i SelectAgentClaimCandidateRow
+	err := row.Scan(&i.ID, &i.ThreadID)
+	return i, err
+}
+
 const summaryCandidates = `-- name: SummaryCandidates :many
 SELECT m.id, m.sender_role, m.sender_name, m.content FROM public.message_logs m
 WHERE m.thread_id = $1::uuid AND m.id > $2::bigint
@@ -400,6 +442,18 @@ func (q *Queries) SummaryCandidates(ctx context.Context, arg SummaryCandidatesPa
 		return nil, err
 	}
 	return items, nil
+}
+
+const tryLockAgentThread = `-- name: TryLockAgentThread :one
+SELECT pg_try_advisory_xact_lock(hashtextextended('agent_thread:' || $1::uuid::text, 0))::bool AS locked
+`
+
+// Serializes claims of one thread within the transaction.
+func (q *Queries) TryLockAgentThread(ctx context.Context, threadID pgtype.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, tryLockAgentThread, threadID)
+	var locked bool
+	err := row.Scan(&locked)
+	return locked, err
 }
 
 const upsertPendingAgentJob = `-- name: UpsertPendingAgentJob :one

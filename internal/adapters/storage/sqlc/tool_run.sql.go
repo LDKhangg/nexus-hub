@@ -11,6 +11,28 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countJobBudgetRuns = `-- name: CountJobBudgetRuns :one
+SELECT COUNT(*)::int AS writes,
+       COUNT(*) FILTER (WHERE tier = 'dangerous')::int AS dangerous
+FROM public.tool_runs
+WHERE agent_job_id = $1 AND tier <> 'read'
+  AND status IN ('started','ok','timeout','unknown_outcome','dry_run')
+`
+
+type CountJobBudgetRunsRow struct {
+	Writes    int32
+	Dangerous int32
+}
+
+// Non-read runs of a job that consumed write budget: everything except
+// denials and definite failures. Dangerous runs are counted in both.
+func (q *Queries) CountJobBudgetRuns(ctx context.Context, agentJobID int64) (CountJobBudgetRunsRow, error) {
+	row := q.db.QueryRow(ctx, countJobBudgetRuns, agentJobID)
+	var i CountJobBudgetRunsRow
+	err := row.Scan(&i.Writes, &i.Dangerous)
+	return i, err
+}
+
 const findPriorToolRun = `-- name: FindPriorToolRun :one
 SELECT status, COALESCE(result_summary, '')::text AS result_summary
 FROM public.tool_runs

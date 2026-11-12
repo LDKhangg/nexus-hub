@@ -86,6 +86,13 @@ type ToolRunStore interface {
 	Deny(ctx context.Context, r RunStart, code string) error
 }
 
+// JobBudgetCounter is optionally implemented by a ToolRunStore. It returns
+// the write and dangerous budget a job used in earlier attempts, so the
+// budgets hold per durable job rather than per attempt.
+type JobBudgetCounter interface {
+	JobCounts(ctx context.Context, jobID int64) (writes, dangerous int, err error)
+}
+
 // CallResult is what the actor feeds back to the LLM. Tool is the name as
 // audited: the registered tool name, or InvalidToolName.
 type CallResult struct {
@@ -110,10 +117,11 @@ type Executor struct {
 	// ClickUpTokenRef is passed to tools that call ClickUp.
 	ClickUpTokenRef string
 
-	mu        sync.Mutex
-	calls     int
-	writes    int
-	dangerous int
+	mu           sync.Mutex
+	calls        int
+	writes       int
+	dangerous    int
+	budgetLoaded bool
 }
 
 // NewExecutor builds the executor for one job attempt.
@@ -223,6 +231,10 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 	}
 	if tier != tenant.TierRead {
 		e.mu.Lock()
+		if err := e.loadBudget(ctx); err != nil {
+			e.mu.Unlock()
+			return e.deny(ctx, start, "audit_unavailable")
+		}
 		switch {
 		case tier == tenant.TierDangerous && e.dangerous >= e.limits.MaxDangerous:
 			e.mu.Unlock()
@@ -244,6 +256,16 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 		return CallResult{Content: "error: audit_unavailable", IsError: true, Status: StatusError, Tier: tier}
 	}
 	if prior != nil {
+		// A replay does not run the tool, so it gives back this attempt's
+		// budget; the earlier run is already counted.
+		if tier != tenant.TierRead {
+			e.mu.Lock()
+			e.writes--
+			if tier == tenant.TierDangerous {
+				e.dangerous--
+			}
+			e.mu.Unlock()
+		}
 		if prior.Status == StatusOK {
 			return CallResult{Content: "already done earlier in this job: " + prior.Summary, Status: StatusOK, Tier: tier}
 		}
@@ -281,6 +303,25 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 	return CallResult{Content: text, Status: StatusOK, Tier: tier}
 }
 
+// loadBudget seeds the write and dangerous counters, once, with what earlier
+// attempts of the job used. e.mu must be held. An error leaves the counters
+// unloaded so the caller fails closed.
+func (e *Executor) loadBudget(ctx context.Context) error {
+	if e.budgetLoaded {
+		return nil
+	}
+	if c, ok := e.store.(JobBudgetCounter); ok {
+		writes, dangerous, err := c.JobCounts(ctx, e.jobID)
+		if err != nil {
+			return err
+		}
+		e.writes += writes
+		e.dangerous += dangerous
+	}
+	e.budgetLoaded = true
+	return nil
+}
+
 type timeoutErr struct{}
 
 func (timeoutErr) Error() string { return "timeout" }
@@ -314,6 +355,9 @@ func classify(err error, tier tenant.Tier) (string, string) {
 		if tier == tenant.TierRead {
 			return StatusError, te.Code
 		}
+		return StatusUnknownOutcome, te.Code
+	case errors.As(err, &te) && te.Ambiguous && tier != tenant.TierRead:
+		// The request may have reached the remote: never repeat it.
 		return StatusUnknownOutcome, te.Code
 	case errors.As(err, &te) && te.Code != StatusUnknownOutcome:
 		return StatusError, te.Code

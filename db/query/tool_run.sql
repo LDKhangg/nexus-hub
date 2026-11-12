@@ -26,3 +26,12 @@ WHERE id = sqlc.arg(id) AND status = 'started';
 -- name: ListToolRunsForJob :many
 SELECT id, step, tool, tier, status, COALESCE(error_code, '')::text AS error_code, COALESCE(result_summary, '')::text AS result_summary, duration_ms
 FROM public.tool_runs WHERE agent_job_id = sqlc.arg(agent_job_id) ORDER BY id;
+
+-- name: CountJobBudgetRuns :one
+-- Non-read runs of a job that consumed write budget: everything except
+-- denials and definite failures. Dangerous runs are counted in both.
+SELECT COUNT(*)::int AS writes,
+       COUNT(*) FILTER (WHERE tier = 'dangerous')::int AS dangerous
+FROM public.tool_runs
+WHERE agent_job_id = sqlc.arg(agent_job_id) AND tier <> 'read'
+  AND status IN ('started','ok','timeout','unknown_outcome','dry_run');

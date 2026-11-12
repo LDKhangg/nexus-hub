@@ -15,24 +15,37 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 ON CONFLICT (thread_id, external_message_id) DO NOTHING
 RETURNING id;
 
--- name: ClaimAgentJob :one
+-- name: SelectAgentClaimCandidate :one
 -- A due pending job, or a processing job whose lease (or retry wait) ended;
--- never while another job of the same thread holds a live lease.
-WITH candidate AS (
- SELECT j.id FROM public.agent_jobs j
- WHERE ((j.status = 'pending' AND j.run_at <= sqlc.arg(at_time)::timestamptz)
-     OR (j.status = 'processing' AND j.locked_until <= sqlc.arg(at_time)::timestamptz))
-   AND NOT EXISTS (SELECT 1 FROM public.agent_jobs p
-                   WHERE p.thread_id = j.thread_id AND p.id <> j.id AND p.status = 'processing'
-                     AND p.locked_until > sqlc.arg(at_time)::timestamptz)
- ORDER BY (j.status = 'processing') DESC, j.run_at, j.id
- FOR UPDATE SKIP LOCKED LIMIT 1
-)
+-- never while another job of the same thread holds a live lease. The row
+-- lock alone does not serialize a thread: Claim also takes the thread's
+-- advisory lock and re-checks with CheckAgentThreadLease.
+SELECT j.id, j.thread_id FROM public.agent_jobs j
+WHERE ((j.status = 'pending' AND j.run_at <= sqlc.arg(at_time)::timestamptz)
+    OR (j.status = 'processing' AND j.locked_until <= sqlc.arg(at_time)::timestamptz))
+  AND NOT EXISTS (SELECT 1 FROM public.agent_jobs p
+                  WHERE p.thread_id = j.thread_id AND p.id <> j.id AND p.status = 'processing'
+                    AND p.locked_until > sqlc.arg(at_time)::timestamptz)
+ORDER BY (j.status = 'processing') DESC, j.run_at, j.id
+FOR UPDATE SKIP LOCKED LIMIT 1;
+
+-- name: TryLockAgentThread :one
+-- Serializes claims of one thread within the transaction.
+SELECT pg_try_advisory_xact_lock(hashtextextended('agent_thread:' || sqlc.arg(thread_id)::uuid::text, 0))::bool AS locked;
+
+-- name: CheckAgentThreadLease :one
+-- Whether another job of the thread holds a live processing lease, seen in
+-- a fresh snapshot after the thread lock was taken.
+SELECT EXISTS (SELECT 1 FROM public.agent_jobs p
+               WHERE p.thread_id = sqlc.arg(thread_id)::uuid AND p.id <> sqlc.arg(id)
+                 AND p.status = 'processing' AND p.locked_until > sqlc.arg(at_time)::timestamptz)::bool AS busy;
+
+-- name: ClaimAgentJobByID :one
 UPDATE public.agent_jobs AS jobs SET status = 'processing', attempts = jobs.attempts + 1,
   claim_token = sqlc.arg(token)::uuid,
   locked_until = sqlc.arg(at_time)::timestamptz + make_interval(secs => sqlc.arg(lease_secs)::float8),
   updated_at = now()
-FROM candidate WHERE jobs.id = candidate.id
+WHERE jobs.id = sqlc.arg(id)
 RETURNING jobs.id, jobs.workspace_id, jobs.source_integration_id, jobs.thread_id, jobs.attempts,
   jobs.input_tokens, jobs.output_tokens, jobs.cache_read_tokens, jobs.cache_write_tokens;
 

@@ -47,17 +47,50 @@ func (s *AgentStore) SetKnownTools(known map[string]tenant.Tier) {
 	s.mu.Unlock()
 }
 
+// Claim takes one due job. Claims are serialized per thread: the candidate
+// row lock alone cannot stop two workers from claiming two jobs of one
+// thread, so Claim also takes the thread's advisory lock and re-checks for a
+// live lease in a fresh snapshot. If the thread is busy, it returns nil and
+// the job is picked up on a later poll.
 func (s *AgentStore) Claim(ctx context.Context, now time.Time) (*agent.AgentJob, error) {
 	tok, err := uuid.NewRandom()
 	if err != nil {
 		return nil, err
 	}
 	token, _ := parseDBID(tok.String())
-	row, err := s.q.ClaimAgentJob(ctx, sqlc.ClaimAgentJobParams{Token: token, AtTime: pgtype.Timestamptz{Time: now, Valid: true}, LeaseSecs: AgentLease.Seconds()})
+	at := pgtype.Timestamptz{Time: now, Valid: true}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	q := sqlc.New(tx)
+	cand, err := q.SelectAgentClaimCandidate(ctx, at)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	locked, err := q.TryLockAgentThread(ctx, cand.ThreadID)
+	if err != nil {
+		return nil, err
+	}
+	if !locked {
+		return nil, nil
+	}
+	busy, err := q.CheckAgentThreadLease(ctx, sqlc.CheckAgentThreadLeaseParams{ThreadID: cand.ThreadID, ID: cand.ID, AtTime: at})
+	if err != nil {
+		return nil, err
+	}
+	if busy {
+		return nil, nil
+	}
+	row, err := q.ClaimAgentJobByID(ctx, sqlc.ClaimAgentJobByIDParams{ID: cand.ID, Token: token, AtTime: at, LeaseSecs: AgentLease.Seconds()})
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return &agent.AgentJob{

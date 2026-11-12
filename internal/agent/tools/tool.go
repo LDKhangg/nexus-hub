@@ -33,10 +33,15 @@ type ToolOutput struct{ Text, Summary string }
 // ToolError is a tool failure with a safe code; its text never carries
 // secrets or raw upstream bodies. Denied marks a refusal on policy grounds
 // (secret path, branch pattern, repo mismatch...), audited as denied.
+// Ambiguous marks a failure after the request may have reached the remote
+// (transport error after sending, 5xx, invalid response, failed push): a
+// write or dangerous call is then audited as unknown_outcome and never
+// repeated.
 type ToolError struct {
 	Code      string
 	Retryable bool
 	Denied    bool
+	Ambiguous bool
 }
 
 func (e *ToolError) Error() string { return e.Code }

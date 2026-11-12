@@ -22,7 +22,10 @@ func NewToolRunStore(pool *pgxpool.Pool) (*ToolRunStore, error) {
 	return &ToolRunStore{pool: pool}, nil
 }
 
-var _ tools.ToolRunStore = (*ToolRunStore)(nil)
+var (
+	_ tools.ToolRunStore     = (*ToolRunStore)(nil)
+	_ tools.JobBudgetCounter = (*ToolRunStore)(nil)
+)
 
 func optText(s string) pgtype.Text { return pgtype.Text{String: s, Valid: s != ""} }
 
@@ -89,4 +92,14 @@ func (s *ToolRunStore) Finish(ctx context.Context, f tools.RunFinish) error {
 func (s *ToolRunStore) Deny(ctx context.Context, r tools.RunStart, code string) error {
 	_, err := s.insert(ctx, sqlc.New(s.pool), r, tools.StatusDenied, code)
 	return err
+}
+
+// JobCounts returns the write and dangerous budget a job has used across
+// all of its attempts.
+func (s *ToolRunStore) JobCounts(ctx context.Context, jobID int64) (writes, dangerous int, err error) {
+	row, err := sqlc.New(s.pool).CountJobBudgetRuns(ctx, jobID)
+	if err != nil {
+		return 0, 0, err
+	}
+	return int(row.Writes), int(row.Dangerous), nil
 }

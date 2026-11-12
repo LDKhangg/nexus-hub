@@ -708,7 +708,7 @@ func gitPush(ctx context.Context, w *workspace, c tools.Call, root string, in in
 	// redirect the push (and its token) elsewhere.
 	res, err := w.run(ctx, root, env, true, "push", "--quiet", "--no-verify", w.remoteURL(in.Repo), ref+":"+ref)
 	if err != nil {
-		return tools.ToolOutput{}, err
+		return tools.ToolOutput{}, ambiguousPushErr(err)
 	}
 	if res.ExitCode != 0 {
 		stderr := string(res.Stderr)
@@ -718,9 +718,24 @@ func gitPush(ctx context.Context, w *workspace, c tools.Call, root string, in in
 		case strings.Contains(stderr, "does not match any") || strings.Contains(stderr, "src refspec"):
 			return tools.ToolOutput{}, toolErr("not_found")
 		}
-		return tools.ToolOutput{}, networkErr(res)
+		return tools.ToolOutput{}, ambiguousPushErr(networkErr(res))
 	}
 	return tools.ToolOutput{Text: "pushed " + in.Branch + " to origin" + headInfo(ctx, w, root), Summary: "pushed " + in.Branch}, nil
+}
+
+// ambiguousPushErr marks a push failure whose effect on the remote is
+// unknown (remote_failed, a runner failure or timeout after git started) so
+// the executor records unknown_outcome and never repeats the push. Policy
+// denials and recognised definite failures (remote_auth_failed) are kept.
+func ambiguousPushErr(err error) error {
+	var te *tools.ToolError
+	if !errors.As(err, &te) {
+		return err // context errors: the executor already treats them as unknown
+	}
+	if te.Denied || te.Code == "remote_auth_failed" {
+		return err
+	}
+	return &tools.ToolError{Code: te.Code, Retryable: te.Retryable, Ambiguous: true}
 }
 
 func gitResetHard(ctx context.Context, w *workspace, _ tools.Call, root string, in input) (tools.ToolOutput, error) {
