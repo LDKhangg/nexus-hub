@@ -104,6 +104,10 @@ func run() error {
 		Inbox: behaviors, Approvals: behaviors, Defs: behaviors, Messenger: telegram.NewMessenger(sender, integrations),
 		Commands: commands,
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
+	runs, err := buildRunWorker(pool, s, behaviors, integrations, ag, redactor)
+	if err != nil {
+		return err
+	}
 	handler := httpdelivery.NewWebhookHandler(integrations, httpdelivery.NewVerifiedParserFactory(resolver), relay.NewNoticeService(notices))
 	e := echo.New()
 	e.HideBanner = true
@@ -115,7 +119,7 @@ func run() error {
 	e.POST("/webhook/:source/:integrationID", handler.HandleWebhook)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runServices(ctx, e, []serviceWorker{worker, ag.orchestrator, ag.actions, inbox}, s.ListenAddr, shutdownTimeout)
+	return runServices(ctx, e, []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs}, s.ListenAddr, shutdownTimeout)
 }
 
 type serviceWorker interface{ Run(context.Context) error }

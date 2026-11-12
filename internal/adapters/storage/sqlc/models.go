@@ -104,6 +104,8 @@ type BehaviorRun struct {
 	FinishedAt pgtype.Timestamptz
 	CreatedAt  pgtype.Timestamptz
 	UpdatedAt  pgtype.Timestamptz
+	// Context fragments the model saw, by locator; secrets redacted; at most 512 KiB of text.
+	ContextSnapshot []byte
 }
 
 // Published behavior versions are immutable; a trigger rejects UPDATE.
@@ -288,7 +290,7 @@ type ThreadLink struct {
 type ToolRun struct {
 	ID             int64
 	WorkspaceID    pgtype.UUID
-	AgentJobID     int64
+	AgentJobID     pgtype.Int8
 	Step           int32
 	Tool           string
 	Tier           string
@@ -304,6 +306,7 @@ type ToolRun struct {
 	ResultSummary  pgtype.Text
 	CreatedAt      pgtype.Timestamptz
 	UpdatedAt      pgtype.Timestamptz
+	BehaviorRunID  pgtype.Int8
 }
 
 type UserProfile struct {

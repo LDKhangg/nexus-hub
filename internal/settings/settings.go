@@ -32,9 +32,12 @@ type Settings struct {
 	NoticeRequestTimeout                  time.Duration
 	AnthropicCredential                   string
 	ListenAddr                            string
-	OwnerTelegramChatID                   int64  // 0: not set
-	OwnerClickUpUserID                    string // empty: not set
-	PublicBaseURL                         string // empty: not set
+	OwnerTelegramChatID                   int64         // 0: not set
+	OwnerClickUpUserID                    string        // empty: not set
+	PublicBaseURL                         string        // empty: not set
+	BehaviorWorkers                       int64         // concurrent behavior run executors
+	BehaviorPollInterval                  time.Duration // idle wait between behavior run claims
+	BehaviorMaxTokens                     int64         // run token budget when neither behavior nor profile sets one
 }
 
 // Store reads every stored setting.
@@ -96,6 +99,9 @@ var specs = map[string]spec{
 	"listen_addr":            {kind: kAddr, def: ":8080", set: func(s *Settings, v any) { s.ListenAddr = v.(string) }},
 	"owner_telegram_chat_id": {kind: kInt, def: int64(0), min: -maxChatID, max: maxChatID, set: func(s *Settings, v any) { s.OwnerTelegramChatID = v.(int64) }},
 	"owner_clickup_user_id":  {kind: kDigits, def: "", set: func(s *Settings, v any) { s.OwnerClickUpUserID = v.(string) }},
+	"behavior_workers":       {kind: kInt, def: int64(2), min: 1, max: 8, set: func(s *Settings, v any) { s.BehaviorWorkers = v.(int64) }},
+	"behavior_poll_interval": {kind: kDuration, def: time.Second, min: 0.1, max: 60, set: func(s *Settings, v any) { s.BehaviorPollInterval = v.(time.Duration) }},
+	"behavior_max_tokens":    {kind: kInt, def: int64(100000), min: 1000, max: 1_000_000, set: func(s *Settings, v any) { s.BehaviorMaxTokens = v.(int64) }},
 	"public_base_url":        {kind: kPublicURL, def: "", set: func(s *Settings, v any) { s.PublicBaseURL = v.(string) }},
 }
 

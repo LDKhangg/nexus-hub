@@ -118,6 +118,17 @@ UPDATE public.behavior_runs SET status = 'pending', run_at = sqlc.arg(next_at)::
   locked_until = NULL, error_code = sqlc.arg(code)::text, updated_at = now()
 WHERE id = sqlc.arg(id) AND claim_token = sqlc.arg(token)::uuid AND status = 'running';
 
+-- name: SetBehaviorRunContext :execrows
+-- Stores the context snapshot of the claimed run (replaced on a retry).
+UPDATE public.behavior_runs SET context_snapshot = sqlc.arg(snapshot), updated_at = now()
+WHERE id = sqlc.arg(id) AND claim_token = sqlc.arg(token)::uuid AND status = 'running';
+
+-- name: LockClaimedBehaviorRun :one
+-- Locks a run only while the caller still holds its claim.
+SELECT workspace_id FROM public.behavior_runs
+WHERE id = sqlc.arg(id) AND claim_token = sqlc.arg(token)::uuid AND status = 'running'
+FOR UPDATE;
+
 -- name: CancelPendingBehaviorRun :execrows
 UPDATE public.behavior_runs SET status = 'canceled', finished_at = now(), updated_at = now()
 WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'pending';

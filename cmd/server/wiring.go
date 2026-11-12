@@ -19,6 +19,7 @@ import (
 	githubtools "github.com/LDKhangg/nexus-hub/internal/adapters/tools/github"
 	"github.com/LDKhangg/nexus-hub/internal/agent"
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
+	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/memory"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
@@ -32,6 +33,10 @@ type agentServices struct {
 	orchestrator *agent.Orchestrator
 	actions      *relay.ActionWorker
 	known        map[string]tenant.Tier
+	reg          *tools.Registry
+	limits       tools.Limits
+	// provider returns the workspace's default LLM provider.
+	provider func(ctx context.Context, ws string) (domain.LLMProvider, error)
 }
 
 // ensurePrivateDirs creates the managed-clone and git tmp directories 0700.
@@ -114,13 +119,14 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		}
 		return agent.NewTier1Router(c.Default(), s.TriageModel), inv, nil
 	}
-	compressor := memory.NewCompressor(store, func(ctx context.Context, ws string) (domain.LLMProvider, error) {
+	provider := func(ctx context.Context, ws string) (domain.LLMProvider, error) {
 		c, err := client(ctx, ws)
 		if err != nil {
 			return nil, err
 		}
 		return c.Default(), nil
-	}, s.SummaryModel, func(v string) string { return redactor.RedactSecrets(agent.CleanInput(v)) })
+	}
+	compressor := memory.NewCompressor(store, provider, s.SummaryModel, func(v string) string { return redactor.RedactSecrets(agent.CleanInput(v)) })
 	limits := tools.DefaultLimits()
 	limits.ReadTimeout, limits.NetworkTimeout = s.ToolTimeout, s.GitNetworkTimeout
 	orch := agent.NewOrchestrator(store, models, reg, runs, redactor, compressor, agent.OrchestratorSettings{
@@ -128,5 +134,59 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
 	})
 	worker := relay.NewActionWorker(actions, sender, relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
-	return agentServices{orchestrator: orch, actions: worker, known: known}, nil
+	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider}, nil
+}
+
+// buildRunWorker wires the behavior run executor: the shared tool registry
+// and LLM client, a tool-run audit scoped to behavior runs, and the
+// workspace's ClickUp source agent config as the run's grants. The action
+// library (dispatcher) and the Telegram failure notice come later; until
+// then items stay drafted and failures are logged by code.
+func buildRunWorker(pool *pgxpool.Pool, s settings.Settings, store *storage.BehaviorStore, integrations *storage.IntegrationRepository, ag agentServices, redactor *agent.Redactor) (*behavior.RunWorker, error) {
+	audit, err := storage.NewBehaviorToolRunStore(pool)
+	if err != nil {
+		return nil, errors.New("behavior tool run store startup failed")
+	}
+	return behavior.NewRunWorker(behavior.RunWorkerDeps{
+		Runs: store, Defs: store, Profiles: store,
+		Policies: behaviorPolicies{integrations: integrations, known: ag.known},
+		Models:   ag.provider,
+		Callers:  behavior.ExecutorFactory(ag.reg, audit, redactor, ag.limits),
+		Redactor: redactor,
+	}, behavior.RunWorkerSettings{
+		Workers: int(s.BehaviorWorkers), PollInterval: s.BehaviorPollInterval,
+		DefaultModel: s.ActorModel, DefaultMaxTokens: int(s.BehaviorMaxTokens), MaxOutputTokens: int(s.MaxOutputTokens),
+	}), nil
+}
+
+// behaviorPolicies finds a run's grants: the agent config of the ClickUp
+// source the trigger came through, or, for a trigger from another
+// integration (a Telegram command), the workspace's first enabled ClickUp
+// source.
+type behaviorPolicies struct {
+	integrations *storage.IntegrationRepository
+	known        map[string]tenant.Tier
+}
+
+func clickUpSource(in tenant.Integration) bool {
+	return in.IsEnabled && in.Platform == "clickup" && (in.Role == tenant.IntegrationRoleSource || in.Role == tenant.IntegrationRoleBoth)
+}
+
+func (p behaviorPolicies) RunPolicy(ctx context.Context, workspaceID, integrationID string) (tenant.AgentConfig, error) {
+	if integrationID != "" {
+		in, err := p.integrations.Get(ctx, workspaceID, integrationID)
+		if err == nil && clickUpSource(in) {
+			return tenant.ParseAgentConfig(in.Config, p.known)
+		}
+	}
+	list, err := p.integrations.List(ctx, workspaceID, 100, 0)
+	if err != nil {
+		return tenant.AgentConfig{}, err
+	}
+	for _, in := range list {
+		if clickUpSource(in) {
+			return tenant.ParseAgentConfig(in.Config, p.known)
+		}
+	}
+	return tenant.AgentConfig{}, errors.New("no ClickUp source in workspace")
 }

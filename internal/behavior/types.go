@@ -50,6 +50,9 @@ const (
 	RunDone     RunStatus = "done"
 	RunFailed   RunStatus = "failed"
 	RunCanceled RunStatus = "canceled"
+	// RunSkipped: a pre-check on the subject did not hold (for example the
+	// assignee or list a trigger asked for); no model work was done.
+	RunSkipped RunStatus = "skipped"
 )
 
 // Class is the engine's decision for an item.
@@ -202,12 +205,15 @@ type Run struct {
 	Usage         Usage
 	ErrorCode     string
 	Snapshot      json.RawMessage
-	UndoneAt      *time.Time
-	RunAt         time.Time
-	StartedAt     *time.Time
-	FinishedAt    *time.Time
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	// Context is the context snapshot the model saw (see ContextSnapshot);
+	// empty until the run collected its context.
+	Context    json.RawMessage
+	UndoneAt   *time.Time
+	RunAt      time.Time
+	StartedAt  *time.Time
+	FinishedAt *time.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // Citation points at a source fragment.

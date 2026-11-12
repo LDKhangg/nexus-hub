@@ -134,7 +134,7 @@ UPDATE public.behavior_runs AS r SET status = 'running', attempts = r.attempts +
   locked_until = $2::timestamptz + make_interval(secs => $3::float8),
   started_at = COALESCE(r.started_at, now()), updated_at = now()
 WHERE r.id = $4
-RETURNING r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at
+RETURNING r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot
 `
 
 type ClaimBehaviorRunByIDParams struct {
@@ -180,6 +180,7 @@ func (q *Queries) ClaimBehaviorRunByID(ctx context.Context, arg ClaimBehaviorRun
 		&i.FinishedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ContextSnapshot,
 	)
 	return i, err
 }
@@ -309,7 +310,7 @@ INSERT INTO public.behavior_runs(workspace_id, behavior_id, behavior_version_id,
 VALUES ($1, $2, $3, $4,
   $5, $6, $7, $8, $9, $10)
 ON CONFLICT (behavior_version_id, subject, revision) DO NOTHING
-RETURNING id, workspace_id, behavior_id, behavior_version_id, version, trigger_kind, trigger, subject, revision, status, correlation_id, attempts, run_at, locked_until, claim_token, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, steps, error_code, snapshot, undone_at, started_at, finished_at, created_at, updated_at
+RETURNING id, workspace_id, behavior_id, behavior_version_id, version, trigger_kind, trigger, subject, revision, status, correlation_id, attempts, run_at, locked_until, claim_token, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, steps, error_code, snapshot, undone_at, started_at, finished_at, created_at, updated_at, context_snapshot
 `
 
 type CreateBehaviorRunParams struct {
@@ -369,6 +370,7 @@ func (q *Queries) CreateBehaviorRun(ctx context.Context, arg CreateBehaviorRunPa
 		&i.FinishedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ContextSnapshot,
 	)
 	return i, err
 }
@@ -691,7 +693,7 @@ func (q *Queries) GetBehaviorByName(ctx context.Context, arg GetBehaviorByNamePa
 }
 
 const getBehaviorRun = `-- name: GetBehaviorRun :one
-SELECT r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, b.name AS behavior_name
+SELECT r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot, b.name AS behavior_name
 FROM public.behavior_runs r JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
 WHERE r.workspace_id = $1 AND r.id = $2
 `
@@ -737,13 +739,14 @@ func (q *Queries) GetBehaviorRun(ctx context.Context, arg GetBehaviorRunParams) 
 		&i.BehaviorRun.FinishedAt,
 		&i.BehaviorRun.CreatedAt,
 		&i.BehaviorRun.UpdatedAt,
+		&i.BehaviorRun.ContextSnapshot,
 		&i.BehaviorName,
 	)
 	return i, err
 }
 
 const getBehaviorRunByDedupe = `-- name: GetBehaviorRunByDedupe :one
-SELECT id, workspace_id, behavior_id, behavior_version_id, version, trigger_kind, trigger, subject, revision, status, correlation_id, attempts, run_at, locked_until, claim_token, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, steps, error_code, snapshot, undone_at, started_at, finished_at, created_at, updated_at FROM public.behavior_runs
+SELECT id, workspace_id, behavior_id, behavior_version_id, version, trigger_kind, trigger, subject, revision, status, correlation_id, attempts, run_at, locked_until, claim_token, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, steps, error_code, snapshot, undone_at, started_at, finished_at, created_at, updated_at, context_snapshot FROM public.behavior_runs
 WHERE workspace_id = $1 AND behavior_version_id = $2
   AND subject = $3 AND revision = $4
 `
@@ -791,6 +794,7 @@ func (q *Queries) GetBehaviorRunByDedupe(ctx context.Context, arg GetBehaviorRun
 		&i.FinishedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ContextSnapshot,
 	)
 	return i, err
 }
@@ -1204,7 +1208,7 @@ func (q *Queries) InsertTelegramUpdate(ctx context.Context, arg InsertTelegramUp
 }
 
 const latestBehaviorRunBySubject = `-- name: LatestBehaviorRunBySubject :one
-SELECT r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, b.name AS behavior_name
+SELECT r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot, b.name AS behavior_name
 FROM public.behavior_runs r JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
 WHERE r.workspace_id = $1 AND r.subject = $2
 ORDER BY r.created_at DESC, r.id DESC LIMIT 1
@@ -1251,6 +1255,7 @@ func (q *Queries) LatestBehaviorRunBySubject(ctx context.Context, arg LatestBeha
 		&i.BehaviorRun.FinishedAt,
 		&i.BehaviorRun.CreatedAt,
 		&i.BehaviorRun.UpdatedAt,
+		&i.BehaviorRun.ContextSnapshot,
 		&i.BehaviorName,
 	)
 	return i, err
@@ -1575,6 +1580,25 @@ func (q *Queries) LockBehaviorByName(ctx context.Context, arg LockBehaviorByName
 	return i, err
 }
 
+const lockClaimedBehaviorRun = `-- name: LockClaimedBehaviorRun :one
+SELECT workspace_id FROM public.behavior_runs
+WHERE id = $1 AND claim_token = $2::uuid AND status = 'running'
+FOR UPDATE
+`
+
+type LockClaimedBehaviorRunParams struct {
+	ID    int64
+	Token pgtype.UUID
+}
+
+// Locks a run only while the caller still holds its claim.
+func (q *Queries) LockClaimedBehaviorRun(ctx context.Context, arg LockClaimedBehaviorRunParams) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, lockClaimedBehaviorRun, arg.ID, arg.Token)
+	var workspace_id pgtype.UUID
+	err := row.Scan(&workspace_id)
+	return workspace_id, err
+}
+
 const markBehaviorRunUndone = `-- name: MarkBehaviorRunUndone :execrows
 UPDATE public.behavior_runs SET undone_at = now(), updated_at = now()
 WHERE workspace_id = $1 AND id = $2 AND undone_at IS NULL AND snapshot IS NOT NULL
@@ -1784,6 +1808,26 @@ type SetApprovalReplyMessageParams struct {
 // Free-text mode: only an open approval takes a reply message.
 func (q *Queries) SetApprovalReplyMessage(ctx context.Context, arg SetApprovalReplyMessageParams) (int64, error) {
 	result, err := q.db.Exec(ctx, setApprovalReplyMessage, arg.MessageID, arg.WorkspaceID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const setBehaviorRunContext = `-- name: SetBehaviorRunContext :execrows
+UPDATE public.behavior_runs SET context_snapshot = $1, updated_at = now()
+WHERE id = $2 AND claim_token = $3::uuid AND status = 'running'
+`
+
+type SetBehaviorRunContextParams struct {
+	Snapshot []byte
+	ID       int64
+	Token    pgtype.UUID
+}
+
+// Stores the context snapshot of the claimed run (replaced on a retry).
+func (q *Queries) SetBehaviorRunContext(ctx context.Context, arg SetBehaviorRunContextParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setBehaviorRunContext, arg.Snapshot, arg.ID, arg.Token)
 	if err != nil {
 		return 0, err
 	}

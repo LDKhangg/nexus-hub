@@ -11,11 +11,32 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countBehaviorRunBudgetRuns = `-- name: CountBehaviorRunBudgetRuns :one
+SELECT COUNT(*)::int AS writes,
+       COUNT(*) FILTER (WHERE tier = 'dangerous')::int AS dangerous
+FROM public.tool_runs
+WHERE behavior_run_id = $1::bigint AND tier <> 'read'
+  AND status IN ('started','ok','timeout','unknown_outcome','dry_run')
+`
+
+type CountBehaviorRunBudgetRunsRow struct {
+	Writes    int32
+	Dangerous int32
+}
+
+// The same count as CountJobBudgetRuns for the tool runs of a behavior run.
+func (q *Queries) CountBehaviorRunBudgetRuns(ctx context.Context, behaviorRunID int64) (CountBehaviorRunBudgetRunsRow, error) {
+	row := q.db.QueryRow(ctx, countBehaviorRunBudgetRuns, behaviorRunID)
+	var i CountBehaviorRunBudgetRunsRow
+	err := row.Scan(&i.Writes, &i.Dangerous)
+	return i, err
+}
+
 const countJobBudgetRuns = `-- name: CountJobBudgetRuns :one
 SELECT COUNT(*)::int AS writes,
        COUNT(*) FILTER (WHERE tier = 'dangerous')::int AS dangerous
 FROM public.tool_runs
-WHERE agent_job_id = $1 AND tier <> 'read'
+WHERE agent_job_id = $1::bigint AND tier <> 'read'
   AND status IN ('started','ok','timeout','unknown_outcome','dry_run')
 `
 
@@ -87,15 +108,16 @@ func (q *Queries) FinishToolRun(ctx context.Context, arg FinishToolRunParams) (i
 }
 
 const insertToolRun = `-- name: InsertToolRun :one
-INSERT INTO public.tool_runs(workspace_id, agent_job_id, step, tool, tier, repo, account, idempotency_key, input_redacted, status, error_code)
-VALUES ($1, $2, $3, $4, $5,
-        $6, $7, $8, $9, $10, $11)
+INSERT INTO public.tool_runs(workspace_id, agent_job_id, behavior_run_id, step, tool, tier, repo, account, idempotency_key, input_redacted, status, error_code)
+VALUES ($1, $2, $3, $4, $5, $6,
+        $7, $8, $9, $10, $11, $12)
 RETURNING id
 `
 
 type InsertToolRunParams struct {
 	WorkspaceID    pgtype.UUID
-	AgentJobID     int64
+	AgentJobID     pgtype.Int8
+	BehaviorRunID  pgtype.Int8
 	Step           int32
 	Tool           string
 	Tier           string
@@ -111,6 +133,7 @@ func (q *Queries) InsertToolRun(ctx context.Context, arg InsertToolRunParams) (i
 	row := q.db.QueryRow(ctx, insertToolRun,
 		arg.WorkspaceID,
 		arg.AgentJobID,
+		arg.BehaviorRunID,
 		arg.Step,
 		arg.Tool,
 		arg.Tier,
@@ -128,7 +151,7 @@ func (q *Queries) InsertToolRun(ctx context.Context, arg InsertToolRunParams) (i
 
 const listToolRunsForJob = `-- name: ListToolRunsForJob :many
 SELECT id, step, tool, tier, status, COALESCE(error_code, '')::text AS error_code, COALESCE(result_summary, '')::text AS result_summary, duration_ms
-FROM public.tool_runs WHERE agent_job_id = $1 ORDER BY id
+FROM public.tool_runs WHERE agent_job_id = $1::bigint ORDER BY id
 `
 
 type ListToolRunsForJobRow struct {

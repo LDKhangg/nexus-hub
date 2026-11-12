@@ -12,14 +12,31 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ToolRunStore is the tool_runs audit trail with write idempotency.
-type ToolRunStore struct{ pool *pgxpool.Pool }
+// ToolRunStore is the tool_runs audit trail with write idempotency. Rows
+// belong to an agent job, or, for a store built by
+// NewBehaviorToolRunStore, to a behavior run: RunStart.JobID then holds the
+// behavior run ID.
+type ToolRunStore struct {
+	pool     *pgxpool.Pool
+	behavior bool
+}
 
 func NewToolRunStore(pool *pgxpool.Pool) (*ToolRunStore, error) {
 	if pool == nil {
 		return nil, errors.New("tool run store requires pool")
 	}
 	return &ToolRunStore{pool: pool}, nil
+}
+
+// NewBehaviorToolRunStore returns the audit trail of behavior runs: each
+// row references behavior_runs(id) through behavior_run_id. Callers give
+// the executor a distinct key scope so its idempotency keys never collide
+// with agent job keys.
+func NewBehaviorToolRunStore(pool *pgxpool.Pool) (*ToolRunStore, error) {
+	if pool == nil {
+		return nil, errors.New("tool run store requires pool")
+	}
+	return &ToolRunStore{pool: pool, behavior: true}, nil
 }
 
 var (
@@ -38,8 +55,15 @@ func (s *ToolRunStore) insert(ctx context.Context, q *sqlc.Queries, r tools.RunS
 	if len(r.InputRedacted) > 0 {
 		input = r.InputRedacted
 	}
+	owner := pgtype.Int8{Int64: r.JobID, Valid: true}
+	var job, run pgtype.Int8
+	if s.behavior {
+		run = owner
+	} else {
+		job = owner
+	}
 	return q.InsertToolRun(ctx, sqlc.InsertToolRunParams{
-		WorkspaceID: ws, AgentJobID: r.JobID, Step: int32(r.Step), Tool: r.Tool, Tier: string(r.Tier),
+		WorkspaceID: ws, AgentJobID: job, BehaviorRunID: run, Step: int32(r.Step), Tool: r.Tool, Tier: string(r.Tier),
 		Repo: optText(r.Repo), Account: optText(r.Account), IdempotencyKey: r.Key, InputRedacted: input, Status: status, ErrorCode: optText(code),
 	})
 }
@@ -114,6 +138,13 @@ func (s *ToolRunStore) Deny(ctx context.Context, r tools.RunStart, code string) 
 // JobCounts returns the write and dangerous budget a job has used across
 // all of its attempts.
 func (s *ToolRunStore) JobCounts(ctx context.Context, jobID int64) (writes, dangerous int, err error) {
+	if s.behavior {
+		row, err := sqlc.New(s.pool).CountBehaviorRunBudgetRuns(ctx, jobID)
+		if err != nil {
+			return 0, 0, err
+		}
+		return int(row.Writes), int(row.Dangerous), nil
+	}
 	row, err := sqlc.New(s.pool).CountJobBudgetRuns(ctx, jobID)
 	if err != nil {
 		return 0, 0, err

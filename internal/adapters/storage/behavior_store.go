@@ -413,7 +413,7 @@ func mapRun(r sqlc.BehaviorRun, name string) behavior.Run {
 			InputTokens: int(r.InputTokens), OutputTokens: int(r.OutputTokens), CacheReadTokens: int(r.CacheReadTokens),
 			CacheWriteTokens: int(r.CacheWriteTokens), Steps: int(r.Steps),
 		},
-		ErrorCode: r.ErrorCode.String, Snapshot: r.Snapshot, UndoneAt: tsPtr(r.UndoneAt), RunAt: r.RunAt.Time,
+		ErrorCode: r.ErrorCode.String, Snapshot: r.Snapshot, Context: r.ContextSnapshot, UndoneAt: tsPtr(r.UndoneAt), RunAt: r.RunAt.Time,
 		StartedAt: tsPtr(r.StartedAt), FinishedAt: tsPtr(r.FinishedAt), CreatedAt: r.CreatedAt.Time, UpdatedAt: r.UpdatedAt.Time,
 	}
 }
@@ -540,7 +540,7 @@ func (s *BehaviorStore) AddUsage(ctx context.Context, runID int64, token string,
 
 func (s *BehaviorStore) FinishRun(ctx context.Context, runID int64, token string, status behavior.RunStatus, code string) error {
 	switch status {
-	case behavior.RunDone, behavior.RunFailed, behavior.RunCanceled:
+	case behavior.RunDone, behavior.RunFailed, behavior.RunCanceled, behavior.RunSkipped:
 	default:
 		return invalid("status")
 	}
@@ -556,6 +556,69 @@ func (s *BehaviorStore) FinishRun(ctx context.Context, runID int64, token string
 		return behavior.ErrStaleClaim
 	}
 	return nil
+}
+
+// SetRunContext stores the context snapshot of a claimed run.
+func (s *BehaviorStore) SetRunContext(ctx context.Context, runID int64, token string, snapshot json.RawMessage) error {
+	t, err := claimToken(token)
+	if err != nil {
+		return err
+	}
+	snap, err := objectJSON(snapshot, "context")
+	if err != nil {
+		return err
+	}
+	n, err := s.q.SetBehaviorRunContext(ctx, sqlc.SetBehaviorRunContextParams{Snapshot: snap, ID: runID, Token: t})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return behavior.ErrStaleClaim
+	}
+	return nil
+}
+
+// AddRunItems stores every item of a claimed run in one transaction, so a
+// run has either all of its items or none. A key already stored keeps its
+// stored row.
+func (s *BehaviorStore) AddRunItems(ctx context.Context, workspaceID string, runID int64, token string, items []behavior.NewItem) ([]behavior.Item, error) {
+	ws, err := parseDBID(workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	t, err := claimToken(token)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	q := sqlc.New(tx)
+	owner, err := q.LockClaimedBehaviorRun(ctx, sqlc.LockClaimedBehaviorRunParams{ID: runID, Token: t})
+	if isNoRows(err) {
+		return nil, behavior.ErrStaleClaim
+	}
+	if err != nil {
+		return nil, err
+	}
+	if owner != ws {
+		return nil, behavior.ErrStaleClaim
+	}
+	out := make([]behavior.Item, 0, len(items))
+	for _, it := range items {
+		it.RunID = runID
+		item, _, err := addItem(ctx, q, ws, it)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (s *BehaviorStore) RetryRun(ctx context.Context, runID int64, token string, next time.Time, code string) error {
@@ -678,6 +741,12 @@ func (s *BehaviorStore) AddItem(ctx context.Context, workspaceID string, it beha
 	if err != nil {
 		return behavior.Item{}, false, err
 	}
+	return addItem(ctx, s.q, ws, it)
+}
+
+// addItem stores an item once per (run, key) with q, which may be bound to
+// the caller's transaction.
+func addItem(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, it behavior.NewItem) (behavior.Item, bool, error) {
 	switch it.Class {
 	case behavior.ClassAuto, behavior.ClassNotify, behavior.ClassAsk:
 	default:
@@ -709,7 +778,7 @@ func (s *BehaviorStore) AddItem(ctx context.Context, workspaceID string, it beha
 	if flags == nil {
 		flags = []string{}
 	}
-	row, err := s.q.InsertRunItem(ctx, sqlc.InsertRunItemParams{
+	row, err := q.InsertRunItem(ctx, sqlc.InsertRunItemParams{
 		WorkspaceID: ws, RunID: it.RunID, ItemKey: it.Key, Label: it.Label, Text: it.Text, Proposal: it.Proposal,
 		Citations: citeJSON, Topic: it.Topic, Confidence: it.Confidence, Informational: it.Informational, Flags: flags,
 		Class: string(it.Class), Rule: it.Rule, Status: string(status),
@@ -721,7 +790,7 @@ func (s *BehaviorStore) AddItem(ctx context.Context, workspaceID string, it beha
 	if !isNoRows(err) {
 		return behavior.Item{}, false, err
 	}
-	existing, err := s.q.GetRunItemByKey(ctx, sqlc.GetRunItemByKeyParams{WorkspaceID: ws, RunID: it.RunID, ItemKey: it.Key})
+	existing, err := q.GetRunItemByKey(ctx, sqlc.GetRunItemByKeyParams{WorkspaceID: ws, RunID: it.RunID, ItemKey: it.Key})
 	if err != nil {
 		return behavior.Item{}, false, notFound(err)
 	}
