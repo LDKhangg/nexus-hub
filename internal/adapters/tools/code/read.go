@@ -427,9 +427,9 @@ func unsafeWorktreeKey(k string) bool {
 		return true
 	case strings.HasSuffix(k, ".textconv"), strings.HasSuffix(k, ".command"), strings.HasSuffix(k, ".driver"):
 		return true
-	// core.fsmonitor and diff.external are not listed: hardenedArgs already
-	// overrides them on the command line, which wins over repository config.
-	case k == "core.worktree", k == "extensions.worktreeconfig":
+	// core.fsmonitor and diff.external are also overridden by hardenedArgs;
+	// refusing them too is defence in depth (owner decision, 2026-11-12).
+	case k == "core.fsmonitor", k == "diff.external", k == "core.worktree", k == "extensions.worktreeconfig":
 		return true
 	}
 	return false
