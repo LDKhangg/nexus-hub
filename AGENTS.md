@@ -66,7 +66,8 @@ Lead and Implementer may only run these to prove the code compiles:
 
 ## Test Report format (Tester → Lead)
 
-Answer in exactly this shape. Keep raw output verbatim; do not summarize away
+The Tester follows `TESTER.md` (full instructions and an example). Answer in
+exactly this shape. Keep raw output verbatim; do not summarize away
 error lines.
 
 ```markdown
