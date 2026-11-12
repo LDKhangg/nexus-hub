@@ -20,6 +20,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/adapters/control/telegram"
 	httpdelivery "github.com/LDKhangg/nexus-hub/internal/delivery/http"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
+	"github.com/LDKhangg/nexus-hub/internal/secrets"
 	"github.com/labstack/echo/v4"
 )
 
@@ -58,7 +59,7 @@ func TestNoticeEndToEnd(t *testing.T) {
 	}
 	integrations, _ := NewIntegrationRepository(pool)
 	e := echo.New()
-	handler := httpdelivery.NewWebhookHandler(integrations, httpdelivery.NewVerifiedParserFactory(lookup), relay.NewNoticeService(repo))
+	handler := httpdelivery.NewWebhookHandler(integrations, httpdelivery.NewVerifiedParserFactory(secrets.NewResolver(nil, nil, nil, lookup, time.Minute, time.Now)), relay.NewNoticeService(repo))
 	e.POST("/webhook/:source/:integrationID", handler.HandleWebhook)
 	post := func(id string, body []byte) int {
 		t.Helper()
@@ -124,7 +125,7 @@ func TestNoticeEndToEnd(t *testing.T) {
 			payload = `{"ok":false,"error_code":503}`
 		}
 		return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(payload)), Header: make(http.Header)}, nil
-	})}, lookup)
+	})}, secrets.NewResolver(nil, nil, nil, lookup, time.Minute, time.Now))
 	restarted, err := NewNoticeRepository(pool, repo.newID, DebounceSettings{})
 	if err != nil {
 		t.Fatal(err)

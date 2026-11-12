@@ -77,7 +77,7 @@ func TestVerifiedWebhook(t *testing.T) {
 				}
 				return relay.AcceptResult{Accepted: 2}, nil
 			})
-			factory := NewVerifiedParserFactory(func(string) (string, bool) { return "test-secret", tc.name != "missing_secret" })
+			factory := NewVerifiedParserFactory(testResolver{value: "test-secret", ok: tc.name != "missing_secret"})
 			h := NewWebhookHandler(lookup, factory, accept)
 			e := echo.New()
 			if tc.name == "streaming_oversize" {
@@ -132,5 +132,40 @@ func TestVerifiedWebhook(t *testing.T) {
 				t.Fatal("unscoped route accepted")
 			}
 		})
+	}
+}
+
+type testResolver struct {
+	value string
+	ok    bool
+}
+
+func (r testResolver) Resolve(context.Context, string, string) (string, error) {
+	if !r.ok {
+		return "", errors.New("missing_credentials")
+	}
+	return r.value, nil
+}
+
+type recordingResolver struct{ ws, ref string }
+
+func (r *recordingResolver) Resolve(_ context.Context, ws, ref string) (string, error) {
+	r.ws, r.ref = ws, ref
+	return "secret", nil
+}
+
+func TestParserFactory_UsesResolver(t *testing.T) {
+	rec := &recordingResolver{}
+	f := NewVerifiedParserFactory(rec)
+	integration := tenant.WebhookIntegration{ID: testIntegrationID, WorkspaceID: "019a6690-abcd-7000-8000-000000000001", Platform: "clickup", Role: tenant.IntegrationRoleSource, IsEnabled: true,
+		Config: map[string]any{"clickup_team_id": "1", "webhook_id": "w", "webhook_secret_ref": "clickup-webhook", "target_integration_id": "019a6690-abcd-7000-8000-000000000012"}}
+	if _, err := f.ForIntegration(integration); err != nil {
+		t.Fatal(err)
+	}
+	if rec.ws != integration.WorkspaceID || rec.ref != "clickup-webhook" {
+		t.Fatalf("%+v", rec)
+	}
+	if _, err := NewVerifiedParserFactory(testResolver{}).ForIntegration(integration); err == nil {
+		t.Fatal("missing secret accepted")
 	}
 }

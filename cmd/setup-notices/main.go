@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
@@ -81,12 +82,15 @@ func runCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.W
 		if err != nil {
 			return err
 		}
-		if lookup == nil {
-			return errors.New("webhook secret is missing from local environment")
-		}
-		secret, ok := lookup(parsed.WebhookSecretEnv)
-		if !ok || secret == "" {
-			return errors.New("webhook secret is missing from local environment")
+		// DB credential references are checked by the resolver at callback
+		// time; legacy env references must exist locally now.
+		if envName, legacy := strings.CutPrefix(parsed.WebhookSecretRef, tenant.LegacyEnvRefPrefix); legacy {
+			if lookup == nil {
+				return errors.New("webhook secret is missing from local environment")
+			}
+			if secret, ok := lookup(envName); !ok || secret == "" {
+				return errors.New("webhook secret is missing from local environment")
+			}
 		}
 		encoded, _ := json.Marshal(cfg)
 		if _, err := tx.Exec(ctx, `UPDATE integrations SET config=$2,is_enabled=true,updated_at=now() WHERE id=$1`, *source, encoded); err != nil {

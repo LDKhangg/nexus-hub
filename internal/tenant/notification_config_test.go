@@ -50,3 +50,41 @@ func TestNoticeRouteIsolation(t *testing.T) {
 		}
 	}
 }
+
+func TestNotificationConfig_RefOrLegacyEnv(t *testing.T) {
+	target := func(extra map[string]any) map[string]any {
+		m := map[string]any{"chat_id": "-100123"}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return m
+	}
+	c, err := ParseTelegramTargetConfig(target(map[string]any{"bot_token_ref": "telegram"}))
+	if err != nil || c.BotTokenRef != "telegram" {
+		t.Fatalf("ref: %+v %v", c, err)
+	}
+	c, err = ParseTelegramTargetConfig(target(map[string]any{"bot_token_env": "BOT_TOKEN"}))
+	if err != nil || c.BotTokenRef != "env:BOT_TOKEN" {
+		t.Fatalf("legacy: %+v %v", c, err)
+	}
+	c, err = ParseTelegramTargetConfig(target(map[string]any{"bot_token_ref": "telegram", "bot_token_env": "BOT_TOKEN"}))
+	if err != nil || c.BotTokenRef != "telegram" {
+		t.Fatalf("both: %+v %v", c, err)
+	}
+	for _, bad := range []map[string]any{{"bot_token_ref": "Bad Ref"}, {"bot_token_ref": "env:X"}, {}} {
+		if _, err := ParseTelegramTargetConfig(target(bad)); err == nil {
+			t.Fatalf("accepted %v", bad)
+		}
+	}
+	src := sourceConfig()
+	delete(src, "webhook_secret_env")
+	src["webhook_secret_ref"] = "clickup-webhook"
+	s, err := ParseClickUpNoticeConfig(src)
+	if err != nil || s.WebhookSecretRef != "clickup-webhook" {
+		t.Fatalf("source ref: %+v %v", s, err)
+	}
+	s, err = ParseClickUpNoticeConfig(sourceConfig())
+	if err != nil || s.WebhookSecretRef != "env:NEXUS_CLICKUP_WEBHOOK_SECRET" {
+		t.Fatalf("source legacy: %+v %v", s, err)
+	}
+}
