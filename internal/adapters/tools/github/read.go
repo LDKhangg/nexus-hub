@@ -157,6 +157,16 @@ func (b *base) checks(ctx context.Context, c tools.Call, in input, perms map[str
 			s.failed = append(s.failed, r.Name)
 		}
 	}
+	// Each legacy status counts on its own as well, so a failing status on a
+	// later page blocks a merge even if the combined state disagrees.
+	for _, st := range statuses {
+		switch st.State {
+		case "failure", "error":
+			s.failed = append(s.failed, "status:"+st.Context)
+		case "pending":
+			s.pending = append(s.pending, "status:"+st.Context)
+		}
+	}
 	// The combined status is "pending" when there are no legacy statuses.
 	s.combined = state
 	if len(statuses) == 0 && statusesTotal == 0 {

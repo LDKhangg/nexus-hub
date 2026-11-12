@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -86,7 +87,7 @@ func (a *Tier2Actor) Investigate(ctx context.Context, packet memory.ContextPacke
 	for _, s := range specs {
 		defs = append(defs, domain.ToolDef{Name: s.Name, Description: s.Description, InputSchema: s.InputSchema})
 	}
-	turns := []domain.Turn{{Role: domain.UserRole, Text: packet.Render() + "\nGoal: " + d.Goal}}
+	turns := []domain.Turn{{Role: domain.UserRole, Text: exec.CleanText(packet.Render() + "\nGoal: " + d.Goal)}}
 	var metas []resultMeta
 	lastText := ""
 
@@ -127,7 +128,9 @@ func (a *Tier2Actor) Investigate(ctx context.Context, packet memory.ContextPacke
 				report.Stopped = StopStepLimit
 				break
 			}
-			turns = append(turns, domain.Turn{Role: domain.AIRole, Text: resp.Text, Calls: resp.Calls})
+			// The assistant turn is echoed back on the next request, so its text
+			// and tool inputs are redacted like everything else sent to the LLM.
+			turns = append(turns, domain.Turn{Role: domain.AIRole, Text: exec.CleanText(resp.Text), Calls: cleanCalls(exec, resp.Calls)})
 			meta := resultMeta{turn: len(turns), step: step}
 			results := make([]domain.ToolResult, 0, len(resp.Calls))
 			for _, c := range resp.Calls {
@@ -205,4 +208,46 @@ func clipReport(s string) string {
 		s = strings.TrimRight(string(r[:ReportMaxRunes-utf8.RuneCountInString(marker)]), " \n") + marker
 	}
 	return s
+}
+
+// cleanCalls copies calls with every JSON string in their input passed
+// through the executor's sanitizer. Inputs that are not valid JSON are
+// replaced by an empty object so nothing unredacted is echoed.
+func cleanCalls(exec *tools.Executor, calls []domain.ToolCall) []domain.ToolCall {
+	out := make([]domain.ToolCall, len(calls))
+	for i, c := range calls {
+		c.Input = cleanJSON(exec, c.Input)
+		out[i] = c
+	}
+	return out
+}
+
+func cleanJSON(exec *tools.Executor, raw json.RawMessage) json.RawMessage {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return json.RawMessage(`{}`)
+	}
+	var walk func(any) any
+	walk = func(x any) any {
+		switch t := x.(type) {
+		case string:
+			return exec.CleanText(t)
+		case []any:
+			for i := range t {
+				t[i] = walk(t[i])
+			}
+			return t
+		case map[string]any:
+			for k, val := range t {
+				t[k] = walk(val)
+			}
+			return t
+		}
+		return x
+	}
+	b, err := json.Marshal(walk(v))
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return b
 }

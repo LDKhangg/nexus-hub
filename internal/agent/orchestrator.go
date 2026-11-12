@@ -218,6 +218,7 @@ func (o *Orchestrator) run(ctx context.Context, job *AgentJob, jc JobContext, pa
 		if budget.exhausted() {
 			return &TriageError{Code: CodeTokenBudget}
 		}
+		d.Goal = o.cleanInput(d.Goal)
 		report, err := investigator.Investigate(ctx, packet, d, persona, specs, exec, budget)
 		if uerr := o.addUsage(ctx, *job, &total, report.Usage); uerr != nil {
 			return uerr
@@ -229,9 +230,13 @@ func (o *Orchestrator) run(ctx context.Context, job *AgentJob, jc JobContext, pa
 		res.Text = o.clean(fmt.Sprintf("🔎 Nexus · %s\n%s · %s\n\n%s\n\nTools: %s\nTokens: %d/%d\n%s",
 			jc.Title, urgency(d), d.Summary, report.Text, toolsLine(report.Calls), total.Input+total.CacheRead+total.CacheWrite, total.Output, jc.TaskURL))
 	}
-	if res.Text != "" {
-		if n := unseenComments(jc, packet); n > 0 {
-			res.Text = o.clean(res.Text + fmt.Sprintf("\n(+%d earlier comment(s) in this batch were not shown to the AI; see the task)", n))
+	if n := unseenComments(jc, packet); n > 0 {
+		note := fmt.Sprintf("(+%d earlier comment(s) in this batch were not shown to the AI; see the task)", n)
+		if res.Text == "" {
+			// An Ignore must not silently cover comments the AI never saw.
+			res.Text = o.clean(fmt.Sprintf("🧠 Nexus · %s\nAI ignored the comments it saw.\n%s\n%s", jc.Title, note, jc.TaskURL))
+		} else {
+			res.Text = o.clean(res.Text + "\n" + note)
 		}
 	}
 	return o.store.CommitOutcome(ctx, *job, res)
@@ -257,11 +262,18 @@ func (o *Orchestrator) addUsage(ctx context.Context, job AgentJob, total *domain
 	return o.store.AddUsage(ctx, job, u)
 }
 
+// CompressTimeout bounds one rolling-summary update after a job.
+const CompressTimeout = time.Minute
+
 func (o *Orchestrator) compress(ctx context.Context, job AgentJob) {
 	if o.compressor == nil {
 		return
 	}
-	if _, _, err := o.compressor.Compress(ctx, job.WorkspaceID, job.ThreadID); err != nil && ctx.Err() == nil {
+	// The job is already committed; bound the summary call so a hung
+	// provider cannot stall the worker.
+	cctx, cancel := context.WithTimeout(ctx, CompressTimeout)
+	defer cancel()
+	if _, _, err := o.compressor.Compress(cctx, job.WorkspaceID, job.ThreadID); err != nil && ctx.Err() == nil {
 		log.Printf("agent worker: summary for job %d not updated", job.ID)
 	}
 }

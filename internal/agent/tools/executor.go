@@ -129,6 +129,15 @@ func NewExecutor(reg *Registry, policy tenant.ToolPolicyConfig, limits Limits, a
 	return &Executor{reg: reg, policy: policy, limits: limits, allowDangerous: allowDangerous, store: store, san: s, jobID: jobID, workspaceID: workspaceID}
 }
 
+// CleanText applies the executor's sanitizer (control characters and secret
+// redaction) to text that goes back to the LLM.
+func (e *Executor) CleanText(s string) string {
+	if e == nil || e.san == nil {
+		return s
+	}
+	return e.san.CleanOutbound(s, false)
+}
+
 // Enabled reports whether a tool may be offered to the LLM: read tools in
 // the enabled list, and non-read tools allowed for at least one repo.
 func (e *Executor) Enabled(name string) bool {

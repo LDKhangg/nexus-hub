@@ -379,6 +379,11 @@ func gitBlame(ctx context.Context, t *readTool, root string, in input) (tools.To
 }
 
 func gitStatus(ctx context.Context, t *readTool, root string, _ input) (tools.ToolOutput, error) {
+	// status hashes worktree files, so clean filters and similar programs
+	// from the repository config would run; refuse such a config first.
+	if err := t.checkWorktreeConfig(ctx, root); err != nil {
+		return tools.ToolOutput{}, err
+	}
 	res, err := t.git(ctx, root, "status", "--porcelain=v2", "--branch", "--untracked-files=normal")
 	if err != nil {
 		return tools.ToolOutput{}, err
@@ -391,4 +396,39 @@ func gitStatus(ctx context.Context, t *readTool, root string, _ input) (tools.To
 		lines = append(lines[:maxStatusLines], fmt.Sprintf("(%d more lines)", len(lines)-maxStatusLines))
 	}
 	return tools.ToolOutput{Text: strings.Join(lines, "\n"), Summary: fmt.Sprintf("%d status lines", len(lines))}, nil
+}
+
+// checkWorktreeConfig fails with unsafe_repo_config when the repository's
+// local config defines anything that makes git run a program while reading
+// the worktree: filters, textconv or external diff/merge commands, an
+// fsmonitor, or includes and worktree config that could add them.
+func (t *readTool) checkWorktreeConfig(ctx context.Context, root string) error {
+	res, err := t.git(ctx, root, "config", "--local", "--list", "-z")
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 || res.Truncated {
+		return deniedErr("unsafe_repo_config")
+	}
+	for _, entry := range strings.Split(string(res.Stdout), "\x00") {
+		key, _, _ := strings.Cut(entry, "\n")
+		if unsafeWorktreeKey(strings.ToLower(key)) {
+			return deniedErr("unsafe_repo_config")
+		}
+	}
+	return nil
+}
+
+func unsafeWorktreeKey(k string) bool {
+	switch {
+	case k == "":
+		return false
+	case strings.HasPrefix(k, "filter."), strings.HasPrefix(k, "include."), strings.HasPrefix(k, "includeif."):
+		return true
+	case strings.HasSuffix(k, ".textconv"), strings.HasSuffix(k, ".command"), strings.HasSuffix(k, ".driver"):
+		return true
+	case k == "core.fsmonitor", k == "core.worktree", k == "extensions.worktreeconfig", k == "diff.external":
+		return true
+	}
+	return false
 }
