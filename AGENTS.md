@@ -4,6 +4,15 @@ This repository is built by several agents with separate roles. Every agent
 working here follows this file. Code, comments, docs and commit messages are in
 English; talk to the owner in Vietnamese.
 
+## Product contract
+
+The destination is `docs/product/PCC-001.md`, the owner's Product Completion
+Contract; never edit it. `docs/product/ROADMAP.md` splits it into phases, and
+`docs/product/TRACEABILITY.md` tracks every PCC ID. Every phase plan names the
+PCC IDs it covers, and every `REQ-n` cites its PCC IDs. At the end of a phase,
+the Lead updates the traceability matrix from Test and Review evidence, and
+writes a Phase Completion Report (PCC §10.4) in `docs/product/reports/`.
+
 ## Roles
 
 | Role | Who | Does | Never does |
