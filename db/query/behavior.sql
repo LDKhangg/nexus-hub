@@ -210,6 +210,25 @@ RETURNING *;
 UPDATE public.approvals SET telegram_message_id = sqlc.arg(message_id)::bigint, updated_at = now()
 WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id);
 
+-- name: SetApprovalReplyMessage :execrows
+-- Free-text mode: only an open approval takes a reply message.
+UPDATE public.approvals SET reply_message_id = sqlc.arg(message_id)::bigint, updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND decision IS NULL;
+
+-- name: StageApprovalAnswer :one
+-- Stages a free-text reply on the newest open, unexpired approval in
+-- free-text mode for that message; no row when none.
+UPDATE public.approvals SET pending_answer = sqlc.arg(answer)::text, updated_at = now()
+WHERE id = (SELECT c.id FROM public.approvals c
+            WHERE c.workspace_id = sqlc.arg(workspace_id) AND c.reply_message_id = sqlc.arg(message_id)::bigint
+              AND c.decision IS NULL AND c.expires_at > sqlc.arg(at_time)::timestamptz
+            ORDER BY c.id DESC LIMIT 1 FOR UPDATE)
+RETURNING nonce;
+
+-- name: ClearApprovalPendingAnswer :execrows
+UPDATE public.approvals SET pending_answer = NULL, updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND pending_answer IS NOT NULL;
+
 -- name: ListApprovalsByRun :many
 SELECT * FROM public.approvals WHERE workspace_id = sqlc.arg(workspace_id) AND run_id = sqlc.arg(run_id) ORDER BY id;
 
@@ -217,8 +236,9 @@ SELECT * FROM public.approvals WHERE workspace_id = sqlc.arg(workspace_id) AND r
 
 -- name: InsertTelegramUpdate :one
 -- A repeated update_id returns no row.
-INSERT INTO public.telegram_updates(workspace_id, update_id, chat_id, kind, command, args)
-VALUES (sqlc.arg(workspace_id), sqlc.arg(update_id), sqlc.arg(chat_id), sqlc.arg(kind), sqlc.arg(command), sqlc.arg(args))
+INSERT INTO public.telegram_updates(workspace_id, update_id, chat_id, kind, command, args, integration_id, note)
+VALUES (sqlc.arg(workspace_id), sqlc.arg(update_id), sqlc.arg(chat_id), sqlc.arg(kind), sqlc.arg(command), sqlc.arg(args),
+        sqlc.narg(integration_id), sqlc.arg(note))
 ON CONFLICT (workspace_id, update_id) DO NOTHING
 RETURNING id;
 

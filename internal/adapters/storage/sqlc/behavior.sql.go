@@ -190,7 +190,7 @@ UPDATE public.telegram_updates AS u SET attempts = u.attempts + 1, claim_token =
 WHERE u.id = (SELECT c.id FROM public.telegram_updates c
               WHERE c.processed_at IS NULL AND (c.locked_until IS NULL OR c.locked_until <= $2::timestamptz)
               ORDER BY c.id FOR UPDATE SKIP LOCKED LIMIT 1)
-RETURNING u.id, u.workspace_id, u.update_id, u.chat_id, u.kind, u.command, u.args, u.attempts, u.locked_until, u.claim_token, u.received_at, u.processed_at, u.error_code
+RETURNING u.id, u.workspace_id, u.update_id, u.chat_id, u.kind, u.command, u.args, u.attempts, u.locked_until, u.claim_token, u.received_at, u.processed_at, u.error_code, u.integration_id, u.note
 `
 
 type ClaimTelegramUpdateParams struct {
@@ -217,8 +217,28 @@ func (q *Queries) ClaimTelegramUpdate(ctx context.Context, arg ClaimTelegramUpda
 		&i.ReceivedAt,
 		&i.ProcessedAt,
 		&i.ErrorCode,
+		&i.IntegrationID,
+		&i.Note,
 	)
 	return i, err
+}
+
+const clearApprovalPendingAnswer = `-- name: ClearApprovalPendingAnswer :execrows
+UPDATE public.approvals SET pending_answer = NULL, updated_at = now()
+WHERE workspace_id = $1 AND id = $2 AND pending_answer IS NOT NULL
+`
+
+type ClearApprovalPendingAnswerParams struct {
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+func (q *Queries) ClearApprovalPendingAnswer(ctx context.Context, arg ClearApprovalPendingAnswerParams) (int64, error) {
+	result, err := q.db.Exec(ctx, clearApprovalPendingAnswer, arg.WorkspaceID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const createApproval = `-- name: CreateApproval :one
@@ -226,7 +246,7 @@ const createApproval = `-- name: CreateApproval :one
 INSERT INTO public.approvals(workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at)
 VALUES ($1, $2, $3, $4, $5, $6,
   $7, $8, $9, $10)
-RETURNING id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at
+RETURNING id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer
 `
 
 type CreateApprovalParams struct {
@@ -276,6 +296,8 @@ func (q *Queries) CreateApproval(ctx context.Context, arg CreateApprovalParams) 
 		&i.TelegramMessageID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReplyMessageID,
+		&i.PendingAnswer,
 	)
 	return i, err
 }
@@ -356,7 +378,7 @@ UPDATE public.approvals SET decision = $1::text, answer = $2,
   decided_by = $3::text, decided_at = now(), updated_at = now()
 WHERE workspace_id = $4 AND nonce = $5
   AND decision IS NULL AND expires_at > $6::timestamptz
-RETURNING id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at
+RETURNING id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer
 `
 
 type DecideApprovalParams struct {
@@ -398,6 +420,8 @@ func (q *Queries) DecideApproval(ctx context.Context, arg DecideApprovalParams) 
 		&i.TelegramMessageID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReplyMessageID,
+		&i.PendingAnswer,
 	)
 	return i, err
 }
@@ -408,7 +432,7 @@ WHERE id IN (SELECT a.id FROM public.approvals a
              WHERE a.decision IS NULL AND a.expires_at <= $1::timestamptz
              ORDER BY a.expires_at, a.id
              FOR UPDATE SKIP LOCKED LIMIT $2::int)
-RETURNING id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at
+RETURNING id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer
 `
 
 type ExpireApprovalsParams struct {
@@ -444,6 +468,8 @@ func (q *Queries) ExpireApprovals(ctx context.Context, arg ExpireApprovalsParams
 			&i.TelegramMessageID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ReplyMessageID,
+			&i.PendingAnswer,
 		); err != nil {
 			return nil, err
 		}
@@ -539,7 +565,7 @@ func (q *Queries) ForgetDecision(ctx context.Context, arg ForgetDecisionParams) 
 }
 
 const getApproval = `-- name: GetApproval :one
-SELECT id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at FROM public.approvals WHERE workspace_id = $1 AND id = $2
+SELECT id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer FROM public.approvals WHERE workspace_id = $1 AND id = $2
 `
 
 type GetApprovalParams struct {
@@ -569,12 +595,14 @@ func (q *Queries) GetApproval(ctx context.Context, arg GetApprovalParams) (Appro
 		&i.TelegramMessageID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReplyMessageID,
+		&i.PendingAnswer,
 	)
 	return i, err
 }
 
 const getApprovalByNonce = `-- name: GetApprovalByNonce :one
-SELECT id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at FROM public.approvals WHERE workspace_id = $1 AND nonce = $2
+SELECT id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer FROM public.approvals WHERE workspace_id = $1 AND nonce = $2
 `
 
 type GetApprovalByNonceParams struct {
@@ -604,6 +632,8 @@ func (q *Queries) GetApprovalByNonce(ctx context.Context, arg GetApprovalByNonce
 		&i.TelegramMessageID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReplyMessageID,
+		&i.PendingAnswer,
 	)
 	return i, err
 }
@@ -1137,19 +1167,22 @@ func (q *Queries) InsertRunItem(ctx context.Context, arg InsertRunItemParams) (R
 
 const insertTelegramUpdate = `-- name: InsertTelegramUpdate :one
 
-INSERT INTO public.telegram_updates(workspace_id, update_id, chat_id, kind, command, args)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO public.telegram_updates(workspace_id, update_id, chat_id, kind, command, args, integration_id, note)
+VALUES ($1, $2, $3, $4, $5, $6,
+        $7, $8)
 ON CONFLICT (workspace_id, update_id) DO NOTHING
 RETURNING id
 `
 
 type InsertTelegramUpdateParams struct {
-	WorkspaceID pgtype.UUID
-	UpdateID    int64
-	ChatID      int64
-	Kind        string
-	Command     string
-	Args        string
+	WorkspaceID   pgtype.UUID
+	UpdateID      int64
+	ChatID        int64
+	Kind          string
+	Command       string
+	Args          string
+	IntegrationID pgtype.UUID
+	Note          string
 }
 
 // Telegram inbound.
@@ -1162,6 +1195,8 @@ func (q *Queries) InsertTelegramUpdate(ctx context.Context, arg InsertTelegramUp
 		arg.Kind,
 		arg.Command,
 		arg.Args,
+		arg.IntegrationID,
+		arg.Note,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -1222,7 +1257,7 @@ func (q *Queries) LatestBehaviorRunBySubject(ctx context.Context, arg LatestBeha
 }
 
 const listApprovalsByRun = `-- name: ListApprovalsByRun :many
-SELECT id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at FROM public.approvals WHERE workspace_id = $1 AND run_id = $2 ORDER BY id
+SELECT id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer FROM public.approvals WHERE workspace_id = $1 AND run_id = $2 ORDER BY id
 `
 
 type ListApprovalsByRunParams struct {
@@ -1258,6 +1293,8 @@ func (q *Queries) ListApprovalsByRun(ctx context.Context, arg ListApprovalsByRun
 			&i.TelegramMessageID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ReplyMessageID,
+			&i.PendingAnswer,
 		); err != nil {
 			return nil, err
 		}
@@ -1733,6 +1770,26 @@ func (q *Queries) SetApprovalMessage(ctx context.Context, arg SetApprovalMessage
 	return result.RowsAffected(), nil
 }
 
+const setApprovalReplyMessage = `-- name: SetApprovalReplyMessage :execrows
+UPDATE public.approvals SET reply_message_id = $1::bigint, updated_at = now()
+WHERE workspace_id = $2 AND id = $3 AND decision IS NULL
+`
+
+type SetApprovalReplyMessageParams struct {
+	MessageID   int64
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+// Free-text mode: only an open approval takes a reply message.
+func (q *Queries) SetApprovalReplyMessage(ctx context.Context, arg SetApprovalReplyMessageParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setApprovalReplyMessage, arg.MessageID, arg.WorkspaceID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const setBehaviorRunSnapshot = `-- name: SetBehaviorRunSnapshot :execrows
 UPDATE public.behavior_runs SET snapshot = $1, updated_at = now()
 WHERE workspace_id = $2 AND id = $3 AND snapshot IS NULL
@@ -1770,6 +1827,36 @@ func (q *Queries) SetBehaviorStatus(ctx context.Context, arg SetBehaviorStatusPa
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const stageApprovalAnswer = `-- name: StageApprovalAnswer :one
+UPDATE public.approvals SET pending_answer = $1::text, updated_at = now()
+WHERE id = (SELECT c.id FROM public.approvals c
+            WHERE c.workspace_id = $2 AND c.reply_message_id = $3::bigint
+              AND c.decision IS NULL AND c.expires_at > $4::timestamptz
+            ORDER BY c.id DESC LIMIT 1 FOR UPDATE)
+RETURNING nonce
+`
+
+type StageApprovalAnswerParams struct {
+	Answer      string
+	WorkspaceID pgtype.UUID
+	MessageID   int64
+	AtTime      pgtype.Timestamptz
+}
+
+// Stages a free-text reply on the newest open, unexpired approval in
+// free-text mode for that message; no row when none.
+func (q *Queries) StageApprovalAnswer(ctx context.Context, arg StageApprovalAnswerParams) (string, error) {
+	row := q.db.QueryRow(ctx, stageApprovalAnswer,
+		arg.Answer,
+		arg.WorkspaceID,
+		arg.MessageID,
+		arg.AtTime,
+	)
+	var nonce string
+	err := row.Scan(&nonce)
+	return nonce, err
 }
 
 const transitionRunItem = `-- name: TransitionRunItem :one

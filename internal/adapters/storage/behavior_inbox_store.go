@@ -10,12 +10,16 @@ import (
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // This file holds the BehaviorStore parts for approvals, inbound Telegram
 // updates, the profile and decision memory.
 
-var approvalNonceRe = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
+var (
+	approvalNonceRe = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
+	updateNoteRe    = regexp.MustCompile(`^[a-z_]{0,32}$`)
+)
 
 // --- approvals ---
 
@@ -25,7 +29,8 @@ func mapApproval(a sqlc.Approval) behavior.Approval {
 		ItemID: a.ItemID.Int64, Action: a.Action, Resource: a.Resource, Payload: a.Payload, Options: a.Options,
 		Nonce: a.Nonce, ExpiresAt: a.ExpiresAt.Time, Decision: behavior.Decision(a.Decision.String),
 		Answer: a.Answer.String, DecidedBy: a.DecidedBy.String, DecidedAt: tsPtr(a.DecidedAt),
-		TelegramMessageID: a.TelegramMessageID.Int64, CreatedAt: a.CreatedAt.Time,
+		TelegramMessageID: a.TelegramMessageID.Int64, ReplyMessageID: a.ReplyMessageID.Int64,
+		PendingAnswer: a.PendingAnswer.String, CreatedAt: a.CreatedAt.Time,
 	}
 }
 
@@ -154,6 +159,51 @@ func (s *BehaviorStore) SetApprovalMessage(ctx context.Context, workspaceID stri
 	return nil
 }
 
+func (s *BehaviorStore) SetReplyMessage(ctx context.Context, workspaceID string, id, messageID int64) error {
+	ws, err := parseDBID(workspaceID)
+	if err != nil {
+		return err
+	}
+	if messageID <= 0 {
+		return invalid("message_id")
+	}
+	n, err := s.q.SetApprovalReplyMessage(ctx, sqlc.SetApprovalReplyMessageParams{MessageID: messageID, WorkspaceID: ws, ID: id})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return behavior.ErrNotFound
+	}
+	return nil
+}
+
+func (s *BehaviorStore) StageAnswer(ctx context.Context, workspaceID string, messageID int64, answer string, now time.Time) (string, error) {
+	ws, err := parseDBID(workspaceID)
+	if err != nil {
+		return "", err
+	}
+	if messageID <= 0 {
+		return "", invalid("message_id")
+	}
+	if strings.TrimSpace(answer) == "" || utf8.RuneCountInString(answer) > 4000 {
+		return "", invalid("answer")
+	}
+	nonce, err := s.q.StageApprovalAnswer(ctx, sqlc.StageApprovalAnswerParams{Answer: answer, WorkspaceID: ws, MessageID: messageID, AtTime: ts(now)})
+	if err != nil {
+		return "", notFound(err)
+	}
+	return nonce, nil
+}
+
+func (s *BehaviorStore) ClearPendingAnswer(ctx context.Context, workspaceID string, id int64) error {
+	ws, err := parseDBID(workspaceID)
+	if err != nil {
+		return err
+	}
+	_, err = s.q.ClearApprovalPendingAnswer(ctx, sqlc.ClearApprovalPendingAnswerParams{WorkspaceID: ws, ID: id})
+	return err
+}
+
 func (s *BehaviorStore) ListApprovals(ctx context.Context, workspaceID string, runID int64) ([]behavior.Approval, error) {
 	ws, err := parseDBID(workspaceID)
 	if err != nil {
@@ -188,8 +238,18 @@ func (s *BehaviorStore) RecordUpdate(ctx context.Context, workspaceID string, u 
 	if utf8.RuneCountInString(u.Command) > 64 || utf8.RuneCountInString(u.Args) > 512 {
 		return false, invalid("args")
 	}
+	if !updateNoteRe.MatchString(u.Note) {
+		return false, invalid("note")
+	}
+	var integration pgtype.UUID
+	if u.IntegrationID != "" {
+		if integration, err = parseDBID(u.IntegrationID); err != nil {
+			return false, err
+		}
+	}
 	_, err = s.q.InsertTelegramUpdate(ctx, sqlc.InsertTelegramUpdateParams{
 		WorkspaceID: ws, UpdateID: u.UpdateID, ChatID: u.ChatID, Kind: string(u.Kind), Command: u.Command, Args: u.Args,
+		IntegrationID: integration, Note: u.Note,
 	})
 	if isNoRows(err) {
 		return false, nil
@@ -216,8 +276,9 @@ func (s *BehaviorStore) ClaimUpdate(ctx context.Context, now time.Time, lease ti
 		return nil, err
 	}
 	return &behavior.InboundUpdate{
-		ID: row.ID, WorkspaceID: uuidString(row.WorkspaceID), UpdateID: row.UpdateID, ChatID: row.ChatID,
-		Kind: behavior.UpdateKind(row.Kind), Command: row.Command, Args: row.Args, Attempts: int(row.Attempts),
+		ID: row.ID, WorkspaceID: uuidString(row.WorkspaceID), IntegrationID: uuidString(row.IntegrationID),
+		UpdateID: row.UpdateID, ChatID: row.ChatID, Kind: behavior.UpdateKind(row.Kind), Command: row.Command,
+		Args: row.Args, Note: row.Note, Attempts: int(row.Attempts),
 		ClaimToken: tok, ReceivedAt: row.ReceivedAt.Time,
 	}, nil
 }

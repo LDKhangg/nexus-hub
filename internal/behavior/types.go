@@ -130,6 +130,15 @@ const (
 	UpdateOther    UpdateKind = "other"
 )
 
+// Note codes on an inbound update say why content was not kept.
+const (
+	NoteArgsTooLong = "args_too_long" // command arguments over 512 characters
+	NoteTextTooLong = "text_too_long" // a free-text reply over 4000 characters
+	NoteBadCommand  = "bad_command"   // text starting with "/" that is not a command name
+	NoteNoOpenReply = "no_open_reply" // a reply to a message that waits for no answer
+	NoteBadCallback = "bad_callback"  // callback data that is not engine data
+)
+
 // Behavior is a behavior and its current draft.
 type Behavior struct {
 	ID            int64
@@ -279,22 +288,32 @@ type Approval struct {
 	DecidedBy         string
 	DecidedAt         *time.Time
 	TelegramMessageID int64
-	CreatedAt         time.Time
+	// ReplyMessageID puts the approval in free-text mode: a Telegram reply
+	// to this message is its answer. 0 when not in free-text mode.
+	ReplyMessageID int64
+	// PendingAnswer is a staged free-text reply not yet handed on.
+	PendingAnswer string
+	CreatedAt     time.Time
 }
 
 // InboundUpdate is a normalized Telegram update. Only a short command and
-// its arguments are kept, never the full message text.
+// its arguments are kept, never the full message text. For a callback,
+// Command holds the callback data and Args the callback query ID and the
+// message ID ("<query id> <message id>"); for a free-text reply, Args holds
+// the nonce of the approval the reply was staged on.
 type InboundUpdate struct {
-	ID          int64
-	WorkspaceID string
-	UpdateID    int64
-	ChatID      int64
-	Kind        UpdateKind
-	Command     string // at most 64 characters
-	Args        string // at most 512 characters
-	Attempts    int
-	ClaimToken  string
-	ReceivedAt  time.Time
+	ID            int64
+	WorkspaceID   string
+	IntegrationID string // the Telegram integration (bot) it came through
+	UpdateID      int64
+	ChatID        int64
+	Kind          UpdateKind
+	Command       string // at most 64 characters
+	Args          string // at most 512 characters
+	Note          string // a short code (see Note*), never content
+	Attempts      int
+	ClaimToken    string
+	ReceivedAt    time.Time
 }
 
 // Profile is the owner's personalization.
@@ -469,6 +488,15 @@ type ApprovalStore interface {
 	// ExpireDue marks up to limit overdue open approvals expired.
 	ExpireDue(ctx context.Context, now time.Time, limit int) ([]Approval, error)
 	SetApprovalMessage(ctx context.Context, workspaceID string, id, messageID int64) error
+	// SetReplyMessage puts an open approval in free-text mode: a reply to
+	// messageID becomes its answer. ErrNotFound when not open.
+	SetReplyMessage(ctx context.Context, workspaceID string, id, messageID int64) error
+	// StageAnswer stores a free-text reply on the newest open, unexpired
+	// approval whose reply message is messageID and returns its nonce;
+	// ErrNotFound when none waits for that message.
+	StageAnswer(ctx context.Context, workspaceID string, messageID int64, answer string, now time.Time) (nonce string, err error)
+	// ClearPendingAnswer drops a staged reply once it was handed on.
+	ClearPendingAnswer(ctx context.Context, workspaceID string, id int64) error
 	ListApprovals(ctx context.Context, workspaceID string, runID int64) ([]Approval, error)
 }
 

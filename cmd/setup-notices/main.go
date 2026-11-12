@@ -51,7 +51,7 @@ func commandFlags(name string) *flag.FlagSet {
 
 func runCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.Writer, lookup func(string) (string, bool)) error {
 	if len(args) == 0 {
-		return errors.New("usage: setup-notices init|bind-webhook|inspect|retry-failed|master-key|secret|migrate-secrets|settings|enable-agent|disable-agent|github-account|github-repo|github-check|behavior")
+		return errors.New("usage: setup-notices init|bind-webhook|inspect|retry-failed|master-key|secret|migrate-secrets|settings|enable-agent|disable-agent|github-account|github-repo|github-check|behavior|telegram")
 	}
 	switch args[0] {
 	case "init":
@@ -74,6 +74,8 @@ func runCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.W
 		return githubRepoCommand(ctx, pool, args[1:], out)
 	case "behavior":
 		return behaviorCommand(ctx, pool, args[1:], out)
+	case "telegram":
+		return telegramCommand(ctx, pool, args[1:], out, lookup)
 	case "github-check":
 		return githubCheck(ctx, pool, args[1:], out, lookup)
 	case "bind-webhook":

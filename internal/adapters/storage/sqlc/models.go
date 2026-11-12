@@ -55,6 +55,10 @@ type Approval struct {
 	TelegramMessageID pgtype.Int8
 	CreatedAt         pgtype.Timestamptz
 	UpdatedAt         pgtype.Timestamptz
+	// Free-text mode: a Telegram reply to this message is the answer.
+	ReplyMessageID pgtype.Int8
+	// The owner's free-text reply, staged until the worker hands it on.
+	PendingAnswer pgtype.Text
 }
 
 type Behavior struct {
@@ -254,19 +258,22 @@ type RunItem struct {
 
 // Inbound update dedupe and work queue; holds a short command and its arguments, never full message text.
 type TelegramUpdate struct {
-	ID          int64
-	WorkspaceID pgtype.UUID
-	UpdateID    int64
-	ChatID      int64
-	Kind        string
-	Command     string
-	Args        string
-	Attempts    int32
-	LockedUntil pgtype.Timestamptz
-	ClaimToken  pgtype.UUID
-	ReceivedAt  pgtype.Timestamptz
-	ProcessedAt pgtype.Timestamptz
-	ErrorCode   pgtype.Text
+	ID            int64
+	WorkspaceID   pgtype.UUID
+	UpdateID      int64
+	ChatID        int64
+	Kind          string
+	Command       string
+	Args          string
+	Attempts      int32
+	LockedUntil   pgtype.Timestamptz
+	ClaimToken    pgtype.UUID
+	ReceivedAt    pgtype.Timestamptz
+	ProcessedAt   pgtype.Timestamptz
+	ErrorCode     pgtype.Text
+	IntegrationID pgtype.UUID
+	// A short code such as args_too_long; never message text.
+	Note string
 }
 
 // Explicit same-workspace related-to links. A link neither authorizes access nor automatically merges context. Metadata may record the confirmed URL or human decision.
