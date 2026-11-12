@@ -109,6 +109,7 @@ func run() error {
 	inbox := behavior.NewInboxWorker(behavior.InboxDeps{
 		Inbox: behaviors, Approvals: behaviors, Defs: behaviors, Messenger: messenger,
 		Commands: commands, Undoer: engine, Callbacks: engine,
+		Tracer: &behavior.TraceService{Store: behaviors, Profiles: behaviors},
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
 	handler := httpdelivery.NewWebhookHandler(integrations, httpdelivery.NewVerifiedParserFactory(resolver), relay.NewNoticeService(notices))
 	e := echo.New()

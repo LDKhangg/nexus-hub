@@ -130,22 +130,25 @@ func (q *Queries) CancelPendingBehaviorRun(ctx context.Context, arg CancelPendin
 
 const claimBehaviorMessage = `-- name: ClaimBehaviorMessage :one
 
-INSERT INTO public.behavior_messages(workspace_id, run_id, msg_key)
-VALUES ($1, $2, $3)
+INSERT INTO public.behavior_messages(workspace_id, run_id, msg_key, correlation_id)
+SELECT r.workspace_id, r.id, $1, r.correlation_id
+FROM public.behavior_runs r
+WHERE r.workspace_id = $2 AND r.id = $3
 ON CONFLICT (run_id, msg_key) DO NOTHING
 RETURNING id
 `
 
 type ClaimBehaviorMessageParams struct {
+	MsgKey      string
 	WorkspaceID pgtype.UUID
 	RunID       int64
-	MsgKey      string
 }
 
 // Engine Telegram messages.
-// Claims a message key of a run once; a repeat returns no row.
+// Claims a message key of a run once; a repeat returns no row. The row
+// takes the run's correlation ID.
 func (q *Queries) ClaimBehaviorMessage(ctx context.Context, arg ClaimBehaviorMessageParams) (int64, error) {
-	row := q.db.QueryRow(ctx, claimBehaviorMessage, arg.WorkspaceID, arg.RunID, arg.MsgKey)
+	row := q.db.QueryRow(ctx, claimBehaviorMessage, arg.MsgKey, arg.WorkspaceID, arg.RunID)
 	var id int64
 	err := row.Scan(&id)
 	return id, err
@@ -716,7 +719,7 @@ func (q *Queries) GetBehaviorByName(ctx context.Context, arg GetBehaviorByNamePa
 }
 
 const getBehaviorMessage = `-- name: GetBehaviorMessage :one
-SELECT id, workspace_id, run_id, msg_key, telegram_message_id, created_at, sent_at FROM public.behavior_messages
+SELECT id, workspace_id, run_id, msg_key, telegram_message_id, created_at, sent_at, correlation_id FROM public.behavior_messages
 WHERE workspace_id = $1 AND run_id = $2 AND msg_key = $3
 `
 
@@ -737,6 +740,7 @@ func (q *Queries) GetBehaviorMessage(ctx context.Context, arg GetBehaviorMessage
 		&i.TelegramMessageID,
 		&i.CreatedAt,
 		&i.SentAt,
+		&i.CorrelationID,
 	)
 	return i, err
 }
@@ -1256,6 +1260,60 @@ func (q *Queries) InsertTelegramUpdate(ctx context.Context, arg InsertTelegramUp
 	return id, err
 }
 
+const latestBehaviorRunByCorrelation = `-- name: LatestBehaviorRunByCorrelation :one
+SELECT r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot, b.name AS behavior_name
+FROM public.behavior_runs r JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
+WHERE r.workspace_id = $1 AND r.correlation_id = $2
+ORDER BY r.created_at DESC, r.id DESC LIMIT 1
+`
+
+type LatestBehaviorRunByCorrelationParams struct {
+	WorkspaceID   pgtype.UUID
+	CorrelationID pgtype.UUID
+}
+
+type LatestBehaviorRunByCorrelationRow struct {
+	BehaviorRun  BehaviorRun
+	BehaviorName string
+}
+
+func (q *Queries) LatestBehaviorRunByCorrelation(ctx context.Context, arg LatestBehaviorRunByCorrelationParams) (LatestBehaviorRunByCorrelationRow, error) {
+	row := q.db.QueryRow(ctx, latestBehaviorRunByCorrelation, arg.WorkspaceID, arg.CorrelationID)
+	var i LatestBehaviorRunByCorrelationRow
+	err := row.Scan(
+		&i.BehaviorRun.ID,
+		&i.BehaviorRun.WorkspaceID,
+		&i.BehaviorRun.BehaviorID,
+		&i.BehaviorRun.BehaviorVersionID,
+		&i.BehaviorRun.Version,
+		&i.BehaviorRun.TriggerKind,
+		&i.BehaviorRun.Trigger,
+		&i.BehaviorRun.Subject,
+		&i.BehaviorRun.Revision,
+		&i.BehaviorRun.Status,
+		&i.BehaviorRun.CorrelationID,
+		&i.BehaviorRun.Attempts,
+		&i.BehaviorRun.RunAt,
+		&i.BehaviorRun.LockedUntil,
+		&i.BehaviorRun.ClaimToken,
+		&i.BehaviorRun.InputTokens,
+		&i.BehaviorRun.OutputTokens,
+		&i.BehaviorRun.CacheReadTokens,
+		&i.BehaviorRun.CacheWriteTokens,
+		&i.BehaviorRun.Steps,
+		&i.BehaviorRun.ErrorCode,
+		&i.BehaviorRun.Snapshot,
+		&i.BehaviorRun.UndoneAt,
+		&i.BehaviorRun.StartedAt,
+		&i.BehaviorRun.FinishedAt,
+		&i.BehaviorRun.CreatedAt,
+		&i.BehaviorRun.UpdatedAt,
+		&i.BehaviorRun.ContextSnapshot,
+		&i.BehaviorName,
+	)
+	return i, err
+}
+
 const latestBehaviorRunBySubject = `-- name: LatestBehaviorRunBySubject :one
 SELECT r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot, b.name AS behavior_name
 FROM public.behavior_runs r JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
@@ -1540,6 +1598,78 @@ func (q *Queries) ListEnabledBehaviorVersions(ctx context.Context, workspaceID p
 			&i.Document,
 			&i.Vars,
 			&i.PublishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRecentBehaviorRuns = `-- name: ListRecentBehaviorRuns :many
+SELECT r.id, b.name AS behavior_name, r.version, r.trigger_kind, r.subject, r.status,
+       COALESCE(r.error_code, '')::text AS error_code, r.correlation_id, r.created_at,
+       COUNT(i.id) FILTER (WHERE i.class = 'auto')::int AS auto_items,
+       COUNT(i.id) FILTER (WHERE i.class = 'notify')::int AS notify_items,
+       COUNT(i.id) FILTER (WHERE i.class = 'ask')::int AS ask_items
+FROM public.behavior_runs r
+JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
+LEFT JOIN public.run_items i ON i.workspace_id = r.workspace_id AND i.run_id = r.id
+WHERE r.workspace_id = $1
+  AND ($2::text = '' OR b.name = $2::text)
+GROUP BY r.id, b.name
+ORDER BY r.created_at DESC, r.id DESC
+LIMIT $3::int
+`
+
+type ListRecentBehaviorRunsParams struct {
+	WorkspaceID  pgtype.UUID
+	BehaviorName string
+	RowLimit     int32
+}
+
+type ListRecentBehaviorRunsRow struct {
+	ID            int64
+	BehaviorName  string
+	Version       int32
+	TriggerKind   string
+	Subject       string
+	Status        string
+	ErrorCode     string
+	CorrelationID pgtype.UUID
+	CreatedAt     pgtype.Timestamptz
+	AutoItems     int32
+	NotifyItems   int32
+	AskItems      int32
+}
+
+// Recent runs, newest first, optionally of one behavior, with item counts
+// by class.
+func (q *Queries) ListRecentBehaviorRuns(ctx context.Context, arg ListRecentBehaviorRunsParams) ([]ListRecentBehaviorRunsRow, error) {
+	rows, err := q.db.Query(ctx, listRecentBehaviorRuns, arg.WorkspaceID, arg.BehaviorName, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRecentBehaviorRunsRow
+	for rows.Next() {
+		var i ListRecentBehaviorRunsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.BehaviorName,
+			&i.Version,
+			&i.TriggerKind,
+			&i.Subject,
+			&i.Status,
+			&i.ErrorCode,
+			&i.CorrelationID,
+			&i.CreatedAt,
+			&i.AutoItems,
+			&i.NotifyItems,
+			&i.AskItems,
 		); err != nil {
 			return nil, err
 		}

@@ -106,7 +106,7 @@ func (t *ingestTriggers) start(ctx context.Context, e domain.NormalizedEvent) (i
 		}
 		if isNew {
 			created++
-			log.Printf("behavior ingest: run %d created for version %d correlation=%s", run.ID, m.Version.ID, run.CorrelationID)
+			log.Printf("behavior ingest: run %d created for version %d corr=%s", run.ID, m.Version.ID, run.CorrelationID)
 		}
 	}
 	return created, nil

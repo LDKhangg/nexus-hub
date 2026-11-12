@@ -7,6 +7,8 @@ import (
 	"log"
 	"strconv"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // CommandRunner implements CommandTriggers: a Telegram command starts every
@@ -100,12 +102,17 @@ func (c *CommandRunner) TriggerCommand(ctx context.Context, r CommandRequest) (s
 		if err != nil {
 			return "", err
 		}
+		// The run carries the command's correlation ID, so the inbound
+		// update's log line and every line of the run share one ID.
+		if _, perr := uuid.Parse(r.CorrelationID); perr == nil {
+			nr.CorrelationID = r.CorrelationID
+		}
 		run, created, err := c.runs.CreateRun(ctx, r.WorkspaceID, nr)
 		if err != nil {
 			return "", err
 		}
 		if created {
-			log.Printf("behavior: run %d created for version %d by command update %d correlation=%s", run.ID, p.m.Version.ID, r.UpdateID, run.CorrelationID)
+			log.Printf("behavior: run %d created for version %d by command update %d corr=%s", run.ID, p.m.Version.ID, r.UpdateID, run.CorrelationID)
 		}
 		if p.taskID != "" {
 			lines = append(lines, fmt.Sprintf("Đã nhận, đang chạy %s cho task %s (run #%d)", p.m.Version.Name, p.taskID, run.ID))

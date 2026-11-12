@@ -15,6 +15,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/agent"
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
 	"github.com/LDKhangg/nexus-hub/internal/descblock"
+	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
 
@@ -376,6 +377,18 @@ func toolCode(err error) string {
 		return te.Code
 	}
 	return CodeTaskUnreadable
+}
+
+// sendCode returns a safe code for a Messenger error, for logs.
+func sendCode(err error) string {
+	var de *relay.DeliveryError
+	if errors.As(err, &de) && codeRe.MatchString(de.Code) {
+		return de.Code
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return "send_failed"
 }
 
 // --- baseline and conflicts ---
@@ -903,7 +916,8 @@ func (e *Engine) feedbackRow(t texts, nonce string) []Button {
 
 // sendOnce sends a message of the run under key at most once. It returns
 // the message ID (0 when an earlier send's outcome is unknown).
-func (e *Engine) sendOnce(ctx context.Context, ws string, runID int64, key string, chat ChatRef, m OutMessage) (int64, error) {
+func (e *Engine) sendOnce(ctx context.Context, run Run, key string, chat ChatRef, m OutMessage) (int64, error) {
+	ws, runID := run.WorkspaceID, run.ID
 	claimed, id, err := e.d.Store.ClaimMessage(ctx, ws, runID, key)
 	if err != nil || !claimed {
 		return id, err
@@ -912,14 +926,17 @@ func (e *Engine) sendOnce(ctx context.Context, ws string, runID int64, key strin
 	id, err = e.d.Messenger.SendMessage(sctx, chat, m)
 	cancel()
 	if err != nil {
+		log.Printf("behavior run %d corr=%s: message %s not sent (%s)", runID, run.CorrelationID, key, sendCode(err))
 		if rerr := e.d.Store.ReleaseMessage(context.WithoutCancel(ctx), ws, runID, key); rerr != nil {
-			log.Printf("behavior run %d: message %s claim not released", runID, key)
+			log.Printf("behavior run %d corr=%s: message %s claim not released", runID, run.CorrelationID, key)
 		}
 		return 0, err
 	}
 	if err := e.d.Store.SetMessageID(ctx, ws, runID, key, id); err != nil {
+		log.Printf("behavior run %d corr=%s: message %s sent, id not stored", runID, run.CorrelationID, key)
 		return id, err
 	}
+	log.Printf("behavior run %d corr=%s: message %s sent", runID, run.CorrelationID, key)
 	return id, nil
 }
 
@@ -928,7 +945,7 @@ func (e *Engine) sendApproval(ctx context.Context, rc RunContext, chat ChatRef, 
 	if a.TelegramMessageID != 0 {
 		return nil
 	}
-	id, err := e.sendOnce(ctx, rc.Run.WorkspaceID, rc.Run.ID, fmt.Sprintf("approval:%d", a.ID), chat, m)
+	id, err := e.sendOnce(ctx, rc.Run, fmt.Sprintf("approval:%d", a.ID), chat, m)
 	if err != nil || id == 0 {
 		return err
 	}
@@ -1040,7 +1057,7 @@ func (e *Engine) summary(ctx context.Context, rc RunContext, chat ChatRef, key, 
 		}
 		msg.Buttons = [][]Button{e.feedbackRow(t, fb.Nonce)}
 	}
-	_, err := e.sendOnce(ctx, rc.Run.WorkspaceID, rc.Run.ID, key, chat, msg)
+	_, err := e.sendOnce(ctx, rc.Run, key, chat, msg)
 	return err
 }
 
@@ -1150,6 +1167,6 @@ func (e *Engine) RunFailed(ctx context.Context, rc RunContext, code string) erro
 		code = "failed"
 	}
 	t := textsFor(rc.Doc.Language)
-	_, err = e.sendOnce(ctx, rc.Run.WorkspaceID, rc.Run.ID, "failed", chat, OutMessage{Text: t.runFailed(name, rc.Run.ID, code)})
+	_, err = e.sendOnce(ctx, rc.Run, "failed", chat, OutMessage{Text: t.runFailed(name, rc.Run.ID, code)})
 	return err
 }

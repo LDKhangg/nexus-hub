@@ -1,0 +1,5 @@
+# Values for spec-review.yaml. Copy, edit, and import with:
+#   setup-notices behavior import spec-review.yaml --vars spec-review.vars.yaml --workspace-id <uuid>
+# Plain settings only, never secrets. Quote every value.
+review_status: "tech spec review"
+oq_heading: "Open Question"

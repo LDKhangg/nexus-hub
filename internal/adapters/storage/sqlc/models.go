@@ -83,6 +83,7 @@ type BehaviorMessage struct {
 	TelegramMessageID pgtype.Int8
 	CreatedAt         pgtype.Timestamptz
 	SentAt            pgtype.Timestamptz
+	CorrelationID     pgtype.UUID
 }
 
 type BehaviorRun struct {
@@ -318,6 +319,8 @@ type ToolRun struct {
 	CreatedAt      pgtype.Timestamptz
 	UpdatedAt      pgtype.Timestamptz
 	BehaviorRunID  pgtype.Int8
+	// The behavior run's correlation ID; NULL for agent job rows.
+	CorrelationID pgtype.UUID
 }
 
 type UserProfile struct {

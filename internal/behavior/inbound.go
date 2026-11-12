@@ -58,7 +58,9 @@ type TraceRequest struct {
 	CorrelationID string
 }
 
-// Tracer renders a short trace for Telegram (no secrets, no context text).
+// Tracer renders a short trace for the owner's private Telegram chat: no
+// secrets and no context the run read; the stored items (the owner's own
+// data) may appear.
 type Tracer interface {
 	Trace(ctx context.Context, r TraceRequest) (reply string, err error)
 }

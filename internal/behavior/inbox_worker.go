@@ -149,13 +149,13 @@ func (w *InboxWorker) processNext(ctx context.Context) (bool, error) {
 		return true, ctx.Err()
 	}
 	if out.retry && u.Attempts < w.settings.MaxAttempts {
-		log.Printf("telegram inbound: update=%d kind=%s code=%s attempt=%d correlation=%s retry", u.ID, u.Kind, out.code, u.Attempts, corr)
+		log.Printf("telegram inbound: update=%d kind=%s code=%s attempt=%d corr=%s retry", u.ID, u.Kind, out.code, u.Attempts, corr)
 		return true, nil // the lease ends and the update is claimed again
 	}
 	if err := w.d.Inbox.FinishUpdate(ctx, u.ID, u.ClaimToken, out.code); err != nil {
 		return true, err
 	}
-	log.Printf("telegram inbound: update=%d kind=%s code=%s correlation=%s", u.ID, u.Kind, out.code, corr)
+	log.Printf("telegram inbound: update=%d kind=%s code=%s corr=%s", u.ID, u.Kind, out.code, corr)
 	return true, nil
 }
 
@@ -264,13 +264,15 @@ func (w *InboxWorker) command(ctx context.Context, u InboundUpdate, to ChatRef, 
 	case "/help", "/start":
 		return w.reply(ctx, to, w.helpText(hctx, u.WorkspaceID), "")
 	case "/trace":
+		// The first word names the run; the rest is an item key, which may
+		// contain spaces.
 		f := strings.Fields(args)
-		if len(f) < 1 || len(f) > 2 {
+		if len(f) < 1 {
 			return w.reply(ctx, to, usageTrace, "usage")
 		}
 		r := TraceRequest{WorkspaceID: u.WorkspaceID, Ref: f[0], CorrelationID: corr}
-		if len(f) == 2 {
-			r.Item = f[1]
+		if len(f) > 1 {
+			r.Item = strings.Join(f[1:], " ")
 		}
 		reply, err = w.d.Tracer.Trace(hctx, r)
 	case "/undo":

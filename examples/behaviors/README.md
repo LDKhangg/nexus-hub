@@ -85,3 +85,37 @@ default, is an error.
 
 Vars are plain settings, never secrets. A value that looks like a token is
 rejected; store credentials with `setup-notices secret set`.
+
+## Try it: `spec-review`
+
+[`spec-review.yaml`](spec-review.yaml) reviews the tech-spec PR of a ClickUp
+task assigned to you against the task's user story, answers the open
+questions the evidence answers, and asks you only the real decisions
+(scope, business rules, priority, deadline, cost, security trade-offs,
+people). It starts on a status change to `{{vars.review_status}}`, when a
+task is assigned to you, or with `/review <task>` on Telegram. It runs with
+`dry_run: true`: answers it could give alone come to you as drafts with a
+"Đăng" button before anything is written to the task.
+
+```sh
+cp examples/behaviors/spec-review.vars.example.yaml spec-review.vars.yaml   # edit the values
+setup-notices behavior import examples/behaviors/spec-review.yaml --vars spec-review.vars.yaml --workspace-id <uuid>
+setup-notices behavior validate spec-review --workspace-id <uuid>
+setup-notices behavior publish spec-review --workspace-id <uuid>
+setup-notices behavior enable spec-review --workspace-id <uuid>
+```
+
+Then, in your private chat with the bot:
+
+```text
+/review https://app.clickup.com/t/<task id>
+/trace <task id>            # the latest run of the task: one line per item
+/trace <run id> oq-1        # one item in full: text, proposal, citations, actions, decisions
+```
+
+On the command line, `setup-notices runs --workspace-id <uuid> [--behavior spec-review]`
+lists recent runs, and `setup-notices trace --workspace-id <uuid> <run id | task> [--item <key>] [--json]`
+shows the full trace (also when `/trace` was cut to fit Telegram). A trace
+reference is a run ID, a ClickUp task ID or URL, or a correlation ID; every
+log line, tool run and engine message of a run carries that correlation ID
+(`corr=<id>` in the logs).

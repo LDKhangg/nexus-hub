@@ -265,7 +265,7 @@ func (e *Engine) answer(ctx context.Context, ap Approval, chat ChatRef, text, ac
 		return "", false, err
 	}
 	if removeButtons && ap.TelegramMessageID != 0 {
-		e.removeButtons(ctx, chat, ap.TelegramMessageID)
+		e.removeButtons(ctx, rc.Run, chat, ap.TelegramMessageID)
 	}
 	it, err := e.d.Store.GetItem(ctx, ap.WorkspaceID, ap.ItemID)
 	if err != nil {
@@ -439,11 +439,11 @@ func (e *Engine) updateChanges(ctx context.Context, rc RunContext, ap Approval, 
 	return err
 }
 
-func (e *Engine) removeButtons(ctx context.Context, chat ChatRef, messageID int64) {
+func (e *Engine) removeButtons(ctx context.Context, run Run, chat ChatRef, messageID int64) {
 	rctx, cancel := context.WithTimeout(ctx, e.s.RequestTimeout)
 	defer cancel()
 	if err := e.d.Messenger.RemoveButtons(rctx, chat, messageID); err != nil {
-		log.Printf("behavior: buttons of message %d not removed", messageID)
+		log.Printf("behavior run %d corr=%s: buttons of message %d not removed (%s)", run.ID, run.CorrelationID, messageID, sendCode(err))
 	}
 }
 
@@ -488,6 +488,14 @@ func (e *Engine) Sweep(ctx context.Context) (int, error) {
 }
 
 func (e *Engine) expired(ctx context.Context, a Approval) {
+	// The run gives the log lines their correlation ID; an approval without
+	// a readable run still expires.
+	run := Run{ID: a.RunID}
+	if a.RunID != 0 {
+		if r, gerr := e.d.Store.GetRun(ctx, a.WorkspaceID, a.RunID); gerr == nil {
+			run = r
+		}
+	}
 	var err error
 	switch a.Kind {
 	case ApprovalItemAnswer:
@@ -506,7 +514,9 @@ func (e *Engine) expired(ctx context.Context, a Approval) {
 		}
 	}
 	if err != nil && !errors.Is(err, ErrConflict) {
-		log.Printf("behavior approval %d: expired item %d not updated", a.ID, a.ItemID)
+		log.Printf("behavior run %d item %d corr=%s: approval %d expired, item not updated", run.ID, a.ItemID, run.CorrelationID, a.ID)
+	} else {
+		log.Printf("behavior run %d item %d corr=%s: approval %d expired", run.ID, a.ItemID, run.CorrelationID, a.ID)
 	}
 	if a.TelegramMessageID == 0 || a.Kind == ApprovalFeedback || a.Kind == ApprovalFeedbackReason {
 		return
@@ -515,7 +525,7 @@ func (e *Engine) expired(ctx context.Context, a Approval) {
 	if err != nil {
 		return
 	}
-	e.removeButtons(ctx, chat, a.TelegramMessageID)
+	e.removeButtons(ctx, run, chat, a.TelegramMessageID)
 }
 
 // --- Undoer ---
@@ -594,7 +604,7 @@ func (e *Engine) Undo(ctx context.Context, r UndoRequest) (string, error) {
 	if err := e.d.Store.MarkUndone(ctx, r.WorkspaceID, r.RunID); err != nil && !errors.Is(err, ErrConflict) {
 		return "", err
 	}
-	log.Printf("behavior run %d corr=%s: undone by owner (%d blocks)", rc.Run.ID, r.CorrelationID, len(blocks))
+	log.Printf("behavior run %d corr=%s req=%s: undone by owner (%d blocks)", rc.Run.ID, rc.Run.CorrelationID, r.CorrelationID, len(blocks))
 	for _, it := range items {
 		if it.Class == ClassAuto && it.Status == ItemDone {
 			e.remember(ctx, rc, it, answerOf(it), SourceAutoUndone)

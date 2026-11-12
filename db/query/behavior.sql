@@ -153,6 +153,29 @@ FROM public.behavior_runs r JOIN public.behaviors b ON b.workspace_id = r.worksp
 WHERE r.workspace_id = sqlc.arg(workspace_id) AND r.subject = sqlc.arg(subject)
 ORDER BY r.created_at DESC, r.id DESC LIMIT 1;
 
+-- name: LatestBehaviorRunByCorrelation :one
+SELECT sqlc.embed(r), b.name AS behavior_name
+FROM public.behavior_runs r JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
+WHERE r.workspace_id = sqlc.arg(workspace_id) AND r.correlation_id = sqlc.arg(correlation_id)
+ORDER BY r.created_at DESC, r.id DESC LIMIT 1;
+
+-- name: ListRecentBehaviorRuns :many
+-- Recent runs, newest first, optionally of one behavior, with item counts
+-- by class.
+SELECT r.id, b.name AS behavior_name, r.version, r.trigger_kind, r.subject, r.status,
+       COALESCE(r.error_code, '')::text AS error_code, r.correlation_id, r.created_at,
+       COUNT(i.id) FILTER (WHERE i.class = 'auto')::int AS auto_items,
+       COUNT(i.id) FILTER (WHERE i.class = 'notify')::int AS notify_items,
+       COUNT(i.id) FILTER (WHERE i.class = 'ask')::int AS ask_items
+FROM public.behavior_runs r
+JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
+LEFT JOIN public.run_items i ON i.workspace_id = r.workspace_id AND i.run_id = r.id
+WHERE r.workspace_id = sqlc.arg(workspace_id)
+  AND (sqlc.arg(behavior_name)::text = '' OR b.name = sqlc.arg(behavior_name)::text)
+GROUP BY r.id, b.name
+ORDER BY r.created_at DESC, r.id DESC
+LIMIT sqlc.arg(row_limit)::int;
+
 -- Run items.
 
 -- name: InsertRunItem :one
@@ -337,9 +360,12 @@ ORDER BY v.version;
 -- Engine Telegram messages.
 
 -- name: ClaimBehaviorMessage :one
--- Claims a message key of a run once; a repeat returns no row.
-INSERT INTO public.behavior_messages(workspace_id, run_id, msg_key)
-VALUES (sqlc.arg(workspace_id), sqlc.arg(run_id), sqlc.arg(msg_key))
+-- Claims a message key of a run once; a repeat returns no row. The row
+-- takes the run's correlation ID.
+INSERT INTO public.behavior_messages(workspace_id, run_id, msg_key, correlation_id)
+SELECT r.workspace_id, r.id, sqlc.arg(msg_key), r.correlation_id
+FROM public.behavior_runs r
+WHERE r.workspace_id = sqlc.arg(workspace_id) AND r.id = sqlc.arg(run_id)
 ON CONFLICT (run_id, msg_key) DO NOTHING
 RETURNING id;
 
