@@ -125,7 +125,7 @@ func TestNoticeEndToEnd(t *testing.T) {
 		}
 		return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(payload)), Header: make(http.Header)}, nil
 	})}, lookup)
-	restarted, err := NewNoticeRepository(pool, repo.newID)
+	restarted, err := NewNoticeRepository(pool, repo.newID, DebounceSettings{})
 	if err != nil {
 		t.Fatal(err)
 	}

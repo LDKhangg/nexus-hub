@@ -46,7 +46,7 @@ func run() error {
 	if err != nil {
 		return errors.New("integration repository startup failed")
 	}
-	notices, err := storage.NewNoticeRepository(pool, func() (string, error) { id, err := uuid.NewV7(); return id.String(), err })
+	notices, err := storage.NewNoticeRepository(pool, func() (string, error) { id, err := uuid.NewV7(); return id.String(), err }, storage.DebounceSettings{})
 	if err != nil {
 		return errors.New("notice repository startup failed")
 	}
