@@ -49,7 +49,7 @@ func (t *readTool) Run(ctx context.Context, c tools.Call) (tools.ToolOutput, err
 		return tools.ToolOutput{}, toolErr("repo_unavailable")
 	}
 	if t.managedOnly && !c.Repo.Managed {
-		return tools.ToolOutput{}, toolErr("not_managed")
+		return tools.ToolOutput{}, deniedErr("not_managed")
 	}
 	root, err := cloneRoot(c.Repo, t.reposDir)
 	if err != nil {
@@ -196,7 +196,7 @@ func (t *readTool) readBlob(ctx context.Context, root, ref, rawPath string) (str
 		return "", nil, err
 	}
 	if deniedPath(p) {
-		return "", nil, toolErr("denied_path")
+		return "", nil, deniedErr("denied_path")
 	}
 	obj := ref + ":" + p
 	res, err := t.git(ctx, root, "cat-file", "-t", obj)
@@ -280,7 +280,7 @@ func gitLog(ctx context.Context, t *readTool, root string, in input) (tools.Tool
 	args := []string{"log", "--no-color", "--no-ext-diff", "--no-textconv", "--date=short", "--format=%h %ad %an: %s", "-n", strconv.Itoa(n), "--end-of-options", in.Ref, "--"}
 	if p != "" {
 		if deniedPath(p) {
-			return tools.ToolOutput{}, toolErr("denied_path")
+			return tools.ToolOutput{}, deniedErr("denied_path")
 		}
 		args = append(args, p)
 	}
@@ -358,7 +358,7 @@ func gitBlame(ctx context.Context, t *readTool, root string, in input) (tools.To
 		return tools.ToolOutput{}, err
 	}
 	if deniedPath(p) {
-		return tools.ToolOutput{}, toolErr("denied_path")
+		return tools.ToolOutput{}, deniedErr("denied_path")
 	}
 	start, end := lineWindow(in.StartLine, in.EndLine, maxBlameLines)
 	res, err := t.git(ctx, root, "blame", "--no-textconv", "--date=short", "-L", fmt.Sprintf("%d,%d", start, end), in.Ref, "--", p) // blame mis-parses --end-of-options; validRef forbids a leading "-"

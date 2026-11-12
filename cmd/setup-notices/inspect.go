@@ -5,11 +5,38 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"regexp"
 	"time"
 
+	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var auditToolRe = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+
+// auditTool prints a stored tool name only if it has the shape of a tool
+// name; older rows may hold whatever the LLM sent.
+func auditTool(v any) any {
+	if s, ok := v.(string); ok && auditToolRe.MatchString(s) {
+		return s
+	}
+	return "invalid"
+}
+
+// auditRepo prints a stored repo only if it is a valid owner/name.
+func auditRepo(v any) any {
+	s, ok := v.(string)
+	if ok && (s == "" || tenant.ValidRepo(s)) {
+		return s
+	}
+	return "invalid"
+}
+
+// auditFilters are applied to free-text audit columns before printing.
+var auditFilters = map[string]map[string]func(any) any{
+	"tool_runs": {"tool": auditTool, "repo": auditRepo},
+}
 
 // inspect prints delivery and agent state. It never selects message
 // content, payloads, tool inputs/outputs, configs or ciphertext.
@@ -53,6 +80,10 @@ func emitRows(rows pgx.Rows, table string, cols []string, enc *json.Encoder) err
 		for i, c := range cols {
 			if t, ok := vals[i].(time.Time); ok {
 				row[c] = t.UTC()
+				continue
+			}
+			if f := auditFilters[table][c]; f != nil {
+				row[c] = f(vals[i])
 				continue
 			}
 			row[c] = vals[i]

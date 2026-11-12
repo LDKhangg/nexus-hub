@@ -122,7 +122,7 @@ func (t *wsTool) UsesNetwork() bool                        { return t.network }
 
 func (t *wsTool) Run(ctx context.Context, c tools.Call) (tools.ToolOutput, error) {
 	if c.Repo == nil || !c.Repo.Managed {
-		return tools.ToolOutput{}, toolErr("not_managed")
+		return tools.ToolOutput{}, deniedErr("not_managed")
 	}
 	in, err := decode(c.Input, t.allowed...)
 	if err != nil {
@@ -210,7 +210,7 @@ func (w *workspace) verifyConfig(ctx context.Context, root, repo string) error {
 		return err
 	}
 	if res.ExitCode != 0 || res.Truncated {
-		return toolErr("unsafe_repo_config")
+		return deniedErr("unsafe_repo_config")
 	}
 	urls := 0
 	for _, entry := range bytes.Split(res.Stdout, []byte{0}) {
@@ -223,15 +223,15 @@ func (w *workspace) verifyConfig(ctx context.Context, root, repo string) error {
 		case lower == "remote.origin.url":
 			urls++
 			if value != w.remoteURL(repo) {
-				return toolErr("unsafe_repo_config")
+				return deniedErr("unsafe_repo_config")
 			}
 		case allowedConfigKeys[lower]:
 		case !safeBranchConfig(key, value):
-			return toolErr("unsafe_repo_config")
+			return deniedErr("unsafe_repo_config")
 		}
 	}
 	if urls != 1 {
-		return toolErr("unsafe_repo_config")
+		return deniedErr("unsafe_repo_config")
 	}
 	return nil
 }
@@ -569,15 +569,24 @@ func gitCommit(ctx context.Context, w *workspace, c tools.Call, root string, in 
 		if err != nil {
 			return tools.ToolOutput{}, err
 		}
+		// Paths are literal: no pathspec magic and no glob may widen what
+		// git add stages.
+		if strings.HasPrefix(p, ":") || strings.ContainsAny(p, "*?[]") {
+			return tools.ToolOutput{}, toolErr("invalid_input")
+		}
 		if deniedPath(p) {
-			return tools.ToolOutput{}, toolErr("denied_path")
+			return tools.ToolOutput{}, deniedErr("denied_path")
 		}
 		paths = append(paths, p)
 	}
 	if c.Account == nil || c.Account.CommitName == "" || c.Account.CommitEmail == "" {
 		return tools.ToolOutput{}, toolErr("account_identity_missing")
 	}
-	res, err := w.run(ctx, root, nil, false, append([]string{"add", "--"}, paths...)...)
+	args := []string{"add", "--"}
+	for _, p := range paths {
+		args = append(args, ":(literal)"+p)
+	}
+	res, err := w.run(ctx, root, nil, false, args...)
 	if err != nil {
 		return tools.ToolOutput{}, err
 	}
@@ -586,6 +595,11 @@ func gitCommit(ctx context.Context, w *workspace, c tools.Call, root string, in 
 			return tools.ToolOutput{}, toolErr("not_found")
 		}
 		return tools.ToolOutput{}, gitErr(res)
+	}
+	// The commit takes the whole index: a directory path, or a file staged
+	// earlier, may have put a secret file in it. Check what is staged.
+	if err := w.checkStaged(ctx, root); err != nil {
+		return tools.ToolOutput{}, err
 	}
 	clean := w.san.CleanOutbound(msg, true)
 	res, err = w.run(ctx, root, nil, false,
@@ -602,6 +616,32 @@ func gitCommit(ctx context.Context, w *workspace, c tools.Call, root string, in 
 		return tools.ToolOutput{}, gitErr(res)
 	}
 	return tools.ToolOutput{Text: fmt.Sprintf("committed %d path(s)", len(paths)) + headInfo(ctx, w, root), Summary: fmt.Sprintf("committed %d path(s)", len(paths))}, nil
+}
+
+// checkStaged refuses with denied_path when any staged path is a secret
+// path, after unstaging everything (an index-only mixed reset). It fails
+// closed: if the index cannot be listed, nothing is committed.
+func (w *workspace) checkStaged(ctx context.Context, root string) error {
+	res, err := w.run(ctx, root, nil, false, "diff", "--cached", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv")
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 || res.Truncated {
+		w.unstage(ctx, root)
+		return gitErr(res)
+	}
+	for _, f := range strings.Split(string(res.Stdout), "\x00") {
+		if f != "" && deniedPath(f) {
+			w.unstage(ctx, root)
+			return deniedErr("denied_path")
+		}
+	}
+	return nil
+}
+
+// unstage resets only the index to HEAD; the work tree is untouched.
+func (w *workspace) unstage(ctx context.Context, root string) {
+	_, _ = w.run(ctx, root, nil, false, "reset", "-q")
 }
 
 var branchKeyRe = regexp.MustCompile(`^branch\.(.+)\.(remote|merge)$`)
@@ -623,7 +663,7 @@ func gitConfigSet(ctx context.Context, w *workspace, _ tools.Call, root string, 
 	default:
 		m := branchKeyRe.FindStringSubmatch(key)
 		if m == nil || !validBranch(m[1]) {
-			return tools.ToolOutput{}, toolErr("config_key_denied")
+			return tools.ToolOutput{}, deniedErr("config_key_denied")
 		}
 		if m[2] == "remote" && value != "origin" {
 			return tools.ToolOutput{}, toolErr("invalid_input")
@@ -657,7 +697,7 @@ func gitPush(ctx context.Context, w *workspace, c tools.Call, root string, in in
 		}
 	}
 	if !allowed {
-		return tools.ToolOutput{}, toolErr("branch_not_allowed")
+		return tools.ToolOutput{}, deniedErr("branch_not_allowed")
 	}
 	env, err := w.tokenEnv(ctx, c, permsWrite)
 	if err != nil {

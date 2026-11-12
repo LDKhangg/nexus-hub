@@ -28,6 +28,10 @@ const (
 	StatusDryRun         = "dry_run"
 )
 
+// InvalidToolName is stored in the audit trail instead of a tool name that
+// is not registered.
+const InvalidToolName = "invalid_tool"
+
 // MaxInputBytes caps a tool call's JSON input.
 const MaxInputBytes = 16 * 1024
 
@@ -82,12 +86,14 @@ type ToolRunStore interface {
 	Deny(ctx context.Context, r RunStart, code string) error
 }
 
-// CallResult is what the actor feeds back to the LLM.
+// CallResult is what the actor feeds back to the LLM. Tool is the name as
+// audited: the registered tool name, or InvalidToolName.
 type CallResult struct {
 	Content string
 	IsError bool
 	Status  string
 	Tier    tenant.Tier
+	Tool    string
 }
 
 // Executor enforces the tool policy for one agent job.
@@ -145,9 +151,12 @@ func (e *Executor) Specs() []ToolSpec {
 }
 
 // Call runs one tool call through every policy check, in order.
-func (e *Executor) Call(ctx context.Context, step int, name string, input json.RawMessage) CallResult {
-	start := RunStart{WorkspaceID: e.workspaceID, JobID: e.jobID, Step: step, Tool: name, Tier: tenant.TierRead}
+func (e *Executor) Call(ctx context.Context, step int, name string, input json.RawMessage) (res CallResult) {
+	// The audit row stores only validated identifiers: an unregistered tool
+	// name from the LLM is replaced by a placeholder, never stored verbatim.
+	start := RunStart{WorkspaceID: e.workspaceID, JobID: e.jobID, Step: step, Tool: InvalidToolName, Tier: tenant.TierRead}
 	start.InputRedacted = e.redactInput(input)
+	defer func() { res.Tool = start.Tool }()
 
 	e.mu.Lock()
 	e.calls++
@@ -159,6 +168,7 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 	if tool == nil {
 		return e.deny(ctx, start, "unknown_tool")
 	}
+	start.Tool = name
 	spec := tool.Spec()
 	start.Tier = spec.Tier
 	// 2. enabled
@@ -176,7 +186,7 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 	call := Call{Input: input, WorkspaceID: e.workspaceID, ClickUpTokenRef: e.ClickUpTokenRef}
 	if rs, ok := tool.(RepoScoped); ok {
 		repo, err := rs.Repo(input)
-		if err != nil {
+		if err != nil || !tenant.ValidRepo(repo) {
 			return e.deny(ctx, start, "invalid_input")
 		}
 		start.Repo = repo
@@ -297,6 +307,9 @@ func classify(err error, tier tenant.Tier) (string, string) {
 	var te *ToolError
 	isTimeout := errors.As(err, new(timeoutErr))
 	switch {
+	case errors.As(err, &te) && te.Denied:
+		// A policy refusal inside the tool happens before any effect.
+		return StatusDenied, te.Code
 	case errors.As(err, &te) && te.Code == "tool_panic":
 		if tier == tenant.TierRead {
 			return StatusError, te.Code

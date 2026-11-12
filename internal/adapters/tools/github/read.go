@@ -149,6 +149,7 @@ func prChecks(ctx context.Context, t *readTool, c tools.Call, in input) (tools.T
 func prFiles(ctx context.Context, t *readTool, c tools.Call, in input) (tools.ToolOutput, error) {
 	var files []struct {
 		Filename, Status, Patch string
+		PreviousFilename        string `json:"previous_filename"`
 		Additions, Deletions    int
 	}
 	if err := t.do(ctx, c, in, permsRead, "GET", fmt.Sprintf("/repos/%s/pulls/%d/files?per_page=%d", in.Repo, in.num(), maxFiles), nil, &files); err != nil {
@@ -159,6 +160,10 @@ func prFiles(ctx context.Context, t *readTool, c tools.Call, in input) (tools.To
 	for _, f := range files {
 		fmt.Fprintf(&sb, "%s (%s +%d -%d)\n", f.Filename, f.Status, f.Additions, f.Deletions)
 		if f.Patch == "" {
+			continue
+		}
+		if tools.DeniedPath(f.Filename) || (f.PreviousFilename != "" && tools.DeniedPath(f.PreviousFilename)) {
+			sb.WriteString("[patch withheld: secret path]\n")
 			continue
 		}
 		limit := min(maxPatchPerFile, budget)

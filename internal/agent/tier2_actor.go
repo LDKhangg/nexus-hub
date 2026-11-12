@@ -133,7 +133,13 @@ func (a *Tier2Actor) Investigate(ctx context.Context, packet memory.ContextPacke
 			for _, c := range resp.Calls {
 				r := exec.Call(ctx, step, c.Name, c.Input)
 				results = append(results, domain.ToolResult{CallID: c.ID, Content: r.Content, IsError: r.IsError})
-				report.Calls = append(report.Calls, CallRecord{Step: step, Name: c.Name, Status: r.Status, Tier: r.Tier, IsError: r.IsError})
+				// The report names the tool as audited, never an unregistered
+				// name the LLM made up.
+				name := c.Name
+				if r.Tool != "" {
+					name = r.Tool
+				}
+				report.Calls = append(report.Calls, CallRecord{Step: step, Name: name, Status: r.Status, Tier: r.Tier, IsError: r.IsError})
 				meta.entries = append(meta.entries, struct {
 					name, status string
 					bytes        int

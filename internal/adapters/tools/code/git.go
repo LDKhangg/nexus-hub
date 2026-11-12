@@ -51,6 +51,9 @@ func hardenedArgs(root string, sub ...string) []string {
 
 func toolErr(code string) error { return &tools.ToolError{Code: code} }
 
+// deniedErr is a refusal on policy grounds; the executor audits it as denied.
+func deniedErr(code string) error { return &tools.ToolError{Code: code, Denied: true} }
+
 var refRe = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,100}$`)
 
 // validRef applies the syntactic ref rules (HEAD, branch names, SHAs).
@@ -93,27 +96,7 @@ func cleanRepoPath(p string, allowRoot bool) (string, error) {
 }
 
 // deniedPath reports whether a repo path may hold secrets.
-func deniedPath(p string) bool {
-	lower := strings.ToLower(p)
-	parts := strings.Split(lower, "/")
-	for _, part := range parts[:len(parts)-1] {
-		if part == "secrets" {
-			return true
-		}
-	}
-	base := parts[len(parts)-1]
-	switch {
-	case base == ".env" || strings.HasPrefix(base, ".env."):
-		return true
-	case strings.HasSuffix(base, ".pem"), strings.HasSuffix(base, ".key"), strings.HasSuffix(base, ".p12"), strings.HasSuffix(base, ".kdbx"):
-		return true
-	case strings.HasPrefix(base, "id_rsa"), strings.HasPrefix(base, "id_ed25519"):
-		return true
-	case strings.Contains(base, "credentials"), base == "secrets":
-		return true
-	}
-	return false
-}
+func deniedPath(p string) bool { return tools.DeniedPath(p) }
 
 // deniedPathspecs exclude secret-shaped paths from diff and log output.
 var deniedPathspecs = []string{
@@ -171,7 +154,7 @@ func runGit(ctx context.Context, r Runner, cmd execrunner.Command) (execrunner.R
 	if err != nil {
 		var de *execrunner.DeniedError
 		if errors.As(err, &de) {
-			return res, toolErr(de.Code)
+			return res, deniedErr(de.Code)
 		}
 		if ctx.Err() != nil {
 			return res, ctx.Err()

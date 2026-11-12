@@ -31,10 +31,12 @@ type Call struct {
 type ToolOutput struct{ Text, Summary string }
 
 // ToolError is a tool failure with a safe code; its text never carries
-// secrets or raw upstream bodies.
+// secrets or raw upstream bodies. Denied marks a refusal on policy grounds
+// (secret path, branch pattern, repo mismatch...), audited as denied.
 type ToolError struct {
 	Code      string
 	Retryable bool
+	Denied    bool
 }
 
 func (e *ToolError) Error() string { return e.Code }

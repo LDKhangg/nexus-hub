@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LDKhangg/nexus-hub/internal/adapters/netguard"
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
@@ -88,6 +90,10 @@ func (t *taskTool) Run(ctx context.Context, c tools.Call) (tools.ToolOutput, err
 	if err != nil {
 		if ctx.Err() != nil {
 			return tools.ToolOutput{}, ctx.Err()
+		}
+		var de *netguard.DeniedError
+		if errors.As(err, &de) {
+			return tools.ToolOutput{}, &tools.ToolError{Code: de.Code, Denied: true}
 		}
 		return tools.ToolOutput{}, toolErr("network_error", true)
 	}

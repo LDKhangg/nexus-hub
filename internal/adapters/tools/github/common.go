@@ -47,6 +47,12 @@ type input struct {
 
 func toolErr(code string) error { return &tools.ToolError{Code: code} }
 
+// deniedErr is a refusal on policy grounds; the executor audits it as denied.
+func deniedErr(code string) error { return &tools.ToolError{Code: code, Denied: true} }
+
+// netguardDenied are the client codes for a destination the dialer blocked.
+var netguardDenied = map[string]bool{"host_denied": true, "address_denied": true}
+
 // decode validates the common {repo, number} shape and rejects unknown keys.
 func decode(raw json.RawMessage, allowed ...string) (input, error) {
 	var probe map[string]json.RawMessage
@@ -106,7 +112,7 @@ func (b *base) prepare(c tools.Call, allowed ...string) (input, error) {
 		return in, err
 	}
 	if c.Repo == nil || !strings.EqualFold(c.Repo.Repo, in.Repo) {
-		return in, toolErr("repo_mismatch")
+		return in, deniedErr("repo_mismatch")
 	}
 	if c.Account == nil {
 		return in, toolErr("no_account")
@@ -118,7 +124,7 @@ func (b *base) do(ctx context.Context, c tools.Call, in input, perms map[string]
 	err := b.api.Do(ctx, c.WorkspaceID, *c.Account, in.Repo, perms, method, path, body, out)
 	var ge *github.GitHubError
 	if errors.As(err, &ge) {
-		return &tools.ToolError{Code: ge.Code, Retryable: ge.Retryable}
+		return &tools.ToolError{Code: ge.Code, Retryable: ge.Retryable, Denied: netguardDenied[ge.Code]}
 	}
 	return err
 }
