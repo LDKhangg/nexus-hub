@@ -26,7 +26,7 @@ func setupDB(t *testing.T) (context.Context, *pgxpool.Pool) {
 	if err != nil {
 		t.Fatal("invalid test URL")
 	}
-	if cfg.ConnConfig.Host != "127.0.0.1" || cfg.ConnConfig.Database != "nexus_storage_test" || len(cfg.ConnConfig.Fallbacks) != 0 {
+	if cfg.ConnConfig.Host != "127.0.0.1" || cfg.ConnConfig.Port != 5434 || cfg.ConnConfig.Database != "nexus_storage_test" || len(cfg.ConnConfig.Fallbacks) != 0 {
 		t.Fatal("test URL must use dedicated loopback database with sslmode=disable")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -35,20 +35,20 @@ func setupDB(t *testing.T) (context.Context, *pgxpool.Pool) {
 	if err != nil {
 		t.Fatal("test connection failed")
 	}
-	name := "nexus_setup_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
-		t.Fatal(err)
+	// Shared with storage/testdb_test.go: serialize schema ownership across
+	// package test binaries without creating or dropping any database.
+	if _, err := admin.Exec(ctx, "SELECT pg_advisory_lock(762150021)"); err != nil {
+		_ = admin.Close(ctx)
+		t.Fatal("cannot acquire test schema lock")
 	}
 	t.Cleanup(func() {
 		c, done := context.WithTimeout(context.Background(), 10*time.Second)
 		defer done()
-		_, err := admin.Exec(c, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)")
-		if err != nil {
-			t.Error(err)
-		}
 		_ = admin.Close(c)
 	})
-	cfg.ConnConfig.Database = name
+	if _, err := admin.Exec(ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public"); err != nil {
+		t.Fatal("cannot reset authorized test schema")
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
