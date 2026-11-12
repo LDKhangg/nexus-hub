@@ -386,7 +386,7 @@ exit criteria, and the decisions it needs.
 | D1 | How workers run project tests (E2E-001 "Worker chạy tests phù hợp") | Decided, deferred | The VPS is too small to run project tests. Until the system runs on a local machine, workers do **not** run tests. They push a PR; testing is delegated to an external tester (the ClickUp `@AI` agent, or CI checks), and Nexus-Hub reads and reports the result. A worker test sandbox returns when local hosting exists. This is a PCC exception to record at Gate A. |
 | D2 | Admin UI | Decided | A CLI only for now (setup and administration). Daily control goes through Telegram commands. EPIC 13 (UI-001–UI-030), FR-020, FR-117 (UI part) and Gate D "configure workflows through the UI" become a PCC exception, unless the owner later asks for a UI. |
 | D3 | Telegram inbound | Decided | Webhook, verified with the secret-token header, on the same public HTTPS endpoint as the ClickUp webhooks. Rationale: no idle polling connection, instant delivery; the VPS already has a public domain (D5). Long polling only wins behind NAT. |
-| D4 | Users ↔ workspaces | Open | Who besides the owner will send commands or receive reports? See the question in the Phase 4 plan. |
+| D4 | Users ↔ workspaces | Decided | Only the owner uses the system for now: one user owns one workspace. The schema keeps `users` and `external_identities` so other people can be added later, but only when the owner opens the next stage of the product. |
 | D5 | Hosting and remote access | Decided | Host on the VPS, with a public domain and port for HTTPS (reverse proxy + TLS). Webhooks are public; administration uses the CLI over SSH. |
 | D6 | Real-service acceptance | Decided | Use the real ClickUp tasks assigned to the owner (no test workspace needed). The owner's primary use cases are listed in §7. |
 
@@ -421,6 +421,9 @@ forward.
    removes an assignee. These are ClickUp writes, so they go through the
    policy and an explicit owner confirmation.
 3. **Code → PR → external test → notification.** A worker implements, then
-   pushes a branch and opens a PR. The ClickUp `@AI` agent (or CI) tests it.
+   pushes a branch and opens a PR. When all the code for the task is done,
+   Nexus-Hub itself calls the ClickUp `@AI` agent to test it (a comment on the
+   task mentioning `@AI`, which is a ClickUp write under the policy). CI checks
+   count too.
    Nexus-Hub picks up the result (a ClickUp comment or GitHub checks) and
    notifies the owner on Telegram.
