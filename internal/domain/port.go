@@ -20,3 +20,8 @@ type ControlPlanePort interface {
 type LLMProvider interface {
 	Generate(ctx context.Context, req *LLMRequest) (*LLMResponse, error)
 }
+
+// ToolCallingProvider runs one tool-calling step.
+type ToolCallingProvider interface {
+	GenerateWithTools(ctx context.Context, req *ToolRequest) (*ToolResponse, error)
+}
