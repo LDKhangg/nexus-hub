@@ -50,6 +50,8 @@ func TestMerge_Preconditions(t *testing.T) {
 		{"draft", strings.Replace(prJSON, `"draft":false`, `"draft":true`, 1), greenRuns, `{"state":"success","statuses":[]}`, mergeIn, nil, "pr_draft"},
 		{"closed", strings.Replace(prJSON, `"state":"open"`, `"state":"closed"`, 1), greenRuns, `{}`, mergeIn, nil, "pr_not_open"},
 		{"sha_mismatch", prJSON, greenRuns, `{}`, strings.Replace(mergeIn, "abc1234def", "fff0000aaa", 1), nil, "head_sha_mismatch"},
+		// TC-12 (REQ-5): the owner requires an exact SHA, not a prefix.
+		{"sha_prefix_only", prJSON, greenRuns, `{"state":"success","statuses":[]}`, strings.Replace(mergeIn, "abc1234def", "abc1234", 1), nil, "head_sha_mismatch"},
 		{"base_not_listed", strings.Replace(prJSON, `"ref":"develop"`, `"ref":"release"`, 1), greenRuns, `{}`, mergeIn, nil, "base_not_allowed"},
 		{"main_empty_list", strings.Replace(prJSON, `"ref":"develop"`, `"ref":"main"`, 1), greenRuns, `{}`, mergeIn, func(g *tenant.RepoGrant) { g.MergeBaseBranches = nil }, "base_not_allowed"},
 		{"method", prJSON, greenRuns, `{}`, strings.Replace(mergeIn, "squash", "rebase", 1), nil, "merge_method_not_allowed"},

@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -41,6 +44,36 @@ func TestApproved_StatusCannotExecuteCleanFilter(t *testing.T) {
 	}
 	if err == nil {
 		t.Error("git_status accepted unsafe repository configuration")
+	}
+}
+
+// TC-16, TC-34 (REQ-7, REQ-F1), D1: dropping any read-config gate must
+// expose a denial failure, even for keys that do not execute on this platform.
+func TestApproved_StatusRejectsEveryProgramConfigChannel(t *testing.T) {
+	for _, key := range []string{"filter.attack.clean", "filter.attack.smudge", "filter.attack.process", "diff.attack.textconv", "diff.attack.command", "merge.attack.driver", "core.fsmonitor", "core.worktree", "include.path", "includeIf.gitdir:/.path", "extensions.worktreeConfig", "diff.external"} {
+		t.Run(key, func(t *testing.T) {
+			e := newWS(t, "main", 1<<30)
+			e.sync(t)
+			marker := filepath.Join(t.TempDir(), "executed")
+			program := filepath.Join(t.TempDir(), "program")
+			if err := os.WriteFile(program, []byte("#!/bin/sh\nprintf executed > '"+marker+"'\ncat\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			value := program
+			if key == "extensions.worktreeConfig" {
+				value = "true"
+			}
+			sh(t, e.clone, "config", "--local", key, value)
+			_, err := run(t, findTool(t, NewReadTools(newTestRunner(t), e.reposDir), "git_status"), wsGrant(), `{"repo":"acme/app"}`)
+			wantCode(t, err, "unsafe_repo_config")
+			var te *tools.ToolError
+			if !errors.As(err, &te) || !te.Denied {
+				t.Error("unsafe status config is not a policy denial")
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Error("repository program executed")
+			}
+		})
 	}
 }
 
@@ -304,6 +337,35 @@ type approvedRunnerFunc func(context.Context, execrunner.Command) (execrunner.Re
 
 func (f approvedRunnerFunc) Run(ctx context.Context, c execrunner.Command) (execrunner.Result, error) {
 	return f(ctx, c)
+}
+
+// TC-36 (REQ-F2): removing http.followRedirects=false makes real git hit
+// the second TLS server. Both endpoints are local fakes; no public DNS/network.
+func TestApproved_RealGitHTTPSNeverFollowsRedirect(t *testing.T) {
+	var sourceHits, targetHits atomic.Int32
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { targetHits.Add(1); w.WriteHeader(500) }))
+	defer target.Close()
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sourceHits.Add(1)
+		http.Redirect(w, r, target.URL+r.URL.RequestURI(), http.StatusMovedPermanently)
+	}))
+	defer source.Close()
+	inner := newTestRunner(t)
+	r := approvedRunnerFunc(func(ctx context.Context, c execrunner.Command) (execrunner.Result, error) {
+		// Trust only the local fake's self-signed certificate for this probe.
+		c.Args = append([]string{"-c", "http.sslVerify=false"}, c.Args...)
+		return inner.Run(ctx, c)
+	})
+	ts := newWorkspaceTools(r, &fakeTokens{}, t.TempDir(), 1<<20, testSan{}, source.URL+"/")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := findTool(t, ts, "git_sync").Run(ctx, tools.Call{Repo: wsGrant(), Account: &tenant.GitHubAccount{Name: "acc"}, Input: json.RawMessage(`{"repo":"acme/app"}`)})
+	if err == nil {
+		t.Error("redirecting clone succeeded")
+	}
+	if sourceHits.Load() != 1 || targetHits.Load() != 0 {
+		t.Errorf("TLS requests source=%d target=%d", sourceHits.Load(), targetHits.Load())
+	}
 }
 
 // TC-56 (REQ-F15): a live producer must be cancelled, not merely checked on exit.

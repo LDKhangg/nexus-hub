@@ -218,7 +218,9 @@ func TestApproved_InspectSanitizesLegacyIdentifiers(t *testing.T) {
 			t.Error("unsafe legacy audit metadata printed")
 		}
 	}
-	if !strings.Contains(out.String(), "invalid_tool") {
-		t.Error("safe invalid tool placeholder missing")
+	// D4: owner-approved oracle: legacy inspect uses "invalid"; only new
+	// executor audit rows use "invalid_tool" (covered in storage tests).
+	if !strings.Contains(out.String(), `"tool":"invalid"`) {
+		t.Error("safe legacy invalid tool placeholder missing")
 	}
 }

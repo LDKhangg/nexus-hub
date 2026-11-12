@@ -128,6 +128,35 @@ func TestApproved_ActorFollowUpAllTextChannelsRedacted(t *testing.T) {
 	}
 }
 
+// TC-22, TC-42 (REQ-10, REQ-F5), D2: JSON object keys are text too. An
+// untrusted provider can echo a pasted secret as a nested key, not just a value.
+func TestApproved_ActorNestedJSONKeysCannotEchoKnownSecret(t *testing.T) {
+	secret := "fake-private-nested-json-key"
+	s := &fakeStore{job: job(1), ctx: jobCtx([]string{"fake_read"})}
+	tr := &fakeTriager{d: TriageDecision{Category: CategoryInvestigate, Confidence: .95, Summary: "Kiểm tra", Goal: "Tìm lỗi"}}
+	input, _ := json.Marshal(map[string]any{"nested": []any{map[string]any{secret: "business value", "safe": []string{secret}}}})
+	llm := &scriptedLLM{responses: []*domain.ToolResponse{
+		{Stop: domain.StopToolUse, Calls: []domain.ToolCall{call("safe-id", "fake_read", string(input))}}, answer("Đã xử lý 🔎"),
+	}}
+	o := newOrch(t, s, tr, &fakeInvestigator{})
+	o.redactor = NewRedactor([]string{secret})
+	o.models = func(context.Context, string) (Triager, Investigator, error) {
+		return tr, NewTier2Actor(llm, "fake-actor"), nil
+	}
+	if err := o.processNext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(llm.reqs) != 2 {
+		t.Fatal("nested-input investigation did not complete")
+	}
+	for i, req := range llm.reqs {
+		b, _ := json.Marshal(req)
+		if strings.Contains(string(b), secret) {
+			t.Errorf("known secret in nested JSON key reached actor request %d", i+1)
+		}
+	}
+}
+
 type approvedCaptureTriager struct {
 	packet   memory.ContextPacket
 	persona  string
@@ -216,6 +245,57 @@ type approvedCompressorProbe struct {
 	t      *testing.T
 	store  *fakeStore
 	called bool
+}
+
+type approvedBlockingCompressor struct {
+	started  chan context.Context
+	finished chan struct{}
+}
+
+func (c *approvedBlockingCompressor) Compress(ctx context.Context, _, _ string) (bool, domain.Usage, error) {
+	c.started <- ctx
+	<-ctx.Done()
+	close(c.finished)
+	return false, domain.Usage{}, ctx.Err()
+}
+
+// TC-30 (REQ-14), D6: a blocked compressor observes cancellation and the
+// already committed main report survives. The independent minute bound is
+// checked before cancellation, without waiting a minute in the suite.
+func TestApproved_BlockedCompressionCancelsWithoutLosingReport(t *testing.T) {
+	s := &fakeStore{job: job(1), ctx: jobCtx(nil)}
+	o := newOrch(t, s, &fakeTriager{d: TriageDecision{Category: CategoryNotify, Confidence: .9, Summary: "Đã xử lý"}}, &fakeInvestigator{})
+	c := &approvedBlockingCompressor{started: make(chan context.Context, 1), finished: make(chan struct{})}
+	o.compressor = c
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- o.processNext(ctx) }()
+	select {
+	case cc := <-c.started:
+		if deadline, ok := cc.Deadline(); !ok || time.Until(deadline) > time.Minute {
+			t.Error("compression can stall worker indefinitely")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("compression never started")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Error("optional compression cancellation failed main job")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("blocked compressor did not release worker")
+	}
+	select {
+	case <-c.finished:
+	default:
+		t.Error("worker returned without awaiting compressor")
+	}
+	if s.outcome == nil || s.fallback != nil || s.retryCode != "" {
+		t.Error("compression cancellation lost committed result")
+	}
 }
 
 func (c *approvedCompressorProbe) Compress(ctx context.Context, _, _ string) (bool, domain.Usage, error) {

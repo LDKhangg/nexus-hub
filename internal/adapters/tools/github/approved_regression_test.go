@@ -20,7 +20,7 @@ func approvedRuns(n, total int, conclusion string) string {
 func approvedStatuses(n, total int, state string) string {
 	statuses := make([]map[string]string, n)
 	for i := range statuses {
-		statuses[i] = map[string]string{"context": fmt.Sprintf("status-%d", i), "state": state}
+		statuses[i] = map[string]string{"context": fmt.Sprintf("status-%d-%d", n, i), "state": state}
 	}
 	b, _ := json.Marshal(map[string]any{"total_count": total, "state": "success", "statuses": statuses})
 	return string(b)
@@ -28,7 +28,7 @@ func approvedStatuses(n, total int, state string) string {
 
 // TC-57 (REQ-F16), TC-58 (REQ-F16): every page matters; no mutation on unread checks.
 func TestApproved_MergeReadsEveryCheckPage(t *testing.T) {
-	for _, mode := range []string{"green", "101st_failure", "101st_pending", "31st_status_failure", "incomplete", "page_error", "cap"} {
+	for _, mode := range []string{"green", "101st_failure", "101st_pending", "31st_status_failure", "31st_status_error", "31st_status_pending", "incomplete", "page_error", "cap"} {
 		t.Run(mode, func(t *testing.T) {
 			api := mergeAPI(prJSON, approvedRuns(100, 101, "success"), approvedStatuses(30, 31, "success"))
 			run2 := "GET /repos/o/r/commits/abc1234def/check-runs?per_page=100&page=2"
@@ -46,6 +46,12 @@ func TestApproved_MergeReadsEveryCheckPage(t *testing.T) {
 			case "31st_status_failure":
 				api.resp[status2] = approvedStatuses(1, 31, "failure")
 				want = "checks_failing"
+			case "31st_status_error":
+				api.resp[status2] = approvedStatuses(1, 31, "error")
+				want = "checks_failing"
+			case "31st_status_pending":
+				api.resp[status2] = approvedStatuses(1, 31, "pending")
+				want = "checks_pending"
 			case "incomplete":
 				api.resp[run2] = approvedRuns(0, 101, "success")
 				want = "checks_unverified"
