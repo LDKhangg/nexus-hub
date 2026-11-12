@@ -244,13 +244,21 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 			e.mu.Unlock()
 			return e.deny(ctx, start, "audit_unavailable")
 		}
+		over := ""
 		switch {
 		case tier == tenant.TierDangerous && e.dangerous >= e.limits.MaxDangerous:
-			e.mu.Unlock()
-			return e.deny(ctx, start, "dangerous_budget")
+			over = "dangerous_budget"
 		case e.writes >= e.policy.MaxWritesPerJob:
+			over = "write_budget"
+		}
+		if over != "" {
 			e.mu.Unlock()
-			return e.deny(ctx, start, "write_budget")
+			// The budget is usually spent by this very call's earlier
+			// attempt; report that run (ok or unknown outcome), not a denial.
+			if prior := e.findPrior(ctx, CanonicalKey(e.jobID, name, input)); prior != nil {
+				return replayResult(prior, tier)
+			}
+			return e.deny(ctx, start, over)
 		}
 		e.writes++
 		if tier == tenant.TierDangerous {
@@ -275,10 +283,7 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 			}
 			e.mu.Unlock()
 		}
-		if prior.Status == StatusOK {
-			return CallResult{Content: "already done earlier in this job: " + prior.Summary, Status: StatusOK, Tier: tier}
-		}
-		return CallResult{Content: "error: unknown_outcome (an earlier attempt of this exact call did not finish; do not retry it)", IsError: true, Status: StatusUnknownOutcome, Tier: tier}
+		return replayResult(prior, tier)
 	}
 	// 9. dry run
 	if tier != tenant.TierRead && e.policy.DryRun {
@@ -329,6 +334,31 @@ func (e *Executor) loadBudget(ctx context.Context) error {
 	}
 	e.budgetLoaded = true
 	return nil
+}
+
+// PriorFinder is an optional ToolRunStore capability: look up an earlier
+// non-read run of a key without recording anything.
+type PriorFinder interface {
+	FindPrior(ctx context.Context, key string) (*PriorRun, error)
+}
+
+func (e *Executor) findPrior(ctx context.Context, key string) *PriorRun {
+	pf, ok := e.store.(PriorFinder)
+	if !ok {
+		return nil
+	}
+	prior, err := pf.FindPrior(ctx, key)
+	if err != nil {
+		return nil
+	}
+	return prior
+}
+
+func replayResult(prior *PriorRun, tier tenant.Tier) CallResult {
+	if prior.Status == StatusOK {
+		return CallResult{Content: "already done earlier in this job: " + prior.Summary, Status: StatusOK, Tier: tier}
+	}
+	return CallResult{Content: "error: unknown_outcome (an earlier attempt of this exact call did not finish; do not retry it)", IsError: true, Status: StatusUnknownOutcome, Tier: tier}
 }
 
 type timeoutErr struct{}

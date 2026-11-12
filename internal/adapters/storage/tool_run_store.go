@@ -78,6 +78,23 @@ func (s *ToolRunStore) Begin(ctx context.Context, r tools.RunStart) (int64, *too
 	return id, nil, tx.Commit(ctx)
 }
 
+// FindPrior returns the earlier non-read run of key that blocks a new one
+// (ok or ambiguous), or nil; it records nothing.
+func (s *ToolRunStore) FindPrior(ctx context.Context, key string) (*tools.PriorRun, error) {
+	prior, err := sqlc.New(s.pool).FindPriorToolRun(ctx, key)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, nil
+	case err != nil:
+		return nil, err
+	case prior.Status == tools.StatusOK:
+		return &tools.PriorRun{Status: tools.StatusOK, Summary: prior.ResultSummary}, nil
+	}
+	return &tools.PriorRun{Status: tools.StatusUnknownOutcome}, nil
+}
+
+var _ tools.PriorFinder = (*ToolRunStore)(nil)
+
 // Finish completes a started run; rows already finished are left alone.
 func (s *ToolRunStore) Finish(ctx context.Context, f tools.RunFinish) error {
 	_, err := sqlc.New(s.pool).FinishToolRun(ctx, sqlc.FinishToolRunParams{

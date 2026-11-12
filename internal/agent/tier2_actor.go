@@ -238,10 +238,11 @@ func cleanJSON(exec *tools.Executor, raw json.RawMessage) json.RawMessage {
 			}
 			return t
 		case map[string]any:
+			m := make(map[string]any, len(t))
 			for k, val := range t {
-				t[k] = walk(val)
+				m[exec.CleanText(k)] = walk(val)
 			}
-			return t
+			return m
 		}
 		return x
 	}

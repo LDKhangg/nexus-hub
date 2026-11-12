@@ -400,8 +400,8 @@ func gitStatus(ctx context.Context, t *readTool, root string, _ input) (tools.To
 
 // checkWorktreeConfig fails with unsafe_repo_config when the repository's
 // local config defines anything that makes git run a program while reading
-// the worktree: filters, textconv or external diff/merge commands, an
-// fsmonitor, or includes and worktree config that could add them.
+// the worktree and that hardenedArgs cannot override: filters, textconv or
+// diff/merge commands, or includes and worktree config that could add them.
 func (t *readTool) checkWorktreeConfig(ctx context.Context, root string) error {
 	res, err := t.git(ctx, root, "config", "--local", "--list", "-z")
 	if err != nil {
@@ -427,7 +427,9 @@ func unsafeWorktreeKey(k string) bool {
 		return true
 	case strings.HasSuffix(k, ".textconv"), strings.HasSuffix(k, ".command"), strings.HasSuffix(k, ".driver"):
 		return true
-	case k == "core.fsmonitor", k == "core.worktree", k == "extensions.worktreeconfig", k == "diff.external":
+	// core.fsmonitor and diff.external are not listed: hardenedArgs already
+	// overrides them on the command line, which wins over repository config.
+	case k == "core.worktree", k == "extensions.worktreeconfig":
 		return true
 	}
 	return false

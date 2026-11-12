@@ -61,7 +61,7 @@ func merge(ctx context.Context, t *dangerTool, c tools.Call, in input) (tools.To
 		return tools.ToolOutput{}, toolErr("pr_not_open")
 	case p.Draft:
 		return tools.ToolOutput{}, toolErr("pr_draft")
-	case p.Head.SHA == "" || !strings.HasPrefix(p.Head.SHA, in.HeadSHA):
+	case p.Head.SHA == "" || !strings.EqualFold(p.Head.SHA, in.HeadSHA):
 		return tools.ToolOutput{}, toolErr("head_sha_mismatch")
 	case !slices.Contains(c.Repo.MergeBaseBranches, p.Base.Ref): // never an implicit main/master
 		return tools.ToolOutput{}, deniedErr("base_not_allowed")

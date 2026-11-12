@@ -196,7 +196,7 @@ func prChecks(ctx context.Context, t *readTool, c tools.Call, in input) (tools.T
 	}
 	head := fmt.Sprintf("%d passed, %d failed, %d pending, %d skipped", len(s.passed), len(s.failed), len(s.pending), len(s.skipped))
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "PR #%d head %s: %s\n", p.Number, short(p.Head.SHA), head)
+	fmt.Fprintf(&sb, "PR #%d head %s: %s\n", p.Number, p.Head.SHA, head)
 	if len(s.failed) > 0 {
 		sb.WriteString("failed: " + listNames(s.failed) + "\n")
 	}
