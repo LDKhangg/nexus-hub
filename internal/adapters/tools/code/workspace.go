@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -12,7 +13,10 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/tools/execrunner"
@@ -32,6 +36,13 @@ const (
 	maxCommitPaths    = 100
 	maxCommitMsgRunes = 2000
 	maxConfigValue    = 200
+
+	// diskReserveBytes is the free space kept on top of maxCloneBytes.
+	diskReserveBytes = 1 << 30
+	// watchInterval is how often a running clone, fetch or pull is sized.
+	watchInterval = 500 * time.Millisecond
+	// remoteDefaultTimeout bounds the local rev-parse in EffectiveTier.
+	remoteDefaultTimeout = 10 * time.Second
 )
 
 var (
@@ -120,24 +131,188 @@ func (t *wsTool) Run(ctx context.Context, c tools.Call) (tools.ToolOutput, error
 	if c.Repo.Repo != in.Repo {
 		return tools.ToolOutput{}, toolErr("repo_unavailable")
 	}
-	root, err := managedPath(t.w.reposDir, in.Repo)
+	defer t.w.lock(in.Repo)()
+	root, err := t.w.safeRoot(in.Repo)
 	if err != nil {
 		return tools.ToolOutput{}, err
 	}
-	defer t.w.lock(in.Repo)()
-	if t.needs {
-		if st, err := os.Stat(filepath.Join(root, ".git")); err != nil || !st.IsDir() {
-			return tools.ToolOutput{}, toolErr("repo_unavailable")
+	exists := hasGitDir(root)
+	if t.needs && !exists {
+		return tools.ToolOutput{}, toolErr("repo_unavailable")
+	}
+	if exists {
+		// Every tool on an existing clone, git_sync's fetch included, runs
+		// only after the clone's local config passed the allowlist.
+		if err := t.w.verifyConfig(ctx, root, in.Repo); err != nil {
+			return tools.ToolOutput{}, err
 		}
 	}
 	return t.exec(ctx, t.w, c, root, in)
+}
+
+// hasGitDir reports whether root/.git is a real directory (not a symlink).
+func hasGitDir(root string) bool {
+	st, err := os.Lstat(filepath.Join(root, ".git"))
+	return err == nil && st.IsDir()
+}
+
+// safeRoot returns the managed clone path after checking that every
+// existing path component below reposDir (owner, repo, and .git) is a real
+// directory, not a symlink. reposDir itself is resolved once, so a
+// symlinked repos_dir still works; the returned path is under the resolved
+// reposDir. Missing components are fine (git_sync creates them).
+func (w *workspace) safeRoot(repo string) (string, error) {
+	root, err := managedPath(w.reposDir, repo)
+	if err != nil {
+		return "", err
+	}
+	base, err := filepath.EvalSymlinks(w.reposDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			if _, lerr := os.Lstat(w.reposDir); lerr == nil {
+				return "", toolErr("repo_unavailable") // dangling symlink
+			}
+			return root, nil // nothing below a missing reposDir can exist
+		}
+		return "", toolErr("repo_unavailable")
+	}
+	owner, name, _ := strings.Cut(repo, "/")
+	cur := base
+	for _, part := range []string{owner, name, ".git"} {
+		cur = filepath.Join(cur, part)
+		st, err := os.Lstat(cur)
+		if errors.Is(err, fs.ErrNotExist) {
+			break
+		}
+		if err != nil || !st.IsDir() {
+			return "", toolErr("repo_unavailable")
+		}
+	}
+	return filepath.Join(base, owner, name), nil
+}
+
+// allowedConfigKeys are the lowercased local config keys a managed clone
+// may hold; branch.<b>.remote and branch.<b>.merge are checked separately.
+var allowedConfigKeys = map[string]bool{
+	"core.repositoryformatversion": true, "core.filemode": true, "core.bare": true,
+	"core.logallrefupdates": true, "core.ignorecase": true, "core.precomposeunicode": true,
+	"remote.origin.fetch": true, "remote.origin.promisor": true, "remote.origin.partialclonefilter": true,
+	"extensions.partialclone": true, "extensions.objectformat": true,
+	"user.name": true, "user.email": true, "pull.ff": true,
+}
+
+// verifyConfig fails with unsafe_repo_config unless the clone's local
+// config holds only allowlisted keys and exactly one remote.origin.url equal
+// to the expected URL. It never repairs the clone.
+func (w *workspace) verifyConfig(ctx context.Context, root, repo string) error {
+	res, err := w.run(ctx, root, nil, false, "config", "--local", "--list", "-z")
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 || res.Truncated {
+		return toolErr("unsafe_repo_config")
+	}
+	urls := 0
+	for _, entry := range bytes.Split(res.Stdout, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		key, value, _ := strings.Cut(string(entry), "\n")
+		lower := strings.ToLower(key)
+		switch {
+		case lower == "remote.origin.url":
+			urls++
+			if value != w.remoteURL(repo) {
+				return toolErr("unsafe_repo_config")
+			}
+		case allowedConfigKeys[lower]:
+		case !safeBranchConfig(key, value):
+			return toolErr("unsafe_repo_config")
+		}
+	}
+	if urls != 1 {
+		return toolErr("unsafe_repo_config")
+	}
+	return nil
+}
+
+// safeBranchConfig accepts branch.<valid>.remote=origin and
+// branch.<valid>.merge=refs/heads/<valid>, the values git_config_set allows.
+// git prints section and variable names lowercased.
+func safeBranchConfig(key, value string) bool {
+	m := branchKeyRe.FindStringSubmatch(key)
+	if m == nil || !validBranch(m[1]) {
+		return false
+	}
+	if m[2] == "remote" {
+		return value == "origin"
+	}
+	b, ok := strings.CutPrefix(value, "refs/heads/")
+	return ok && validBranch(b)
+}
+
+// checkDisk refuses to start a clone, fetch or pull when the filesystem
+// holding dir has less than maxCloneBytes plus the reserve available.
+func (w *workspace) checkDisk(dir string) error {
+	if w.maxCloneBytes <= 0 {
+		return nil
+	}
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		return toolErr("disk_low")
+	}
+	if uint64(st.Bavail)*uint64(st.Bsize) < uint64(w.maxCloneBytes)+diskReserveBytes {
+		return toolErr("disk_low")
+	}
+	return nil
+}
+
+// runWatched runs a network git command from dir while a watchdog sizes
+// root every watchInterval; when root grows past maxCloneBytes the command
+// is cancelled (the runner kills its process group), root is removed and
+// clone_too_large is returned.
+func (w *workspace) runWatched(ctx context.Context, dir, root string, env []string, sub ...string) (execrunner.Result, error) {
+	if w.maxCloneBytes <= 0 {
+		return w.run(ctx, dir, env, true, sub...)
+	}
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var fired atomic.Bool
+	done, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		tick := time.NewTicker(watchInterval)
+		defer tick.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+				if dirSize(root) > w.maxCloneBytes {
+					fired.Store(true)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	res, err := w.run(wctx, dir, env, true, sub...)
+	close(done)
+	<-stopped
+	if fired.Load() {
+		_ = os.RemoveAll(root)
+		return res, toolErr("clone_too_large")
+	}
+	return res, err
 }
 
 // pushTool adds tier escalation to git_push.
 type pushTool struct{ *wsTool }
 
 // EffectiveTier makes a push dangerous when it targets a protected branch,
-// a merge base branch, or the remote default branch.
+// a merge base branch, or the remote default branch. When the remote
+// default is unknown (no clone, no origin/HEAD, or an error) the push is
+// dangerous: it fails closed.
 func (p pushTool) EffectiveTier(raw json.RawMessage, g *tenant.RepoGrant) tenant.Tier {
 	var in struct {
 		Branch string `json:"branch"`
@@ -156,24 +331,28 @@ func (p pushTool) EffectiveTier(raw json.RawMessage, g *tenant.RepoGrant) tenant
 			return tenant.TierDangerous
 		}
 	}
-	if def, ok := p.w.remoteDefault(g.Repo); ok && def == in.Branch {
+	def, ok := p.w.remoteDefault(g.Repo)
+	if !ok || def == in.Branch {
 		return tenant.TierDangerous
 	}
 	return tenant.TierWrite
 }
 
-// remoteDefault reads refs/remotes/origin/HEAD of the managed clone.
+// remoteDefault resolves refs/remotes/origin/HEAD of the managed clone with
+// a local rev-parse (loose or packed refs). ok is false when it is unknown.
 func (w *workspace) remoteDefault(repo string) (string, bool) {
-	root, err := managedPath(w.reposDir, repo)
-	if err != nil {
+	root, err := w.safeRoot(repo)
+	if err != nil || !hasGitDir(root) {
 		return "", false
 	}
-	b, err := os.ReadFile(filepath.Join(root, ".git", "refs", "remotes", "origin", "HEAD"))
-	if err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), remoteDefaultTimeout)
+	defer cancel()
+	res, err := w.run(ctx, root, nil, false, "rev-parse", "--abbrev-ref", "refs/remotes/origin/HEAD")
+	if err != nil || res.ExitCode != 0 {
 		return "", false
 	}
-	ref, ok := strings.CutPrefix(strings.TrimSpace(string(b)), "ref: refs/remotes/origin/")
-	return ref, ok && ref != ""
+	ref, ok := strings.CutPrefix(strings.TrimSpace(string(res.Stdout)), "origin/")
+	return ref, ok && validBranch(ref)
 }
 
 // NewWorkspaceTools returns the managed-clone tools.
@@ -234,8 +413,13 @@ func gitSync(ctx context.Context, w *workspace, c tools.Call, root string, in in
 	if err != nil {
 		return tools.ToolOutput{}, err
 	}
-	if st, err := os.Stat(filepath.Join(root, ".git")); err == nil && st.IsDir() {
-		res, err := w.run(ctx, root, env, true, "fetch", "--quiet", "--prune", "--no-recurse-submodules", "origin")
+	if hasGitDir(root) {
+		// wsTool.Run already ran verifyConfig on this existing clone.
+		if err := w.checkDisk(root); err != nil {
+			return tools.ToolOutput{}, err
+		}
+		res, err := w.runWatched(ctx, root, root, env, "fetch", "--quiet", "--prune", "--no-recurse-submodules",
+			w.remoteURL(in.Repo), "+refs/heads/*:refs/remotes/origin/*")
 		if err != nil {
 			return tools.ToolOutput{}, err
 		}
@@ -251,8 +435,11 @@ func gitSync(ctx context.Context, w *workspace, c tools.Call, root string, in in
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return tools.ToolOutput{}, toolErr("repo_unavailable")
 	}
+	if err := w.checkDisk(parent); err != nil {
+		return tools.ToolOutput{}, err
+	}
 	_ = os.RemoveAll(root) // a leftover directory without .git is managed debris
-	res, err := w.run(ctx, parent, env, true, "clone", "--quiet", "--filter=blob:none", "--no-recurse-submodules", "--", w.remoteURL(in.Repo), filepath.Base(root))
+	res, err := w.runWatched(ctx, parent, root, env, "clone", "--quiet", "--filter=blob:none", "--no-recurse-submodules", "--", w.remoteURL(in.Repo), filepath.Base(root))
 	if err != nil {
 		_ = os.RemoveAll(root)
 		return tools.ToolOutput{}, err
@@ -289,7 +476,12 @@ func gitPull(ctx context.Context, w *workspace, c tools.Call, root string, in in
 	if err != nil {
 		return tools.ToolOutput{}, err
 	}
-	res, err := w.run(ctx, root, env, true, "pull", "--ff-only", "--quiet", "--no-recurse-submodules")
+	// pull follows the upstream; wsTool.Run's verifyConfig pinned
+	// remote.origin.url and allows no pushurl, insteadOf or proxy keys.
+	if err := w.checkDisk(root); err != nil {
+		return tools.ToolOutput{}, err
+	}
+	res, err := w.runWatched(ctx, root, root, env, "pull", "--ff-only", "--quiet", "--no-recurse-submodules")
 	if err != nil {
 		return tools.ToolOutput{}, err
 	}
@@ -398,7 +590,7 @@ func gitCommit(ctx context.Context, w *workspace, c tools.Call, root string, in 
 	clean := w.san.CleanOutbound(msg, true)
 	res, err = w.run(ctx, root, nil, false,
 		"-c", "user.name="+c.Account.CommitName, "-c", "user.email="+c.Account.CommitEmail,
-		"commit", "--quiet", "-m", clean)
+		"commit", "--quiet", "--no-gpg-sign", "-m", clean)
 	if err != nil {
 		return tools.ToolOutput{}, err
 	}
@@ -472,7 +664,9 @@ func gitPush(ctx context.Context, w *workspace, c tools.Call, root string, in in
 		return tools.ToolOutput{}, err
 	}
 	ref := "refs/heads/" + in.Branch
-	res, err := w.run(ctx, root, env, true, "push", "--quiet", "--no-verify", "origin", ref+":"+ref)
+	// Push to the pinned URL, never the remote name, so no config can
+	// redirect the push (and its token) elsewhere.
+	res, err := w.run(ctx, root, env, true, "push", "--quiet", "--no-verify", w.remoteURL(in.Repo), ref+":"+ref)
 	if err != nil {
 		return tools.ToolOutput{}, err
 	}

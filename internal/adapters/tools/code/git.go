@@ -34,6 +34,17 @@ func hardenedArgs(root string, sub ...string) []string {
 		"-c", "core.askPass=",
 		"-c", "core.sshCommand=",
 		"-c", "uploadpack.packObjectsHook=",
+		// No signing or editor program may run, and the remote cannot
+		// redirect a request elsewhere. Filter drivers cannot be disabled
+		// here; workspace.verifyConfig rejects any filter.* key instead.
+		"-c", "commit.gpgSign=false",
+		"-c", "tag.gpgSign=false",
+		"-c", "gpg.program=false",
+		"-c", "gpg.ssh.program=false",
+		"-c", "gpg.x509.program=false",
+		"-c", "core.editor=false",
+		"-c", "sequence.editor=false",
+		"-c", "http.followRedirects=false",
 	}
 	return append(args, sub...)
 }
