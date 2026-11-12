@@ -11,6 +11,267 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const addAgentUsage = `-- name: AddAgentUsage :execrows
+UPDATE public.agent_jobs SET input_tokens = input_tokens + $1::int,
+  output_tokens = output_tokens + $2::int,
+  cache_read_tokens = cache_read_tokens + $3::int,
+  cache_write_tokens = cache_write_tokens + $4::int, updated_at = now()
+WHERE id = $5 AND claim_token = $6::uuid AND status = 'processing'
+`
+
+type AddAgentUsageParams struct {
+	Input      int32
+	Output     int32
+	CacheRead  int32
+	CacheWrite int32
+	ID         int64
+	Token      pgtype.UUID
+}
+
+func (q *Queries) AddAgentUsage(ctx context.Context, arg AddAgentUsageParams) (int64, error) {
+	result, err := q.db.Exec(ctx, addAgentUsage,
+		arg.Input,
+		arg.Output,
+		arg.CacheRead,
+		arg.CacheWrite,
+		arg.ID,
+		arg.Token,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const claimAgentJob = `-- name: ClaimAgentJob :one
+WITH candidate AS (
+ SELECT j.id FROM public.agent_jobs j
+ WHERE ((j.status = 'pending' AND j.run_at <= $2::timestamptz)
+     OR (j.status = 'processing' AND j.locked_until <= $2::timestamptz))
+   AND NOT EXISTS (SELECT 1 FROM public.agent_jobs p
+                   WHERE p.thread_id = j.thread_id AND p.id <> j.id AND p.status = 'processing'
+                     AND p.locked_until > $2::timestamptz)
+ ORDER BY (j.status = 'processing') DESC, j.run_at, j.id
+ FOR UPDATE SKIP LOCKED LIMIT 1
+)
+UPDATE public.agent_jobs AS jobs SET status = 'processing', attempts = jobs.attempts + 1,
+  claim_token = $1::uuid,
+  locked_until = $2::timestamptz + make_interval(secs => $3::float8),
+  updated_at = now()
+FROM candidate WHERE jobs.id = candidate.id
+RETURNING jobs.id, jobs.workspace_id, jobs.source_integration_id, jobs.thread_id, jobs.attempts,
+  jobs.input_tokens, jobs.output_tokens, jobs.cache_read_tokens, jobs.cache_write_tokens
+`
+
+type ClaimAgentJobParams struct {
+	Token     pgtype.UUID
+	AtTime    pgtype.Timestamptz
+	LeaseSecs float64
+}
+
+type ClaimAgentJobRow struct {
+	ID                  int64
+	WorkspaceID         pgtype.UUID
+	SourceIntegrationID pgtype.UUID
+	ThreadID            pgtype.UUID
+	Attempts            int32
+	InputTokens         int32
+	OutputTokens        int32
+	CacheReadTokens     int32
+	CacheWriteTokens    int32
+}
+
+// A due pending job, or a processing job whose lease (or retry wait) ended;
+// never while another job of the same thread holds a live lease.
+func (q *Queries) ClaimAgentJob(ctx context.Context, arg ClaimAgentJobParams) (ClaimAgentJobRow, error) {
+	row := q.db.QueryRow(ctx, claimAgentJob, arg.Token, arg.AtTime, arg.LeaseSecs)
+	var i ClaimAgentJobRow
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.SourceIntegrationID,
+		&i.ThreadID,
+		&i.Attempts,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheReadTokens,
+		&i.CacheWriteTokens,
+	)
+	return i, err
+}
+
+const finishAgentJob = `-- name: FinishAgentJob :execrows
+UPDATE public.agent_jobs SET status = $1::text, through_message_id = $2,
+  last_error_code = $3, claim_token = NULL, locked_until = NULL, updated_at = now()
+WHERE id = $4 AND claim_token = $5::uuid AND status = 'processing'
+`
+
+type FinishAgentJobParams struct {
+	Status  string
+	Through pgtype.Int8
+	Code    pgtype.Text
+	ID      int64
+	Token   pgtype.UUID
+}
+
+func (q *Queries) FinishAgentJob(ctx context.Context, arg FinishAgentJobParams) (int64, error) {
+	result, err := q.db.Exec(ctx, finishAgentJob,
+		arg.Status,
+		arg.Through,
+		arg.Code,
+		arg.ID,
+		arg.Token,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const getAgentThread = `-- name: GetAgentThread :one
+SELECT title, rolling_summary, external_id FROM public.hub_threads WHERE workspace_id = $1 AND id = $2
+`
+
+type GetAgentThreadParams struct {
+	WorkspaceID pgtype.UUID
+	ID          pgtype.UUID
+}
+
+type GetAgentThreadRow struct {
+	Title          string
+	RollingSummary string
+	ExternalID     string
+}
+
+func (q *Queries) GetAgentThread(ctx context.Context, arg GetAgentThreadParams) (GetAgentThreadRow, error) {
+	row := q.db.QueryRow(ctx, getAgentThread, arg.WorkspaceID, arg.ID)
+	var i GetAgentThreadRow
+	err := row.Scan(&i.Title, &i.RollingSummary, &i.ExternalID)
+	return i, err
+}
+
+const insertOutboundAction = `-- name: InsertOutboundAction :exec
+INSERT INTO public.outbound_actions(workspace_id, integration_id, kind, payload, dedupe_key)
+VALUES ($1, $2, 'telegram_message', $3, $4)
+ON CONFLICT (kind, dedupe_key) DO NOTHING
+`
+
+type InsertOutboundActionParams struct {
+	WorkspaceID   pgtype.UUID
+	IntegrationID pgtype.UUID
+	Payload       []byte
+	DedupeKey     string
+}
+
+func (q *Queries) InsertOutboundAction(ctx context.Context, arg InsertOutboundActionParams) error {
+	_, err := q.db.Exec(ctx, insertOutboundAction,
+		arg.WorkspaceID,
+		arg.IntegrationID,
+		arg.Payload,
+		arg.DedupeKey,
+	)
+	return err
+}
+
+const lastTriagedMessage = `-- name: LastTriagedMessage :one
+SELECT COALESCE(MAX(through_message_id), 0)::bigint FROM public.agent_jobs
+WHERE thread_id = $1 AND status IN ('done', 'failed')
+`
+
+func (q *Queries) LastTriagedMessage(ctx context.Context, threadID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, lastTriagedMessage, threadID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const lockAgentClaim = `-- name: LockAgentClaim :one
+SELECT id FROM public.agent_jobs
+WHERE id = $1 AND claim_token = $2::uuid AND status = 'processing'
+FOR UPDATE
+`
+
+type LockAgentClaimParams struct {
+	ID    int64
+	Token pgtype.UUID
+}
+
+func (q *Queries) LockAgentClaim(ctx context.Context, arg LockAgentClaimParams) (int64, error) {
+	row := q.db.QueryRow(ctx, lockAgentClaim, arg.ID, arg.Token)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const recentAgentMessages = `-- name: RecentAgentMessages :many
+SELECT m.id, m.sender_role, m.sender_name, m.content, m.metadata FROM (
+  SELECT id, sender_role, sender_name, content, metadata FROM public.message_logs
+  WHERE thread_id = $1 ORDER BY id DESC LIMIT 60) m
+ORDER BY m.id
+`
+
+type RecentAgentMessagesRow struct {
+	ID         int64
+	SenderRole string
+	SenderName string
+	Content    string
+	Metadata   []byte
+}
+
+func (q *Queries) RecentAgentMessages(ctx context.Context, threadID pgtype.UUID) ([]RecentAgentMessagesRow, error) {
+	rows, err := q.db.Query(ctx, recentAgentMessages, threadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RecentAgentMessagesRow
+	for rows.Next() {
+		var i RecentAgentMessagesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SenderRole,
+			&i.SenderName,
+			&i.Content,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const retryAgentJob = `-- name: RetryAgentJob :execrows
+UPDATE public.agent_jobs SET locked_until = $1::timestamptz, claim_token = NULL,
+  last_error_code = $2::text, updated_at = now()
+WHERE id = $3 AND claim_token = $4::uuid AND status = 'processing'
+`
+
+type RetryAgentJobParams struct {
+	NextAt pgtype.Timestamptz
+	Code   string
+	ID     int64
+	Token  pgtype.UUID
+}
+
+// The job stays processing with its lease set to the retry time, so the
+// thread stays serialized and the one-pending-job index is untouched.
+func (q *Queries) RetryAgentJob(ctx context.Context, arg RetryAgentJobParams) (int64, error) {
+	result, err := q.db.Exec(ctx, retryAgentJob,
+		arg.NextAt,
+		arg.Code,
+		arg.ID,
+		arg.Token,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const saveAgentMessage = `-- name: SaveAgentMessage :one
 INSERT INTO public.message_logs(thread_id, external_message_id, sender_id, sender_name, sender_role, content, occurred_at, metadata)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)

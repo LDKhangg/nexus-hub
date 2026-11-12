@@ -149,3 +149,33 @@ func TestTelegramClient_UsesResolver(t *testing.T) {
 		t.Fatalf("err %v", err)
 	}
 }
+
+func TestSendText_ClipsPlainText(t *testing.T) {
+	var body map[string]any
+	var path string
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Write([]byte(`{"ok":true,"result":{"message_id":99}}`))
+	}))
+	defer s.Close()
+	res := &fakeResolver{value: "bot-token"}
+	c := NewClient(s.Client(), res)
+	c.baseURL = s.URL
+	topic := int64(5)
+	id, err := c.SendText(context.Background(), "ws-9", "telegram", "-100", &topic, strings.Repeat("😀", 3000)+"<b>x</b>")
+	if err != nil || id != 99 {
+		t.Fatalf("%d %v", id, err)
+	}
+	text := body["text"].(string)
+	if res.ws != "ws-9" || res.ref != "telegram" || path != "/botbot-token/sendMessage" || body["parse_mode"] != nil || body["message_thread_id"] != float64(5) {
+		t.Fatalf("%+v %s %v", res, path, body)
+	}
+	if len(utf16.Encode([]rune(text))) > 4000 || !strings.HasSuffix(text, "[truncated]") {
+		t.Fatalf("len %d", len(utf16.Encode([]rune(text))))
+	}
+	c = NewClient(s.Client(), &fakeResolver{err: errors.New("x")})
+	if _, err := c.SendText(context.Background(), "ws", "telegram", "-1", nil, "hi"); err == nil {
+		t.Fatal("missing token accepted")
+	}
+}

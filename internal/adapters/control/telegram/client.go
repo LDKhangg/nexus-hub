@@ -48,11 +48,19 @@ func (c *Client) Send(ctx context.Context, target tenant.TelegramTargetConfig, e
 	if err != nil || token == "" {
 		return fail(secretCode(err), false, 0)
 	}
+	return c.call(ctx, token, target.ChatID, target.MessageThreadID, FormatNotice(e))
+}
+
+// call posts one plain-text sendMessage; errors are *relay.DeliveryError.
+func (c *Client) call(ctx context.Context, token, chatID string, topic *int64, text string) (relay.DeliveryReceipt, error) {
+	fail := func(code string, retry bool, after time.Duration) (relay.DeliveryReceipt, error) {
+		return relay.DeliveryReceipt{}, &relay.DeliveryError{Code: code, Retryable: retry, RetryAfter: after}
+	}
 	body, _ := json.Marshal(struct {
 		ChatID string `json:"chat_id"`
 		Text   string `json:"text"`
 		Topic  *int64 `json:"message_thread_id,omitempty"`
-	}{target.ChatID, FormatNotice(e), target.MessageThreadID})
+	}{chatID, text, topic})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/bot"+token+"/sendMessage", bytes.NewReader(body))
 	if err != nil {
 		return fail("invalid_request", false, 0)
