@@ -44,13 +44,13 @@ points.
 | Repo phase | Status | What exists |
 |---|---|---|
 | 1 | Merged (`54aa048`) | ClickUp webhook (HMAC-verified) → durable `notification_outbox` → Telegram notice; idempotent ingest; setup CLI; runbook |
-| 2 | In progress on `feature/phase2` (review fixes F1–F5 done, waiting for Test Report and Review Report on Fix Brief #1) | Durable agent jobs with debounce, Tier-1 triage, Tier-2 tool loop, tiered tool policy with audit (`tool_runs`), hardened git runner, GitHub/ClickUp tools, netguard, AES-GCM credentials, DB settings, `outbound_actions`, CLI, systemd unit |
+| 2 | Merged with test debt (`69fcb5e`; see `test-debt/phase2-agent-core-tools.md`) | Durable agent jobs with debounce, Tier-1 triage, Tier-2 tool loop, tiered tool policy with audit (`tool_runs`), hardened git runner, GitHub/ClickUp tools, netguard, AES-GCM credentials, DB settings, `outbound_actions`, CLI, systemd unit |
 
 PCC milestones and repo phases do not map one to one:
 
 | PCC §11 milestone | Repo phase(s) |
 |---|---|
-| 0 Project Foundation | 3 (plus parts already done in 1–2) |
+| 0 Project Foundation | F, before 13 (CI already done) |
 | 1 Identity + Event Gateway | 4 |
 | 2 Integrations + Conversations | 1, 2 (inbound and tools), 4, 6 |
 | 3 Workflow Engine | 5 |
@@ -71,7 +71,8 @@ The earlier plan held three items for "Phase 3". They now go here:
 ## 3. Dependency graph
 
 ```text
-P1 notices ─► P2 agent core ─► P3 foundation ─► P4 identity + event gateway
+P1 notices ─► P2 agent core ─► P3 tech-spec review assistant ─► P4 identity + event gateway
+(Phase F foundation runs right before P13; P11 Admin UI is replaced by the CLI, D2)
                                                    │
                                                    ▼
                                     P5 workflow engine ─► P6 conversations + commands
@@ -115,7 +116,41 @@ exit criteria, and the decisions it needs.
   - merged after the owner's OK;
   - Phase Completion Report written.
 
-### Phase 3: Foundation and operability
+### Phase 3: Tech-spec review assistant with graded autonomy
+
+- **Goal (owner, 2026-11-12):** the company's AI already writes the tech
+  spec. For a task assigned to the owner, Nexus-Hub reads that tech spec (its
+  PR), the user story (US) and the open questions (OQ), reviews them, and
+  answers by itself what it can answer with evidence. Only real decisions go
+  to the owner; the rest is a notice or nothing. Every answer and decision
+  can be traced back to its sources.
+- **Three outcome classes for every item** (review finding, OQ, US gap):
+  - `auto`: answered from evidence (US, spec, code, earlier decisions) with
+    citations, posted automatically under policy; the owner gets an FYI.
+  - `notify`: information only; nothing is posted for the owner to approve.
+  - `ask`: needs the owner's opinion (scope, business rule, priority, cost,
+    anything without evidence, or low confidence); sent to Telegram with
+    options; the owner's answer is posted.
+  Rules decide the class first (some topics are always `ask`); the model's
+  confidence can only move an item towards `ask`, never away from it.
+- **Trace:** each item records its sources, short reasoning, class, rule and
+  confidence, the posted text and the correlation ID; a CLI command and a
+  Telegram command show the trace for a task or an item.
+- **PCC:** FR-012, FR-017 (Telegram, ClickUp inbound, owner only), FR-055+
+  (orchestrator context and decisions, partial), FR-0xx policy/approval for
+  ClickUp writes (partial), NFR-025/026 (trace, correlation ID). Exact IDs are
+  fixed in the phase plan.
+- **Also:** pay Phase 2 test debt through CI; Telegram webhook (D3) limited to
+  the owner's chat (D4); ClickUp status change and unassign on the owner's
+  request (use case 2).
+- **Out of scope:** writing the tech spec; running project tests (D1);
+  multi-user identity (D4); Admin UI (D2).
+
+### Phase F: Foundation and operability (moved, runs right before Phase 13)
+
+Moved by the owner on 2026-11-12: it gives no user value before the system is
+hosted. CI and correlation IDs are already done or built into each phase.
+
 
 - **Goal:** the project can be built, tested and observed by anyone, which
   every later phase depends on.
