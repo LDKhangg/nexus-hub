@@ -185,7 +185,7 @@ func migrateSecrets(ctx context.Context, pool *pgxpool.Pool, args []string, out 
 	if f.Parse(args) != nil || f.NArg() != 0 || !tenant.ValidUUID(*ws) {
 		return errors.New("migrate-secrets requires --workspace-id")
 	}
-	resolver, _, err := openResolver(pool, lookup)
+	resolver, store, err := openResolver(pool, lookup)
 	if err != nil {
 		return err
 	}
@@ -240,6 +240,9 @@ func migrateSecrets(ctx context.Context, pool *pgxpool.Pool, args []string, out 
 	if rows.Err() != nil {
 		return errors.New("integration scan failed")
 	}
+	if err := checkRefCollisions(ctx, store, *ws, refs); err != nil {
+		return err
+	}
 	values := map[string]string{}
 	for _, r := range refs {
 		v, ok := lookup(r.env)
@@ -277,6 +280,42 @@ func migrateSecrets(ctx context.Context, pool *pgxpool.Pool, args []string, out 
 	}
 	if len(refs) == 0 {
 		return enc.Encode(map[string]string{"status": "nothing to migrate"})
+	}
+	return nil
+}
+
+// credentialLister lists the credential names of a workspace.
+type credentialLister interface {
+	List(ctx context.Context, workspaceID string) ([]secrets.Meta, error)
+}
+
+// checkRefCollisions refuses a migration in which two different env names
+// (or one env name with two kinds) map to the same credential name, or the
+// credential name already exists in the workspace. It runs before anything is
+// written; errors name the credential, never a value.
+func checkRefCollisions(ctx context.Context, store credentialLister, ws string, refs []legacyRef) error {
+	type origin struct{ env, kind string }
+	seen := map[string]origin{}
+	for _, r := range refs {
+		if prev, ok := seen[r.ref]; ok {
+			if prev.env != r.env || prev.kind != r.kind {
+				return fmt.Errorf("credential name %s is derived from more than one environment variable or kind; nothing migrated", r.ref)
+			}
+			continue
+		}
+		seen[r.ref] = origin{r.env, r.kind}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	metas, err := store.List(ctx, ws)
+	if err != nil {
+		return errors.New("credential list failed; nothing migrated")
+	}
+	for _, m := range metas {
+		if _, ok := seen[m.Name]; ok {
+			return fmt.Errorf("credential %s already exists in the workspace; nothing migrated", m.Name)
+		}
 	}
 	return nil
 }

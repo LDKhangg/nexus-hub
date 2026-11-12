@@ -49,7 +49,7 @@ type credentials struct {
 	baseURL  string
 
 	mu     sync.Mutex
-	logins map[string]time.Time // ws|ref|token -> verified until
+	logins map[string]time.Time // ws|ref|login|token -> verified until
 	tokens map[string]expiring  // installation token cache
 }
 
@@ -104,7 +104,9 @@ func (c *credentials) patToken(ctx context.Context, ws string, account tenant.Gi
 	if err != nil {
 		return "", err
 	}
-	key := ws + "|" + account.TokenRef + "|" + tok
+	// The expected login is part of the key: a verification for one login
+	// never vouches for the same token configured under another login.
+	key := ws + "|" + account.TokenRef + "|" + strings.ToLower(account.Login) + "|" + tok
 	c.mu.Lock()
 	until, ok := c.logins[key]
 	c.mu.Unlock()

@@ -77,24 +77,75 @@ type checkRun struct {
 type checksSummary struct {
 	passed, failed, pending, skipped []string
 	combined                         string
+	// runsRead/runsTotal and statusesRead/statusesTotal count what was read
+	// against what GitHub reported. incomplete is true when the page cap was
+	// reached before every check run or status was read.
+	runsRead, runsTotal         int
+	statusesRead, statusesTotal int
+	incomplete                  bool
 }
 
+const (
+	checksPageSize   = 100 // check-runs per_page
+	statusesPageSize = 30  // combined status default per_page
+	maxCheckPages    = 10
+)
+
 func (b *base) checks(ctx context.Context, c tools.Call, in input, perms map[string]string, sha string) (checksSummary, error) {
-	var runs struct {
-		CheckRuns []checkRun `json:"check_runs"`
-	}
-	if err := b.do(ctx, c, in, perms, "GET", fmt.Sprintf("/repos/%s/commits/%s/check-runs?per_page=100", in.Repo, sha), nil, &runs); err != nil {
-		return checksSummary{}, err
-	}
-	var status struct {
-		State    string `json:"state"`
-		Statuses []struct{ Context, State string }
-	}
-	if err := b.do(ctx, c, in, perms, "GET", fmt.Sprintf("/repos/%s/commits/%s/status", in.Repo, sha), nil, &status); err != nil {
-		return checksSummary{}, err
-	}
 	var s checksSummary
-	for _, r := range runs.CheckRuns {
+	var runs []checkRun
+	runsTotal, runsMore := 0, false
+	for page := 1; page <= maxCheckPages; page++ {
+		var resp struct {
+			TotalCount int        `json:"total_count"`
+			CheckRuns  []checkRun `json:"check_runs"`
+		}
+		path := fmt.Sprintf("/repos/%s/commits/%s/check-runs?per_page=%d", in.Repo, sha, checksPageSize)
+		if page > 1 {
+			path += fmt.Sprintf("&page=%d", page)
+		}
+		if err := b.do(ctx, c, in, perms, "GET", path, nil, &resp); err != nil {
+			return checksSummary{}, err
+		}
+		runs = append(runs, resp.CheckRuns...)
+		runsTotal = max(runsTotal, resp.TotalCount)
+		runsMore = len(resp.CheckRuns) >= checksPageSize && (resp.TotalCount == 0 || len(runs) < resp.TotalCount)
+		if !runsMore {
+			break
+		}
+	}
+	type commitStatus struct{ Context, State string }
+	var statuses []commitStatus
+	state, statusesTotal, statusesMore := "", 0, false
+	for page := 1; page <= maxCheckPages; page++ {
+		var resp struct {
+			State      string         `json:"state"`
+			TotalCount int            `json:"total_count"`
+			Statuses   []commitStatus `json:"statuses"`
+		}
+		// The first page keeps the default page size; later pages ask for the
+		// next page of the same size.
+		path := fmt.Sprintf("/repos/%s/commits/%s/status", in.Repo, sha)
+		if page > 1 {
+			path += fmt.Sprintf("?page=%d", page)
+		}
+		if err := b.do(ctx, c, in, perms, "GET", path, nil, &resp); err != nil {
+			return checksSummary{}, err
+		}
+		if page == 1 {
+			state = resp.State
+		}
+		statuses = append(statuses, resp.Statuses...)
+		statusesTotal = max(statusesTotal, resp.TotalCount)
+		statusesMore = len(resp.Statuses) >= statusesPageSize && (resp.TotalCount == 0 || len(statuses) < resp.TotalCount)
+		if !statusesMore {
+			break
+		}
+	}
+	s.runsRead, s.runsTotal = len(runs), max(runsTotal, len(runs))
+	s.statusesRead, s.statusesTotal = len(statuses), max(statusesTotal, len(statuses))
+	s.incomplete = runsMore || statusesMore || s.runsRead < s.runsTotal || s.statusesRead < s.statusesTotal
+	for _, r := range runs {
 		switch {
 		case r.Status != "completed" || r.Conclusion == nil:
 			s.pending = append(s.pending, r.Name)
@@ -107,8 +158,8 @@ func (b *base) checks(ctx context.Context, c tools.Call, in input, perms map[str
 		}
 	}
 	// The combined status is "pending" when there are no legacy statuses.
-	s.combined = status.State
-	if len(status.Statuses) == 0 {
+	s.combined = state
+	if len(statuses) == 0 && statusesTotal == 0 {
 		s.combined = "none"
 	}
 	return s, nil
@@ -143,6 +194,10 @@ func prChecks(ctx context.Context, t *readTool, c tools.Call, in input) (tools.T
 		sb.WriteString("pending: " + listNames(s.pending) + "\n")
 	}
 	sb.WriteString("combined status: " + s.combined)
+	if s.incomplete {
+		fmt.Fprintf(&sb, "\nincomplete: read %d of %d check runs and %d of %d statuses; the list above is incomplete", s.runsRead, s.runsTotal, s.statusesRead, s.statusesTotal)
+		head += " (incomplete)"
+	}
 	return tools.ToolOutput{Text: sb.String(), Summary: head}, nil
 }
 

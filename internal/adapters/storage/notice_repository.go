@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 	"time"
@@ -134,10 +135,7 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 	if _, err := tenant.ParseTelegramTargetConfig(target.Config); err != nil {
 		return result, err
 	}
-	agentCfg, err := tenant.ParseAgentConfig(integration.Config, r.knownTools())
-	if err != nil {
-		return result, err
-	}
+	agentEnabled := r.agentEnabledAtIngest(integration)
 	ordered := append([]domain.NormalizedEvent(nil), events...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		if ordered[i].ExternalID == ordered[j].ExternalID {
@@ -162,7 +160,7 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 		if err != nil {
 			return result, err
 		}
-		if agentCfg.Enabled && e.EventType == domain.EventCommandPosted {
+		if agentEnabled && e.EventType == domain.EventCommandPosted {
 			accepted, err := r.acceptAgentComment(ctx, q, e, workspace, source, thread.ID, config.OwnSenderID)
 			if err != nil {
 				return result, err
@@ -206,6 +204,34 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 		result.Accepted++
 	}
 	return result, tx.Commit(ctx)
+}
+
+// agentEnabledAtIngest decides whether comments go to the agent. A source
+// without agent.enabled == true is never validated here, so a stale agent
+// section cannot break Phase 1 notices. An enabled source whose agent config
+// is invalid falls back to the Phase 1 notice path with one warning; the
+// callback itself never fails because of the agent config.
+func (r *NoticeRepository) agentEnabledAtIngest(integration tenant.WebhookIntegration) bool {
+	if !agentFlagOn(integration.Config) {
+		return false
+	}
+	cfg, err := tenant.ParseAgentConfig(integration.Config, r.knownTools())
+	if err != nil {
+		// Neither the config nor the parse error is logged: both can hold values.
+		log.Printf("notice ingest: integration %s has an invalid agent config; comments use the notice path", integration.ID)
+		return false
+	}
+	return cfg.Enabled
+}
+
+// agentFlagOn reads only agent.enabled; anything but a literal true is off.
+func agentFlagOn(config map[string]any) bool {
+	agent, ok := config["agent"].(map[string]any)
+	if !ok {
+		return false
+	}
+	enabled, ok := agent["enabled"].(bool)
+	return ok && enabled
 }
 
 // acceptAgentComment stores a comment for the agent: an owner comment is

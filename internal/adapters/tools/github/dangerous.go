@@ -76,6 +76,8 @@ func merge(ctx context.Context, t *dangerTool, c tools.Call, in input) (tools.To
 		switch {
 		case len(s.failed) > 0 || s.combined == "failure" || s.combined == "error":
 			return tools.ToolOutput{}, toolErr("checks_failing")
+		case s.incomplete: // unread pages could hold a failing check
+			return tools.ToolOutput{}, toolErr("checks_unverified")
 		case len(s.pending) > 0 || s.combined == "pending":
 			return tools.ToolOutput{}, toolErr("checks_pending")
 		}
