@@ -15,7 +15,7 @@ import (
 
 const (
 	apiBase          = "https://api.github.com"
-	maxResponseBytes = 4 << 20
+	maxResponseBytes = 2 << 20
 )
 
 // GitHubError is a safe, classified API failure.
