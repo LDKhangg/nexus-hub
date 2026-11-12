@@ -229,7 +229,24 @@ func (o *Orchestrator) run(ctx context.Context, job *AgentJob, jc JobContext, pa
 		res.Text = o.clean(fmt.Sprintf("🔎 Nexus · %s\n%s · %s\n\n%s\n\nTools: %s\nTokens: %d/%d\n%s",
 			jc.Title, urgency(d), d.Summary, report.Text, toolsLine(report.Calls), total.Input+total.CacheRead+total.CacheWrite, total.Output, jc.TaskURL))
 	}
+	if res.Text != "" {
+		if n := unseenComments(jc, packet); n > 0 {
+			res.Text = o.clean(res.Text + fmt.Sprintf("\n(+%d earlier comment(s) in this batch were not shown to the AI; see the task)", n))
+		}
+	}
 	return o.store.CommitOutcome(ctx, *job, res)
+}
+
+// unseenComments counts untriaged external comments that the packet's batch
+// budget left out, so the report never hides them.
+func unseenComments(jc JobContext, packet memory.ContextPacket) int {
+	n := 0
+	for _, m := range jc.History {
+		if m.ID > jc.LastTriagedID && m.SenderRole == memory.SenderRoleExternalUser {
+			n++
+		}
+	}
+	return max(n-len(packet.NewBatch), 0)
 }
 
 func (o *Orchestrator) addUsage(ctx context.Context, job AgentJob, total *domain.Usage, u domain.Usage) error {
