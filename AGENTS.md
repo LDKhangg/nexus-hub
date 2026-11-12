@@ -56,9 +56,10 @@ Lead and Implementer may only run these to prove the code compiles:
   - Go: `go version` must be >= the go.mod version
   - DB: `. ./.superpowers/testdb.env` (loopback, database `nexus_storage_test`); or "not needed"
   - Tools on PATH: git (yes/no)
-- Commands (run in order, from the repo root, do not change them):
-  1. `<command>`
-  2. `<command>`
+- Commands (run in order, from the repo root, do not change them;
+  each line states the exit code that counts as success):
+  1. `<command>` → expect exit 0
+  2. `<command>` → expect exit <n>
 - Must pass: <test names, or "all">
 - Must not be skipped: <test names that need DB/git>
 - Notes for the Tester: <flakiness hints, expected duration>
@@ -117,7 +118,12 @@ Rules for the Tester:
 ## How the Lead decides
 
 - PASS only if: same commit as the request, every requested test ran, nothing
-  in "Must not be skipped" was skipped, no data race, exit codes 0.
+  in "Must not be skipped" was skipped, no data race, and every command exited
+  with its expected code.
+- When writing a request: pipelines through `tee` must start with
+  `set -o pipefail;` so a failing `go test` is not hidden, and every search
+  command (`grep`) must state its expected exit code (`grep` exits 1 when
+  nothing matches, which is the good case).
 - Otherwise FIX. The Lead first finds the root cause from the report. If the
   report lacks the evidence it needs, it sends a narrower Test Request (for
   example `-run '^TestX$' -v`) instead of guessing.

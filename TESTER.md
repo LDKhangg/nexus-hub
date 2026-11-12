@@ -41,7 +41,8 @@ The owner gives you a **Test Request**. It looks like this:
      report.
    - If a command fails, still run the remaining ones unless they depend on it,
      such as running tests after a build failure.
-   - Record each command's exit code and duration.
+   - Record each command's exit code and duration, and compare it with the
+     expected exit code stated in the request.
 4. **Read the output.**
    - Search for `--- FAIL`, `--- SKIP`, `FAIL`, `panic:`, `WARNING: DATA RACE`
      and build errors (`file.go:12:3: ...`).
@@ -63,7 +64,9 @@ The owner gives you a **Test Request**. It looks like this:
 
 ## Result values
 
-- `PASS`: every command exited 0, every requested test ran and passed, nothing
+- `PASS`: every command exited with the code the request expects (0 unless
+  stated; a `grep` for failures expects 1, meaning "no match"), every
+  requested test ran and passed, nothing
   in "Must not be skipped" was skipped, and there is no data race or panic.
 - `FAIL`: the tests ran, and at least one failed, panicked, raced, or a
   must-not-skip test was skipped.
