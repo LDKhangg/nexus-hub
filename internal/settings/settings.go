@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -30,6 +32,9 @@ type Settings struct {
 	NoticeRequestTimeout                  time.Duration
 	AnthropicCredential                   string
 	ListenAddr                            string
+	OwnerTelegramChatID                   int64  // 0: not set
+	OwnerClickUpUserID                    string // empty: not set
+	PublicBaseURL                         string // empty: not set
 }
 
 // Store reads every stored setting.
@@ -49,6 +54,8 @@ const (
 	kGitPath
 	kCredRef
 	kAddr
+	kDigits
+	kPublicURL
 )
 
 type spec struct {
@@ -61,7 +68,11 @@ type spec struct {
 var (
 	modelRe   = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,99}$`)
 	credRefRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,62}$`)
+	digitsRe  = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
 )
+
+// maxChatID bounds Telegram chat IDs so they survive a JSON number exactly.
+const maxChatID = 1 << 52
 
 var specs = map[string]spec{
 	"triage_model":           {kind: kModel, def: "claude-haiku-5-5", set: func(s *Settings, v any) { s.TriageModel = v.(string) }},
@@ -83,6 +94,9 @@ var specs = map[string]spec{
 	"notice_request_timeout": {kind: kDuration, def: 10 * time.Second, min: 1, max: 30, set: func(s *Settings, v any) { s.NoticeRequestTimeout = v.(time.Duration) }},
 	"anthropic_credential":   {kind: kCredRef, def: "anthropic", set: func(s *Settings, v any) { s.AnthropicCredential = v.(string) }},
 	"listen_addr":            {kind: kAddr, def: ":8080", set: func(s *Settings, v any) { s.ListenAddr = v.(string) }},
+	"owner_telegram_chat_id": {kind: kInt, def: int64(0), min: -maxChatID, max: maxChatID, set: func(s *Settings, v any) { s.OwnerTelegramChatID = v.(int64) }},
+	"owner_clickup_user_id":  {kind: kDigits, def: "", set: func(s *Settings, v any) { s.OwnerClickUpUserID = v.(string) }},
+	"public_base_url":        {kind: kPublicURL, def: "", set: func(s *Settings, v any) { s.PublicBaseURL = v.(string) }},
 }
 
 // Keys lists every known setting key, sorted.
@@ -186,8 +200,30 @@ func parse(key string, raw json.RawMessage) (any, error) {
 		if _, port, err := net.SplitHostPort(str); err != nil || port == "" {
 			return nil, bad
 		}
+	case kDigits:
+		if str != "" && !digitsRe.MatchString(str) {
+			return nil, bad
+		}
+	case kPublicURL:
+		if str != "" && !validPublicURL(str) {
+			return nil, bad
+		}
 	}
 	return str, nil
+}
+
+// validPublicURL accepts an absolute https URL with a host, an optional
+// path without a trailing slash, and no credentials, query or fragment.
+func validPublicURL(str string) bool {
+	if strings.ContainsAny(str, "?#") {
+		return false
+	}
+	u, err := url.Parse(str)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.Hostname() == "" || u.User != nil ||
+		u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" || len(str) > 512 {
+		return false
+	}
+	return u.Path == "" || (u.Path[0] == '/' && u.Path[len(u.Path)-1] != '/')
 }
 
 // ParseCLIValue converts command-line text to the stored JSON for key and

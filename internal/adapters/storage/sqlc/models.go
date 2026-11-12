@@ -35,6 +35,85 @@ type AppSetting struct {
 	UpdatedAt pgtype.Timestamptz
 }
 
+// A decision binds run, item, action and resource; it is taken once, only while open and unexpired.
+type Approval struct {
+	ID                int64
+	WorkspaceID       pgtype.UUID
+	Kind              string
+	RunID             pgtype.Int8
+	ItemID            pgtype.Int8
+	Action            string
+	Resource          string
+	Payload           []byte
+	Options           []byte
+	Nonce             string
+	ExpiresAt         pgtype.Timestamptz
+	Decision          pgtype.Text
+	Answer            pgtype.Text
+	DecidedBy         pgtype.Text
+	DecidedAt         pgtype.Timestamptz
+	TelegramMessageID pgtype.Int8
+	CreatedAt         pgtype.Timestamptz
+	UpdatedAt         pgtype.Timestamptz
+}
+
+type Behavior struct {
+	ID          int64
+	WorkspaceID pgtype.UUID
+	Name        string
+	Status      string
+	Draft       []byte
+	DraftVars   []byte
+	// The imported YAML/JSON text of the draft, kept so export returns the same text.
+	DraftSource string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+type BehaviorRun struct {
+	ID                int64
+	WorkspaceID       pgtype.UUID
+	BehaviorID        int64
+	BehaviorVersionID int64
+	Version           int32
+	TriggerKind       string
+	// Trusted event identifiers only (IDs, status names); never message or context text.
+	Trigger          []byte
+	Subject          string
+	Revision         string
+	Status           string
+	CorrelationID    pgtype.UUID
+	Attempts         int32
+	RunAt            pgtype.Timestamptz
+	LockedUntil      pgtype.Timestamptz
+	ClaimToken       pgtype.UUID
+	InputTokens      int32
+	OutputTokens     int32
+	CacheReadTokens  int32
+	CacheWriteTokens int32
+	Steps            int32
+	ErrorCode        pgtype.Text
+	// State saved before the first write of the run, used by undo.
+	Snapshot   []byte
+	UndoneAt   pgtype.Timestamptz
+	StartedAt  pgtype.Timestamptz
+	FinishedAt pgtype.Timestamptz
+	CreatedAt  pgtype.Timestamptz
+	UpdatedAt  pgtype.Timestamptz
+}
+
+// Published behavior versions are immutable; a trigger rejects UPDATE.
+type BehaviorVersion struct {
+	ID          int64
+	WorkspaceID pgtype.UUID
+	BehaviorID  int64
+	Version     int32
+	Document    []byte
+	Vars        []byte
+	Source      string
+	PublishedAt pgtype.Timestamptz
+}
+
 // AES-256-GCM ciphertext only; AAD binds workspace, name and kind. The master key lives outside the database.
 type Credential struct {
 	ID          pgtype.UUID
@@ -46,6 +125,20 @@ type Credential struct {
 	KeyVersion  int32
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
+}
+
+type DecisionMemory struct {
+	ID          int64
+	WorkspaceID pgtype.UUID
+	Topic       string
+	Question    string
+	Answer      string
+	Scope       []byte
+	Source      string
+	RunID       pgtype.Int8
+	ItemID      pgtype.Int8
+	CreatedAt   pgtype.Timestamptz
+	ForgottenAt pgtype.Timestamptz
 }
 
 type HubThread struct {
@@ -134,6 +227,48 @@ type OutboundAction struct {
 	SentAt            pgtype.Timestamptz
 }
 
+type RunItem struct {
+	ID            int64
+	WorkspaceID   pgtype.UUID
+	RunID         int64
+	ItemKey       string
+	Label         string
+	Text          string
+	Proposal      string
+	Citations     []byte
+	Topic         string
+	Confidence    float64
+	Informational bool
+	Flags         []string
+	Class         string
+	// The engine rule that decided the class.
+	Rule         string
+	Status       string
+	ActionResult []byte
+	Rating       pgtype.Text
+	RatingReason pgtype.Text
+	RatedAt      pgtype.Timestamptz
+	CreatedAt    pgtype.Timestamptz
+	UpdatedAt    pgtype.Timestamptz
+}
+
+// Inbound update dedupe and work queue; holds a short command and its arguments, never full message text.
+type TelegramUpdate struct {
+	ID          int64
+	WorkspaceID pgtype.UUID
+	UpdateID    int64
+	ChatID      int64
+	Kind        string
+	Command     string
+	Args        string
+	Attempts    int32
+	LockedUntil pgtype.Timestamptz
+	ClaimToken  pgtype.UUID
+	ReceivedAt  pgtype.Timestamptz
+	ProcessedAt pgtype.Timestamptz
+	ErrorCode   pgtype.Text
+}
+
 // Explicit same-workspace related-to links. A link neither authorizes access nor automatically merges context. Metadata may record the confirmed URL or human decision.
 type ThreadLink struct {
 	WorkspaceID    pgtype.UUID
@@ -162,6 +297,21 @@ type ToolRun struct {
 	ResultSummary  pgtype.Text
 	CreatedAt      pgtype.Timestamptz
 	UpdatedAt      pgtype.Timestamptz
+}
+
+type UserProfile struct {
+	WorkspaceID      pgtype.UUID
+	Language         string
+	Tone             string
+	QuietStartMinute pgtype.Int4
+	QuietEndMinute   pgtype.Int4
+	Timezone         string
+	DigestMode       string
+	// Empty means the settings default model.
+	DefaultModel string
+	Budgets      []byte
+	CreatedAt    pgtype.Timestamptz
+	UpdatedAt    pgtype.Timestamptz
 }
 
 type Workspace struct {
