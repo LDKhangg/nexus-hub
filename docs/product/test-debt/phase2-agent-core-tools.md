@@ -19,11 +19,11 @@
 
 | # | Item | REQ | Proof needed | Status |
 |---|---|---|---|---|
-| TD-1 | D2: secret in a nested tool-input JSON key never reaches the LLM (fix 079acef) | REQ-10, REQ-F5 | TestApproved_ActorNestedJSONKeysCannotEchoKnownSecret passes | open |
-| TD-2 | D7: a crash after merge, then retry with the budget exhausted, returns unknown_outcome and never re-merges (fix 079acef) | REQ-6, REQ-F9 | TestApproved_CrashAfterCommitPushCommentMergeNeverRepeats/github_pr_merge passes | open |
-| TD-3 | D8: merge needs the exact full head SHA; pr_checks prints the full SHA (fix 079acef) | REQ-5 | TestMerge_Preconditions/sha_prefix_only passes | open |
-| TD-4 | D9: git_status allows core.fsmonitor / diff.external (neutralized by hardenedArgs) and still refuses filters etc. (fix 079acef) | REQ-7, REQ-F1 | TestHardening_FsmonitorNotExecuted and TestApproved_StatusCannotExecuteCleanFilter both pass | open |
-| TD-5 | Full suite green on one head with `-race` | all | one full run, exit 0 | open |
+| TD-1 | D2: secret in a nested tool-input JSON key never reaches the LLM (fix 079acef) | REQ-10, REQ-F5 | TestApproved_ActorNestedJSONKeysCannotEchoKnownSecret passes | passing in CI run 43187966867 (b0d8773); Tester report pending |
+| TD-2 | D7: a crash after merge, then retry with the budget exhausted, returns unknown_outcome and never re-merges (fix 079acef) | REQ-6, REQ-F9 | TestApproved_CrashAfterCommitPushCommentMergeNeverRepeats/github_pr_merge passes | passing in CI run 43187966867 (b0d8773); Tester report pending |
+| TD-3 | D8: merge needs the exact full head SHA; pr_checks prints the full SHA (fix 079acef) | REQ-5 | TestMerge_Preconditions/sha_prefix_only passes | passing in CI run 43187966867 (b0d8773); Tester report pending |
+| TD-4 | D9: git_status allows core.fsmonitor / diff.external (neutralized by hardenedArgs) and still refuses filters etc. (fix 079acef) | REQ-7, REQ-F1 | TestHardening_FsmonitorNotExecuted and TestApproved_StatusCannotExecuteCleanFilter both pass | passing in CI run 43187966867 (b0d8773); Tester report pending |
+| TD-5 | Full suite green on one head with `-race` | all | one full run, exit 0 | open: CI run 43187966867 has 566 pass, 0 race; only TestApproved_StatusRejectsEveryProgramConfigChannel fails (owner dispute on fsmonitor/diff.external) |
 | TD-6 | Independent review of the fixes R1–R19 and D1–D9 (commits 35d9c8c..079acef) | all | Review Report APPROVE | open |
 
 ## Accepted residual risks (not debt)
