@@ -143,9 +143,19 @@ func managedPath(reposDir, repo string) (string, error) {
 	return filepath.Join(reposDir, owner, name), nil
 }
 
+// Runner is the subset of *execrunner.Runner the tools use.
+type Runner interface {
+	Run(ctx context.Context, c execrunner.Command) (execrunner.Result, error)
+}
+
 // git runs a hardened git command and maps runner failures to tool errors.
-func git(ctx context.Context, r *execrunner.Runner, root string, cmd execrunner.Command, sub ...string) (execrunner.Result, error) {
+func git(ctx context.Context, r Runner, root string, cmd execrunner.Command, sub ...string) (execrunner.Result, error) {
 	cmd.Args = hardenedArgs(root, sub...)
+	return runGit(ctx, r, cmd)
+}
+
+// runGit runs a fully built command and maps runner failures to tool errors.
+func runGit(ctx context.Context, r Runner, cmd execrunner.Command) (execrunner.Result, error) {
 	res, err := r.Run(ctx, cmd)
 	if err != nil {
 		var de *execrunner.DeniedError
