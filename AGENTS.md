@@ -8,10 +8,11 @@ English; talk to the owner in Vietnamese.
 
 | Role | Who | Does | Never does |
 |---|---|---|---|
-| **Lead** | the main Claude session | writes the plan, dispatches implementers, writes the Test Request, reviews the Test Report, decides pass or fix | runs `go test`; pushes or merges without the owner's OK |
+| **Lead** | the main Claude session | writes the plan, dispatches implementers, fixes, writes Test and Review Requests, judges the reports, decides pass or fix | runs `go test`; does the final review of its own branch; pushes or merges without the owner's OK |
 | **Implementer** | a subagent dispatched by the Lead, one task at a time | writes the tests and the code for one plan task, commits locally | runs `go test`; changes other tasks' scope; pushes |
-| **Tester** | a separate agent that the owner runs | runs the Test Request exactly as written and returns a Test Report | edits code or tests; "fixes" failures; commits |
-| **Owner** | the human | approves plans, passes Test Requests to the Tester and Test Reports back to the Lead, approves push/merge | n/a |
+| **Tester** | a separate agent that the owner runs (`TESTER.md`) | runs the Test Request exactly as written and returns a Test Report | edits code or tests; "fixes" failures; commits |
+| **Reviewer** | a separate agent that the owner runs (`REVIEWER.md`) | reads the branch against the plan and returns a Review Report with proven findings | edits code; runs `go test`; commits |
+| **Owner** | the human | approves plans, carries Requests to the Tester/Reviewer and Reports back to the Lead, approves push/merge | n/a |
 
 Lead and Implementer may only run these to prove the code compiles:
 `go build ./...`, `go vet ./...`, `gofmt -l cmd internal`, `make generate`
@@ -42,8 +43,14 @@ Lead and Implementer may only run these to prove the code compiles:
      then sends a new Test Request covering only the affected tests plus the
      full suite.
    A task is "done" only after a PASS report for its commit.
-6. **Finish.** When everything has passed, the Lead reviews the whole branch,
-   then asks the owner before any push, merge or PR.
+6. **Review.** When every task has a PASS, the Lead writes a Review Request
+   (format below). The owner gives it to the Reviewer, who returns a Review
+   Report. The Lead fixes every Critical and Important finding (and Minor ones
+   it agrees with, or records a ruling), answers each Question, then sends a
+   Test Request for the fixes. If the fixes are large, a new Review Request
+   covers only the fix commits.
+7. **Finish.** After an `APPROVE` review and a PASS test report on the same
+   head, the Lead asks the owner before any push, merge or PR.
 
 ## Test Request format (Lead → Tester)
 
@@ -127,6 +134,30 @@ Rules for the Tester:
 - Otherwise FIX. The Lead first finds the root cause from the report. If the
   report lacks the evidence it needs, it sends a narrower Test Request (for
   example `-run '^TestX$' -v`) instead of guessing.
+
+## Review Request format (Lead → Reviewer)
+
+The Reviewer follows `REVIEWER.md`, which holds the Review Report format.
+
+```markdown
+# Review Request <plan-slug> #<n>
+
+- Branch: <branch>   Base: <base sha>   Head: <head sha>
+- Plan: <path>          Ledger: <path to progress.md>
+- Scope: <tasks, or "whole branch">
+- Already verified by tests: <Test Report id and commit>
+- Focus: <numbered items, usually the plan's "Review Focus">
+- Constraints to check: <usually the plan's "Global Constraints">
+- Rulings to challenge: <ledger rulings that need a second opinion>
+- Out of scope: <what not to report>
+```
+
+How the Lead judges a Review Report:
+- The head reviewed must equal the request's head.
+- For each finding, the Lead checks the code first. A finding that is wrong is
+  answered with evidence in the ledger, not silently dropped.
+- Critical and Important findings are fixed before merge. Every fix goes
+  through a new Test Request.
 
 ## Repo constraints (all roles)
 
