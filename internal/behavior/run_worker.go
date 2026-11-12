@@ -421,7 +421,9 @@ func (w *RunWorker) effectiveDoc(doc ResolvedDoc, v Version, p Profile) Resolved
 // caller builds the run's tool caller. The policy keeps the workspace's
 // grants but enables only the behavior's reads (plus clickup_get_task when
 // the trigger needs a pre-check) that the workspace itself enables, and
-// allows no write.
+// allows no write. memory_search is enabled by the behavior's reads alone:
+// it reads only the workspace's own decision memory and needs no grant or
+// credential.
 func (w *RunWorker) caller(run Run, doc ResolvedDoc, cfg tenant.AgentConfig, precheck bool) ToolCaller {
 	want := map[string]bool{precheckTool: precheck}
 	outputCap := DefaultReadBytes
@@ -432,9 +434,12 @@ func (w *RunWorker) caller(run Run, doc ResolvedDoc, cfg tenant.AgentConfig, pre
 	policy := cfg.Tools
 	policy.Enabled = nil
 	for _, name := range cfg.Tools.Enabled {
-		if want[name] {
+		if want[name] && name != MemorySearchTool {
 			policy.Enabled = append(policy.Enabled, name)
 		}
+	}
+	if want[MemorySearchTool] {
+		policy.Enabled = append(policy.Enabled, MemorySearchTool)
 	}
 	policy.MaxWritesPerJob = 0
 	policy.DryRun = true
@@ -444,8 +449,9 @@ func (w *RunWorker) caller(run Run, doc ResolvedDoc, cfg tenant.AgentConfig, pre
 		repos[k] = g
 	}
 	policy.Repos = repos
-	// One pre-check, the subject reads and each read of each reference.
-	maxCalls := 2 + len(doc.Reads)*(2*MaxRefsPerKind+1)
+	// One pre-check, the subject reads, each read of each reference and
+	// the memory search.
+	maxCalls := 3 + len(doc.Reads)*(2*MaxRefsPerKind+1)
 	return w.d.Callers(run, policy, cfg.ClickUpTokenRef, outputCap+64, maxCalls)
 }
 

@@ -83,15 +83,17 @@ func run() error {
 	workerSettings := relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout}
 	sender := telegram.NewClient(netguard.Client(s.NoticeRequestTimeout, netguard.DefaultHosts), resolver)
 	worker := relay.NewNoticeWorker(notices, sender, workerSettings)
-	ag, err := buildAgent(pool, s, resolver, redactor, sender)
-	if err != nil {
-		return err
-	}
-	notices.SetKnownTools(ag.known)
 	behaviors, err := storage.NewBehaviorStore(pool)
 	if err != nil {
 		return errors.New("behavior store startup failed")
 	}
+	// memory_search reads the workspace's decision memory; it is a read
+	// tool of the shared registry like any other.
+	ag, err := buildAgent(pool, s, resolver, redactor, sender, behavior.NewMemorySearchTool(behaviors))
+	if err != nil {
+		return err
+	}
+	notices.SetKnownTools(ag.known)
 	// Telegram inbound: the handler only verifies, gates and stores; the
 	// inbox worker does the work. Behavior commands create pending runs;
 	// buttons, replies and /undo go to the action engine; /trace answers

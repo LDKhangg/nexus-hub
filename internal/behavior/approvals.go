@@ -216,9 +216,11 @@ func (e *Engine) reject(ctx context.Context, a CallbackAction) (CallbackResult, 
 	return CallbackResult{Toast: t.skipped(), RemoveButtons: true}, nil
 }
 
-// decisionScope is where a remembered decision of the run applies.
+// decisionScope is where a remembered decision of the run applies: the
+// behavior, the trigger's ClickUp list (when known) and the GitHub repos
+// the run read.
 func decisionScope(rc RunContext) DecisionScope {
-	return DecisionScope{Behavior: rc.Doc.Name, List: rc.Trigger.ListID}
+	return DecisionScope{Behavior: rc.Doc.Name, List: rc.Trigger.ListID, Repo: capRunes(strings.Join(contextRepos(rc.Context), ","), 300)}
 }
 
 func (e *Engine) remember(ctx context.Context, rc RunContext, it Item, answer string, src DecisionSource) {
@@ -449,11 +451,15 @@ func (e *Engine) removeButtons(ctx context.Context, run Run, chat ChatRef, messa
 
 // --- expiry sweep ---
 
-// Run sweeps expired approvals until ctx ends.
+// Run sweeps expired approvals and sends due digest batches until ctx
+// ends.
 func (e *Engine) Run(ctx context.Context) error {
 	for ctx.Err() == nil {
 		if _, err := e.Sweep(ctx); err != nil && ctx.Err() == nil {
 			log.Print("behavior approvals: expiry sweep failed; retried next period")
+		}
+		if _, err := e.FlushDigests(ctx); err != nil && ctx.Err() == nil {
+			log.Print("behavior digests: flush failed; retried next period")
 		}
 		t := time.NewTimer(e.s.SweepInterval)
 		select {

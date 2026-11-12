@@ -74,6 +74,32 @@ type Behavior struct {
 	UpdatedAt   pgtype.Timestamptz
 }
 
+// One batched engine Telegram message; identifiers only, never message text.
+type BehaviorDigestBatch struct {
+	ID                int64
+	WorkspaceID       pgtype.UUID
+	IntegrationID     pgtype.UUID
+	ChatID            int64
+	Status            string
+	ClaimToken        pgtype.UUID
+	TelegramMessageID pgtype.Int8
+	CreatedAt         pgtype.Timestamptz
+	SentAt            pgtype.Timestamptz
+}
+
+// A run's notify/FYI message waiting for its batch; identifiers only.
+type BehaviorDigestEntry struct {
+	ID            int64
+	WorkspaceID   pgtype.UUID
+	RunID         int64
+	MsgKey        string
+	IntegrationID pgtype.UUID
+	ChatID        int64
+	DueAt         pgtype.Timestamptz
+	BatchID       pgtype.Int8
+	CreatedAt     pgtype.Timestamptz
+}
+
 // One row per engine Telegram message of a run; holds identifiers only, never message text.
 type BehaviorMessage struct {
 	ID                int64

@@ -152,7 +152,10 @@ type ActionDeps struct {
 	Messenger Messenger
 	Callers   ActionCallerFactory
 	Decisions DecisionRecorder // nil: NopDecisionRecorder
-	Redactor  *agent.Redactor
+	// Digests queues digest and FYI messages for quiet hours and digest
+	// mode; nil sends them at once.
+	Digests  DigestStore
+	Redactor *agent.Redactor
 }
 
 // ActionSettings tune the action library.
@@ -1025,16 +1028,10 @@ func (e *Engine) sendAsk(ctx context.Context, rc RunContext, chat ChatRef, it It
 	return e.sendApproval(ctx, rc, chat, a, msg)
 }
 
-// summary sends a digest or FYI listing items, once per run under key. A
-// summary about one item carries 👍/👎 through a feedback approval.
-func (e *Engine) summary(ctx context.Context, rc RunContext, chat ChatRef, key, head string, items []Item, withStatus bool) error {
-	if len(items) == 0 {
-		return nil
-	}
-	t := textsFor(rc.Doc.Language)
+// summaryLines lists items one per line: label, answer (clipped to per
+// runes) and, with withStatus, the item status.
+func summaryLines(t texts, items []Item, withStatus bool, per int) string {
 	var b strings.Builder
-	b.WriteString(head + " (" + t.runRef(rc.Doc.Name, rc.Run.ID) + ")\n")
-	per := max(maxTelegramRunes/len(items)-40, 60)
 	for _, it := range items {
 		label := it.Label
 		if strings.TrimSpace(label) == "" {
@@ -1046,6 +1043,19 @@ func (e *Engine) summary(ctx context.Context, rc RunContext, chat ChatRef, key, 
 		}
 		b.WriteString(line + "\n")
 	}
+	return b.String()
+}
+
+// summary sends a digest or FYI listing items, once per run under key. A
+// summary about one item carries 👍/👎 through a feedback approval.
+func (e *Engine) summary(ctx context.Context, rc RunContext, chat ChatRef, key, head string, items []Item, withStatus bool) error {
+	if len(items) == 0 {
+		return nil
+	}
+	t := textsFor(rc.Doc.Language)
+	var b strings.Builder
+	b.WriteString(head + " (" + t.runRef(rc.Doc.Name, rc.Run.ID) + ")\n")
+	b.WriteString(summaryLines(t, items, withStatus, max(maxTelegramRunes/len(items)-40, 60)))
 	msg := OutMessage{Text: capRunes(strings.TrimSpace(b.String()), maxTelegramRunes)}
 	if len(items) == 1 {
 		fb, err := e.ensureApproval(ctx, rc.Run.WorkspaceID, NewApproval{
@@ -1120,10 +1130,11 @@ func (e *Engine) Dispatch(ctx context.Context, rc RunContext, items []Item) erro
 			notifies = append(notifies, it)
 		}
 	}
-	if err := e.summary(ctx, rc, chat, "digest", t.digestHead(), notifies, false); err != nil {
+	// Digest and FYI follow the profile's quiet hours and digest mode.
+	if err := e.inform(ctx, rc, chat, DigestKeyNotify, t.digestHead(), notifies, false); err != nil {
 		return err
 	}
-	return e.summary(ctx, rc, chat, "fyi", t.fyiHead(), autos, true)
+	return e.inform(ctx, rc, chat, DigestKeyFYI, t.fyiHead(), autos, true)
 }
 
 // finish executes a class's actions for an item and moves it from `from`

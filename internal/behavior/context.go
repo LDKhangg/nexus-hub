@@ -29,6 +29,8 @@ import (
 //   github:<owner>/<repo>#<n>:@issue       an issue's header lines
 //   github:<owner>/<repo>#<n>:@body        an issue's body
 //
+//   memory:decision/<id>              a past decision (memory_search)
+//
 // The engine knows, per read tool, how to derive the tool's input from
 // the run's subject or the context already collected (readRules). Tools
 // without a rule are noted as not read.
@@ -129,7 +131,8 @@ type readCall struct {
 }
 
 // readRule says how the engine feeds one read tool. Stage 0 reads from the
-// subject; stage 1 reads references found in stage 0's fragments.
+// subject; stage 1 reads references found in stage 0's fragments; stage 2
+// (memory_search) searches with words of everything read before.
 type readRule struct {
 	stage  int
 	inputs func(c *collector, spec ReadSpec) ([]readCall, []ReadNote)
@@ -142,7 +145,11 @@ var readRules = map[string]readRule{
 	"github_pr_files":   {stage: 1, inputs: githubRefInputs(refPull), split: splitPRFiles},
 	"github_pr_checks":  {stage: 1, inputs: githubRefInputs(refPull), split: splitWhole(":@checks")},
 	"github_issue_view": {stage: 1, inputs: githubRefInputs(refIssue), split: splitHeaderBody(":@issue", "body:", ":@body")},
+	MemorySearchTool:    {stage: 2, inputs: memoryInputs, split: splitDecisions},
 }
+
+// lastStage is the highest readRule stage.
+const lastStage = 2
 
 // readError is a read failure the run should retry later.
 type readError struct{ code string }
@@ -240,14 +247,8 @@ func taskInput(taskID string, maxBytes int) json.RawMessage {
 // collect runs the behavior's reads in stage order. A transient failure
 // returns a *readError so the run is retried; other failures are noted.
 func (c *collector) collect(ctx context.Context, reads []ReadSpec) (ContextSnapshot, error) {
-	for stage := 0; stage <= 1; stage++ {
+	for stage := 0; stage <= lastStage; stage++ {
 		for _, spec := range reads {
-			if spec.Tool == MemorySearchTool {
-				if stage == 0 {
-					c.note(spec.Tool, "", NoteNotImplemented)
-				}
-				continue
-			}
 			rule, ok := readRules[spec.Tool]
 			if !ok {
 				if stage == 0 {

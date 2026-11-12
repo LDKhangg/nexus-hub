@@ -433,8 +433,43 @@ func (s *BehaviorStore) SearchDecisions(ctx context.Context, workspaceID, query,
 	return out, nil
 }
 
+// SearchReusableDecisions is SearchDecisions over every scope for reuse as
+// evidence: undone decisions, and decisions about an item whose auto write
+// was undone, are left out.
+func (s *BehaviorStore) SearchReusableDecisions(ctx context.Context, workspaceID, query string, limit int) ([]behavior.RememberedDecision, error) {
+	ws, err := parseDBID(workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+	if utf8.RuneCountInString(query) > 1000 {
+		return nil, invalid("query")
+	}
+	rows, err := s.q.SearchReusableDecisions(ctx, sqlc.SearchReusableDecisionsParams{Query: query, WorkspaceID: ws, MaxRows: int32(clamp(limit, 1, 50))})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]behavior.RememberedDecision, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, mapDecision(sqlc.DecisionMemory{
+			ID: r.ID, WorkspaceID: r.WorkspaceID, Topic: r.Topic, Question: r.Question, Answer: r.Answer, Scope: r.Scope,
+			Source: r.Source, RunID: r.RunID, ItemID: r.ItemID, CreatedAt: r.CreatedAt, ForgottenAt: r.ForgottenAt,
+		}, r.Rank))
+	}
+	return out, nil
+}
+
 // ListDecisions pages decisions newest first; limit is 1..100.
 func (s *BehaviorStore) ListDecisions(ctx context.Context, workspaceID string, includeForgotten bool, limit, offset int) ([]behavior.RememberedDecision, error) {
+	return s.ListDecisionsFor(ctx, workspaceID, "", includeForgotten, limit, offset)
+}
+
+// ListDecisionsFor pages the decisions of one behavior scope (every scope
+// when behaviorName is empty) newest first; limit is 1..100.
+func (s *BehaviorStore) ListDecisionsFor(ctx context.Context, workspaceID, behaviorName string, includeForgotten bool, limit, offset int) ([]behavior.RememberedDecision, error) {
 	ws, err := parseDBID(workspaceID)
 	if err != nil {
 		return nil, err
@@ -442,7 +477,7 @@ func (s *BehaviorStore) ListDecisions(ctx context.Context, workspaceID string, i
 	if err := validatePage(int32(limit), int32(offset)); err != nil {
 		return nil, invalid("page")
 	}
-	rows, err := s.q.ListDecisions(ctx, sqlc.ListDecisionsParams{WorkspaceID: ws, IncludeForgotten: includeForgotten, MaxRows: int32(limit), Skip: int32(offset)})
+	rows, err := s.q.ListDecisions(ctx, sqlc.ListDecisionsParams{WorkspaceID: ws, IncludeForgotten: includeForgotten, Behavior: behaviorName, MaxRows: int32(limit), Skip: int32(offset)})
 	if err != nil {
 		return nil, err
 	}

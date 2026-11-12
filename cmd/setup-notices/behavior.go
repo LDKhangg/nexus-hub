@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"time"
@@ -29,6 +30,8 @@ const behaviorUsage = `usage: behavior <command> --workspace-id <uuid> [args]
   enable <name> | disable <name>
   list
   export <name> [--version N]     print the stored source (the draft when N is omitted)
+  stats <name> [--version N]      per published version: runs, items by class and
+                                  status, undos, conflicts, 👍/👎, average confidence
 Vars hold plain settings such as IDs, status names and headings, never
 secrets; credentials are stored with the secret command.`
 
@@ -129,7 +132,7 @@ func behaviorCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 	}
 	set := map[string]bool{}
 	f.Visit(func(fl *flag.Flag) { set[fl.Name] = true })
-	if (set["vars"] && sub != "import") || (set["version"] && sub != "export") {
+	if (set["vars"] && sub != "import") || (set["version"] && sub != "export" && sub != "stats") {
 		return errors.New(behaviorUsage)
 	}
 	wantArgs := 1
@@ -212,6 +215,28 @@ func behaviorCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 			}
 		}
 		return nil
+	case "stats":
+		if *version < 0 {
+			return errors.New("--version must be a positive number")
+		}
+		list, err := store.Stats(ctx, *ws, pos[0])
+		if err != nil {
+			return behaviorError(err)
+		}
+		found := false
+		for _, st := range list {
+			if *version != 0 && st.Version != *version {
+				continue
+			}
+			found = true
+			if err := enc.Encode(statsJSON(pos[0], st)); err != nil {
+				return err
+			}
+		}
+		if *version != 0 && !found {
+			return errors.New("behavior or version not found")
+		}
+		return nil
 	case "export":
 		if *version < 0 {
 			return errors.New("--version must be a positive number")
@@ -224,4 +249,23 @@ func behaviorCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 		return err
 	}
 	return errors.New(behaviorUsage)
+}
+
+// statsJSON is one version's line of behavior stats.
+func statsJSON(name string, st behavior.VersionStats) map[string]any {
+	round := func(f float64) float64 { return math.Round(f*1000) / 1000 }
+	return map[string]any{
+		"name": name, "version": st.Version,
+		"runs":  map[string]int64{"total": st.Runs, "failed": st.FailedRuns, "skipped": st.SkippedRuns, "undone": st.Undos},
+		"items": map[string]int64{"auto": st.AutoItems, "notify": st.NotifyItems, "ask": st.AskItems},
+		"statuses": map[string]int64{
+			"drafted": st.DraftedItems, "asked": st.AskedItems, "done": st.DoneItems, "answered": st.AnsweredItems,
+			"expired": st.ExpiredItems, "skipped": st.SkippedItems, "conflict": st.Conflicts, "failed": st.FailedItems,
+		},
+		"undos":    st.Undos,
+		"feedback": map[string]int64{"up": st.RatedUp, "down": st.RatedDown},
+		"avg_confidence": map[string]float64{
+			"auto": round(st.AvgConfidenceAuto), "notify": round(st.AvgConfidenceNotify), "ask": round(st.AvgConfidenceAsk),
+		},
+	}
 }

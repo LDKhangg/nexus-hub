@@ -64,9 +64,10 @@ func resolveGit(configured string) (string, error) {
 	return filepath.Abs(p)
 }
 
-// buildTools assembles every agent tool. Code tools are skipped (with a
-// warning) when git is unavailable.
-func buildTools(s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor) (*tools.Registry, error) {
+// buildTools assembles every agent tool plus extra (the engine's own read
+// tools, such as memory_search). Code tools are skipped (with a warning)
+// when git is unavailable.
+func buildTools(s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, extra ...tools.Tool) (*tools.Registry, error) {
 	apiClient := netguard.Client(s.ToolTimeout, netguard.DefaultHosts)
 	creds := githubapi.NewCredentials(apiClient, resolver, redactor, nil)
 	gh := githubapi.NewClient(apiClient, creds)
@@ -77,6 +78,7 @@ func buildTools(s settings.Settings, resolver *secrets.Resolver, redactor *agent
 	// ClickUp writes of the behavior action library: tier write, not repo
 	// scoped, so agent jobs can never call them (no repo grant allows them).
 	all = append(all, clickuptools.NewWriteTools(apiClient, resolver)...)
+	all = append(all, extra...)
 	if gitPath, err := resolveGit(s.GitPath); err != nil {
 		log.Print("git not found; code and workspace tools disabled")
 	} else if runner, err := execrunner.New(gitPath, s.TmpDir); err != nil {
@@ -88,8 +90,8 @@ func buildTools(s settings.Settings, resolver *secrets.Resolver, redactor *agent
 	return tools.NewRegistry(all...)
 }
 
-func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, sender *telegram.Client) (agentServices, error) {
-	reg, err := buildTools(s, resolver, redactor)
+func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, sender *telegram.Client, extra ...tools.Tool) (agentServices, error) {
+	reg, err := buildTools(s, resolver, redactor, extra...)
 	if err != nil {
 		return agentServices{}, errors.New("tool registry startup failed")
 	}
@@ -144,9 +146,10 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 // library: the shared tool registry and LLM client, one tool-run audit
 // scoped to behavior runs (reads and action writes), the workspace's
 // ClickUp source agent config as the run's grants and credential, and the
-// owner's Telegram chat. The action engine is the run worker's dispatcher
-// and failure notifier, the inbox's callback handler and undoer, and a
-// service worker of its own (the approval expiry sweep).
+// owner's Telegram chat, decision memory and the digest queue. The action
+// engine is the run worker's dispatcher and failure notifier, the inbox's
+// callback handler and undoer, and a service worker of its own (the
+// approval expiry sweep and digest batches).
 func buildBehaviorEngine(pool *pgxpool.Pool, s settings.Settings, store *storage.BehaviorStore, integrations *storage.IntegrationRepository, ag agentServices, redactor *agent.Redactor, resolver *secrets.Resolver, messenger behavior.Messenger) (*behavior.RunWorker, *behavior.Engine, error) {
 	audit, err := storage.NewBehaviorToolRunStore(pool)
 	if err != nil {
@@ -159,6 +162,8 @@ func buildBehaviorEngine(pool *pgxpool.Pool, s settings.Settings, store *storage
 		Chats:     ownerChats{integrations: integrations, ownerChatID: s.OwnerTelegramChatID},
 		Messenger: messenger,
 		Callers:   behavior.ActionExecutorFactory(ag.reg, audit, redactor, ag.limits),
+		Decisions: behavior.MemoryRecorder{Store: store},
+		Digests:   store,
 		Redactor:  redactor,
 	}, behavior.ActionSettings{OwnerClickUpUserID: s.OwnerClickUpUserID, RequestTimeout: s.NoticeRequestTimeout})
 	if err != nil {

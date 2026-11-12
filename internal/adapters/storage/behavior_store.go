@@ -394,8 +394,12 @@ func (s *BehaviorStore) Stats(ctx context.Context, workspaceID, name string) ([]
 	out := make([]behavior.VersionStats, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, behavior.VersionStats{
-			Version: int(r.Version), Runs: r.Runs, Undos: r.Undos, AutoItems: r.AutoItems, NotifyItems: r.NotifyItems,
-			AskItems: r.AskItems, Conflicts: r.Conflicts, RatedDown: r.RatedDown,
+			Version: int(r.Version), Runs: r.Runs, Undos: r.Undos, FailedRuns: r.FailedRuns, SkippedRuns: r.SkippedRuns,
+			AutoItems: r.AutoItems, NotifyItems: r.NotifyItems, AskItems: r.AskItems, Conflicts: r.Conflicts,
+			RatedDown: r.RatedDown, RatedUp: r.RatedUp,
+			DraftedItems: r.DraftedItems, AskedItems: r.AskedItems, DoneItems: r.DoneItems, AnsweredItems: r.AnsweredItems,
+			ExpiredItems: r.ExpiredItems, SkippedItems: r.SkippedItems, FailedItems: r.FailedItems,
+			AvgConfidenceAuto: r.AvgConfidenceAuto, AvgConfidenceNotify: r.AvgConfidenceNotify, AvgConfidenceAsk: r.AvgConfidenceAsk,
 		})
 	}
 	return out, nil

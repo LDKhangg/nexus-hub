@@ -50,12 +50,25 @@ const behaviorVersionStats = `-- name: BehaviorVersionStats :many
 
 SELECT v.version,
   count(DISTINCT r.id)::bigint AS runs,
+  count(DISTINCT r.id) FILTER (WHERE r.status = 'failed')::bigint AS failed_runs,
+  count(DISTINCT r.id) FILTER (WHERE r.status = 'skipped')::bigint AS skipped_runs,
   count(DISTINCT r.id) FILTER (WHERE r.undone_at IS NOT NULL)::bigint AS undos,
   count(i.id) FILTER (WHERE i.class = 'auto')::bigint AS auto_items,
   count(i.id) FILTER (WHERE i.class = 'notify')::bigint AS notify_items,
   count(i.id) FILTER (WHERE i.class = 'ask')::bigint AS ask_items,
   count(i.id) FILTER (WHERE i.status = 'conflict')::bigint AS conflicts,
-  count(i.id) FILTER (WHERE i.rating = 'down')::bigint AS rated_down
+  count(i.id) FILTER (WHERE i.rating = 'down')::bigint AS rated_down,
+  count(i.id) FILTER (WHERE i.rating = 'up')::bigint AS rated_up,
+  count(i.id) FILTER (WHERE i.status = 'drafted')::bigint AS drafted_items,
+  count(i.id) FILTER (WHERE i.status = 'asked')::bigint AS asked_items,
+  count(i.id) FILTER (WHERE i.status = 'done')::bigint AS done_items,
+  count(i.id) FILTER (WHERE i.status = 'answered')::bigint AS answered_items,
+  count(i.id) FILTER (WHERE i.status = 'expired')::bigint AS expired_items,
+  count(i.id) FILTER (WHERE i.status = 'skipped')::bigint AS skipped_items,
+  count(i.id) FILTER (WHERE i.status = 'failed')::bigint AS failed_items,
+  COALESCE(avg(i.confidence) FILTER (WHERE i.class = 'auto'), 0)::float8 AS avg_confidence_auto,
+  COALESCE(avg(i.confidence) FILTER (WHERE i.class = 'notify'), 0)::float8 AS avg_confidence_notify,
+  COALESCE(avg(i.confidence) FILTER (WHERE i.class = 'ask'), 0)::float8 AS avg_confidence_ask
 FROM public.behavior_versions v
 LEFT JOIN public.behavior_runs r ON r.workspace_id = v.workspace_id AND r.behavior_version_id = v.id
 LEFT JOIN public.run_items i ON i.workspace_id = r.workspace_id AND i.run_id = r.id
@@ -70,14 +83,27 @@ type BehaviorVersionStatsParams struct {
 }
 
 type BehaviorVersionStatsRow struct {
-	Version     int32
-	Runs        int64
-	Undos       int64
-	AutoItems   int64
-	NotifyItems int64
-	AskItems    int64
-	Conflicts   int64
-	RatedDown   int64
+	Version             int32
+	Runs                int64
+	FailedRuns          int64
+	SkippedRuns         int64
+	Undos               int64
+	AutoItems           int64
+	NotifyItems         int64
+	AskItems            int64
+	Conflicts           int64
+	RatedDown           int64
+	RatedUp             int64
+	DraftedItems        int64
+	AskedItems          int64
+	DoneItems           int64
+	AnsweredItems       int64
+	ExpiredItems        int64
+	SkippedItems        int64
+	FailedItems         int64
+	AvgConfidenceAuto   float64
+	AvgConfidenceNotify float64
+	AvgConfidenceAsk    float64
 }
 
 // Stats.
@@ -93,12 +119,25 @@ func (q *Queries) BehaviorVersionStats(ctx context.Context, arg BehaviorVersionS
 		if err := rows.Scan(
 			&i.Version,
 			&i.Runs,
+			&i.FailedRuns,
+			&i.SkippedRuns,
 			&i.Undos,
 			&i.AutoItems,
 			&i.NotifyItems,
 			&i.AskItems,
 			&i.Conflicts,
 			&i.RatedDown,
+			&i.RatedUp,
+			&i.DraftedItems,
+			&i.AskedItems,
+			&i.DoneItems,
+			&i.AnsweredItems,
+			&i.ExpiredItems,
+			&i.SkippedItems,
+			&i.FailedItems,
+			&i.AvgConfidenceAuto,
+			&i.AvgConfidenceNotify,
+			&i.AvgConfidenceAsk,
 		); err != nil {
 			return nil, err
 		}
@@ -1512,21 +1551,25 @@ func (q *Queries) ListBehaviors(ctx context.Context, workspaceID pgtype.UUID) ([
 const listDecisions = `-- name: ListDecisions :many
 SELECT id, workspace_id, topic, question, answer, scope, source, run_id, item_id, created_at, forgotten_at FROM public.decision_memory
 WHERE workspace_id = $1 AND ($2::bool OR forgotten_at IS NULL)
+  AND ($3::text = '' OR scope->>'behavior' = $3::text)
 ORDER BY created_at DESC, id DESC
-LIMIT $4::int OFFSET $3::int
+LIMIT $5::int OFFSET $4::int
 `
 
 type ListDecisionsParams struct {
 	WorkspaceID      pgtype.UUID
 	IncludeForgotten bool
+	Behavior         string
 	Skip             int32
 	MaxRows          int32
 }
 
+// An empty behavior filter matches every scope.
 func (q *Queries) ListDecisions(ctx context.Context, arg ListDecisionsParams) ([]DecisionMemory, error) {
 	rows, err := q.db.Query(ctx, listDecisions,
 		arg.WorkspaceID,
 		arg.IncludeForgotten,
+		arg.Behavior,
 		arg.Skip,
 		arg.MaxRows,
 	)
@@ -1930,6 +1973,76 @@ func (q *Queries) SearchDecisions(ctx context.Context, arg SearchDecisionsParams
 	var items []SearchDecisionsRow
 	for rows.Next() {
 		var i SearchDecisionsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Topic,
+			&i.Question,
+			&i.Answer,
+			&i.Scope,
+			&i.Source,
+			&i.RunID,
+			&i.ItemID,
+			&i.CreatedAt,
+			&i.ForgottenAt,
+			&i.Rank,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const searchReusableDecisions = `-- name: SearchReusableDecisions :many
+SELECT d.id, d.workspace_id, d.topic, d.question, d.answer, d.scope, d.source, d.run_id, d.item_id, d.created_at, d.forgotten_at, ts_rank(to_tsvector('simple'::regconfig, d.topic || ' ' || d.question || ' ' || d.answer),
+  replace(plainto_tsquery('simple'::regconfig, $1::text)::text, '&', '|')::tsquery)::float8 AS rank
+FROM public.decision_memory d
+WHERE d.workspace_id = $2 AND d.forgotten_at IS NULL AND d.source <> 'auto_undone'
+  AND to_tsvector('simple'::regconfig, d.topic || ' ' || d.question || ' ' || d.answer)
+      @@ replace(plainto_tsquery('simple'::regconfig, $1::text)::text, '&', '|')::tsquery
+  AND NOT EXISTS (
+    SELECT 1 FROM public.decision_memory u
+    WHERE u.workspace_id = d.workspace_id AND u.source = 'auto_undone' AND d.item_id IS NOT NULL AND u.item_id = d.item_id)
+ORDER BY rank DESC, d.created_at DESC, d.id DESC
+LIMIT $3::int
+`
+
+type SearchReusableDecisionsParams struct {
+	Query       string
+	WorkspaceID pgtype.UUID
+	MaxRows     int32
+}
+
+type SearchReusableDecisionsRow struct {
+	ID          int64
+	WorkspaceID pgtype.UUID
+	Topic       string
+	Question    string
+	Answer      string
+	Scope       []byte
+	Source      string
+	RunID       pgtype.Int8
+	ItemID      pgtype.Int8
+	CreatedAt   pgtype.Timestamptz
+	ForgottenAt pgtype.Timestamptz
+	Rank        float64
+}
+
+// SearchDecisions for reuse as evidence: undone decisions are left out,
+// and so is any decision about an item whose auto write the owner undid.
+func (q *Queries) SearchReusableDecisions(ctx context.Context, arg SearchReusableDecisionsParams) ([]SearchReusableDecisionsRow, error) {
+	rows, err := q.db.Query(ctx, searchReusableDecisions, arg.Query, arg.WorkspaceID, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SearchReusableDecisionsRow
+	for rows.Next() {
+		var i SearchReusableDecisionsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.WorkspaceID,

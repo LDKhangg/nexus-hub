@@ -119,3 +119,57 @@ shows the full trace (also when `/trace` was cut to fit Telegram). A trace
 reference is a run ID, a ClickUp task ID or URL, or a correlation ID; every
 log line, tool run and engine message of a run carries that correlation ID
 (`corr=<id>` in the logs).
+
+## Profile
+
+One profile per workspace sets defaults for every behavior; a behavior's
+`profile`, `model` and `budgets` fields override it.
+
+```sh
+setup-notices profile show --workspace-id <uuid>
+setup-notices profile set --workspace-id <uuid> --language vi --tone "ngắn gọn" \
+  --quiet-hours 22:00-07:00 --timezone Asia/Ho_Chi_Minh --digest hourly \
+  --model <model id> --max-tokens 80000
+```
+
+- `--language`: the model writes in this language; Telegram texts are in
+  Vietnamese, or English when the language starts with `en`.
+- `--quiet-hours` (local time, may cross midnight; `off` clears): `notify`
+  digests and "done on its own" messages wait until the quiet hours end.
+  Questions, drafts, confirmations and failure notices still arrive at once.
+- `--digest`: `per_run` (default) sends each run's messages at once;
+  `hourly` batches them into one message at the start of the next hour;
+  `daily` into one message at the end of the quiet hours (08:00 when none).
+- `--model`, `--max-tokens` (`0` clears): defaults when a behavior sets none;
+  the server settings apply when neither does.
+
+## Decision memory
+
+Every answer you give to a question, every draft you post and every run you
+undo is remembered with its topic, question, answer and scope (behavior,
+ClickUp list, repos read). Add `memory_search` to a behavior's `reads` and
+each run searches past decisions with words from what it read; matches are
+shown to the model as sources `memory:decision/<id>` that it may cite, so a
+decision you already made can become `auto` the next time. A past decision
+never overrides `always_ask_topics`. Decisions from an undone run are kept
+but never offered as evidence.
+
+```sh
+setup-notices memory list --workspace-id <uuid> [--behavior <name>] [--all]
+setup-notices memory show --workspace-id <uuid> --id <n>
+setup-notices memory forget --workspace-id <uuid> --id <n>   # hide it from memory_search
+```
+
+## Feedback and stats
+
+Every behavior message carries 👍 and "👎 + lý do"; the rating (and the
+optional reason you reply with) is stored on the item and shown in `/trace`.
+To tune thresholds and instructions with data:
+
+```sh
+setup-notices behavior stats my-behavior --workspace-id <uuid> [--version N]
+```
+
+prints, per published version, the runs (failed, skipped, undone), items by
+class and by status, conflicts, 👍/👎 counts and the average confidence of
+each class.

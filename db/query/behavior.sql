@@ -329,9 +329,26 @@ WHERE d.workspace_id = sqlc.arg(workspace_id) AND d.forgotten_at IS NULL
 ORDER BY rank DESC, d.created_at DESC, d.id DESC
 LIMIT sqlc.arg(max_rows)::int;
 
+-- name: SearchReusableDecisions :many
+-- SearchDecisions for reuse as evidence: undone decisions are left out,
+-- and so is any decision about an item whose auto write the owner undid.
+SELECT d.*, ts_rank(to_tsvector('simple'::regconfig, d.topic || ' ' || d.question || ' ' || d.answer),
+  replace(plainto_tsquery('simple'::regconfig, sqlc.arg(query)::text)::text, '&', '|')::tsquery)::float8 AS rank
+FROM public.decision_memory d
+WHERE d.workspace_id = sqlc.arg(workspace_id) AND d.forgotten_at IS NULL AND d.source <> 'auto_undone'
+  AND to_tsvector('simple'::regconfig, d.topic || ' ' || d.question || ' ' || d.answer)
+      @@ replace(plainto_tsquery('simple'::regconfig, sqlc.arg(query)::text)::text, '&', '|')::tsquery
+  AND NOT EXISTS (
+    SELECT 1 FROM public.decision_memory u
+    WHERE u.workspace_id = d.workspace_id AND u.source = 'auto_undone' AND d.item_id IS NOT NULL AND u.item_id = d.item_id)
+ORDER BY rank DESC, d.created_at DESC, d.id DESC
+LIMIT sqlc.arg(max_rows)::int;
+
 -- name: ListDecisions :many
+-- An empty behavior filter matches every scope.
 SELECT * FROM public.decision_memory
 WHERE workspace_id = sqlc.arg(workspace_id) AND (sqlc.arg(include_forgotten)::bool OR forgotten_at IS NULL)
+  AND (sqlc.arg(behavior)::text = '' OR scope->>'behavior' = sqlc.arg(behavior)::text)
 ORDER BY created_at DESC, id DESC
 LIMIT sqlc.arg(max_rows)::int OFFSET sqlc.arg(skip)::int;
 
@@ -344,12 +361,25 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND forgotten_
 -- name: BehaviorVersionStats :many
 SELECT v.version,
   count(DISTINCT r.id)::bigint AS runs,
+  count(DISTINCT r.id) FILTER (WHERE r.status = 'failed')::bigint AS failed_runs,
+  count(DISTINCT r.id) FILTER (WHERE r.status = 'skipped')::bigint AS skipped_runs,
   count(DISTINCT r.id) FILTER (WHERE r.undone_at IS NOT NULL)::bigint AS undos,
   count(i.id) FILTER (WHERE i.class = 'auto')::bigint AS auto_items,
   count(i.id) FILTER (WHERE i.class = 'notify')::bigint AS notify_items,
   count(i.id) FILTER (WHERE i.class = 'ask')::bigint AS ask_items,
   count(i.id) FILTER (WHERE i.status = 'conflict')::bigint AS conflicts,
-  count(i.id) FILTER (WHERE i.rating = 'down')::bigint AS rated_down
+  count(i.id) FILTER (WHERE i.rating = 'down')::bigint AS rated_down,
+  count(i.id) FILTER (WHERE i.rating = 'up')::bigint AS rated_up,
+  count(i.id) FILTER (WHERE i.status = 'drafted')::bigint AS drafted_items,
+  count(i.id) FILTER (WHERE i.status = 'asked')::bigint AS asked_items,
+  count(i.id) FILTER (WHERE i.status = 'done')::bigint AS done_items,
+  count(i.id) FILTER (WHERE i.status = 'answered')::bigint AS answered_items,
+  count(i.id) FILTER (WHERE i.status = 'expired')::bigint AS expired_items,
+  count(i.id) FILTER (WHERE i.status = 'skipped')::bigint AS skipped_items,
+  count(i.id) FILTER (WHERE i.status = 'failed')::bigint AS failed_items,
+  COALESCE(avg(i.confidence) FILTER (WHERE i.class = 'auto'), 0)::float8 AS avg_confidence_auto,
+  COALESCE(avg(i.confidence) FILTER (WHERE i.class = 'notify'), 0)::float8 AS avg_confidence_notify,
+  COALESCE(avg(i.confidence) FILTER (WHERE i.class = 'ask'), 0)::float8 AS avg_confidence_ask
 FROM public.behavior_versions v
 LEFT JOIN public.behavior_runs r ON r.workspace_id = v.workspace_id AND r.behavior_version_id = v.id
 LEFT JOIN public.run_items i ON i.workspace_id = r.workspace_id AND i.run_id = r.id

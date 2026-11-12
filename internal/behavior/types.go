@@ -431,8 +431,14 @@ func (d RememberedDecision) Locator() string { return fmt.Sprintf("memory:decisi
 type VersionStats struct {
 	Version                          int
 	Runs, Undos                      int64
+	FailedRuns, SkippedRuns          int64
 	AutoItems, NotifyItems, AskItems int64
-	Conflicts, RatedDown             int64
+	Conflicts, RatedDown, RatedUp    int64
+	// Items by status.
+	DraftedItems, AskedItems, DoneItems, AnsweredItems int64
+	ExpiredItems, SkippedItems, FailedItems            int64
+	// Average model confidence of the items of each class (0 when none).
+	AvgConfidenceAuto, AvgConfidenceNotify, AvgConfidenceAsk float64
 }
 
 // DefinitionStore persists behaviors and their versions.

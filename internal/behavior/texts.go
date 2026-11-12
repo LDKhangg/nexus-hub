@@ -41,6 +41,9 @@ func (t texts) askHead() string {
 }
 func (t texts) digestHead() string { return t.pick("ℹ️ Thông tin", "ℹ️ For your information") }
 func (t texts) fyiHead() string    { return t.pick("✅ Đã tự xử lý", "✅ Done on its own") }
+func (t texts) batchHead(n int) string {
+	return t.pick(fmt.Sprintf("🗂 Tổng hợp (%d mục)", n), fmt.Sprintf("🗂 Summary (%d items)", n))
+}
 func (t texts) confirmHead() string {
 	return t.pick("⚠️ Cần xác nhận thay đổi", "⚠️ Confirm this change")
 }
