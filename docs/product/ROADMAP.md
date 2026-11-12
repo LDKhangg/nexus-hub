@@ -71,7 +71,7 @@ The earlier plan held three items for "Phase 3". They now go here:
 ## 3. Dependency graph
 
 ```text
-P1 notices ─► P2 agent core ─► P3 tech-spec review assistant ─► P4 identity + event gateway
+P1 notices ─► P2 agent core ─► P3 behavior engine ─► P4 identity + event gateway
 (Phase F foundation runs right before P13; P11 Admin UI is replaced by the CLI, D2)
                                                    │
                                                    ▼
@@ -116,35 +116,20 @@ exit criteria, and the decisions it needs.
   - merged after the owner's OK;
   - Phase Completion Report written.
 
-### Phase 3: Tech-spec review assistant with graded autonomy
+### Phase 3: Behavior engine with graded autonomy
 
-- **Goal (owner, 2026-11-12):** the company's AI already writes the tech
-  spec. For a task assigned to the owner, Nexus-Hub reads that tech spec (its
-  PR), the user story (US) and the open questions (OQ), reviews them, and
-  answers by itself what it can answer with evidence. Only real decisions go
-  to the owner; the rest is a notice or nothing. Every answer and decision
-  can be traced back to its sources.
-- **Three outcome classes for every item** (review finding, OQ, US gap):
-  - `auto`: answered from evidence (US, spec, code, earlier decisions) with
-    citations, posted automatically under policy; the owner gets an FYI.
-  - `notify`: information only; nothing is posted for the owner to approve.
-  - `ask`: needs the owner's opinion (scope, business rule, priority, cost,
-    anything without evidence, or low confidence); sent to Telegram with
-    options; the owner's answer is posted.
-  Rules decide the class first (some topics are always `ask`); the model's
-  confidence can only move an item towards `ask`, never away from it.
-- **Trace:** each item records its sources, short reasoning, class, rule and
-  confidence, the posted text and the correlation ID; a CLI command and a
-  Telegram command show the trace for a task or an item.
-- **PCC:** FR-012, FR-017 (Telegram, ClickUp inbound, owner only), FR-055+
-  (orchestrator context and decisions, partial), FR-0xx policy/approval for
-  ClickUp writes (partial), NFR-025/026 (trace, correlation ID). Exact IDs are
-  fixed in the phase plan.
-- **Also:** pay Phase 2 test debt through CI; Telegram webhook (D3) limited to
-  the owner's chat (D4); ClickUp status change and unassign on the owner's
-  request (use case 2).
-- **Out of scope:** writing the tech spec; running project tests (D1);
-  multi-user identity (D4); Admin UI (D2).
+- **Goal (owner, 2026-11-12):** the hub stays generic; what a user wants done
+  on an event is a versioned **behavior** stored as data (trigger, reads,
+  instructions, autonomy rules, allowed actions). The engine classes every
+  result item `auto` / `notify` / `ask`, acts within policy, asks the owner on
+  Telegram only when needed, and traces everything.
+- **First behavior:** the owner's tech-spec review (company AI's spec PR + US +
+  OQ, answers into the task description, dry-run first) as a YAML file, not
+  code.
+- **Plan:** `docs/superpowers/plans/2026-11-12-phase3-behavior-engine.md`.
+- **PCC:** FR-073–078, 081, 082, 084–086 (partial), FR-003, 012, 017, 018,
+  029, FR-037, 053, 055, 056, FR-009, 113, 115, 116, 121–127, 129, 130, FR-026,
+  NFR-021–023, 025, 026; E2E-004 partial.
 
 ### Phase F: Foundation and operability (moved, runs right before Phase 13)
 
