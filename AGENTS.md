@@ -60,6 +60,10 @@ build is caught here.
 7. **Finish.** When the Test Report is `PASS` and the Review Report is
    `APPROVE` on the same code head, the Lead asks the owner before any push,
    merge or PR.
+   The owner may instead merge earlier, accepting **test debt**: the Lead
+   writes every unproven item to `docs/product/test-debt/` (see its README),
+   and the next Phase Brief carries the open debt for the Tester and the
+   Reviewer to pay first.
 
 ## Phase Brief format (Lead → Tester and Reviewer)
 
