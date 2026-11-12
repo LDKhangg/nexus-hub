@@ -346,3 +346,29 @@ func TestOrchestrator_RetryDoesNotRepeatWrite(t *testing.T) {
 		t.Fatalf("tool_runs %v", statuses)
 	}
 }
+
+func TestAgentStore_SaveSummaryRejectsMovedCursor(t *testing.T) {
+	e := newAgentEnv(t, enabledCfg)
+	var ids []int64
+	for i := 0; i < 9; i++ {
+		ids = append(ids, e.message(t, "m"+itoa(int64(i)), "external_user", "msg"))
+	}
+	summary, cursor, cands, err := e.store.SummaryCandidates(e.ctx, workspaceA, threadA)
+	if err != nil || summary != "" || cursor != 0 || len(cands) != 6 || cands[5].ID != ids[5] {
+		t.Fatalf("%q %d %d %v", summary, cursor, len(cands), err)
+	}
+	if err := e.store.SaveSummary(e.ctx, workspaceA, threadA, 0, ids[5], "sum one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.SaveSummary(e.ctx, workspaceA, threadA, 0, ids[6], "stale"); !errors.Is(err, memory.ErrSummaryCursorMoved) {
+		t.Fatalf("moved cursor accepted: %v", err)
+	}
+	summary, cursor, cands, _ = e.store.SummaryCandidates(e.ctx, workspaceA, threadA)
+	if summary != "sum one" || cursor != ids[5] || len(cands) != 0 {
+		t.Fatalf("%q %d %d", summary, cursor, len(cands))
+	}
+	jc, _ := e.store.Load(e.ctx, agent.AgentJob{WorkspaceID: workspaceA, ThreadID: threadA, SourceIntegrationID: integrationA})
+	if jc.Summary != "sum one" {
+		t.Fatalf("load summary %q", jc.Summary)
+	}
+}

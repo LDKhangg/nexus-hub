@@ -290,3 +290,37 @@ func TestOrchestrator_EmptyBatchAndDisabled(t *testing.T) {
 		t.Fatalf("disabled: %v %+v", err, s.fallback)
 	}
 }
+
+type fakeCompressor struct {
+	ws, thread string
+	calls      int
+}
+
+func (c *fakeCompressor) Compress(_ context.Context, ws, thread string) (bool, domain.Usage, error) {
+	c.calls++
+	c.ws, c.thread = ws, thread
+	return true, domain.Usage{}, nil
+}
+
+func TestOrchestrator_CompressAfterSuccess(t *testing.T) {
+	comp := &fakeCompressor{}
+	mk := func(s *fakeStore, tr *fakeTriager) *Orchestrator {
+		o := newOrch(t, s, tr, &fakeInvestigator{})
+		o.compressor = comp
+		return o
+	}
+	s := &fakeStore{job: job(1), ctx: jobCtx(nil)}
+	if err := mk(s, &fakeTriager{d: TriageDecision{Category: CategoryNotify, Confidence: 0.9, Summary: "s"}}).processNext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if comp.calls != 1 || comp.ws != "ws" || comp.thread != "th" {
+		t.Fatalf("%+v", comp)
+	}
+	s = &fakeStore{job: job(1), ctx: jobCtx(nil)}
+	_ = mk(s, &fakeTriager{errs: []error{&TriageError{Code: CodeLLMError, Retryable: true}}}).processNext(context.Background())
+	s = &fakeStore{job: job(1), ctx: jobCtx(nil)}
+	_ = mk(s, &fakeTriager{errs: []error{&TriageError{Code: CodeLLMRefused}}}).processNext(context.Background())
+	if comp.calls != 1 {
+		t.Fatalf("compressed after a failure: %d", comp.calls)
+	}
+}

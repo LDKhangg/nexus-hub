@@ -150,6 +150,27 @@ func (q *Queries) GetAgentThread(ctx context.Context, arg GetAgentThreadParams) 
 	return i, err
 }
 
+const getThreadSummary = `-- name: GetThreadSummary :one
+SELECT rolling_summary, summary_through_message_id FROM public.hub_threads WHERE workspace_id = $1 AND id = $2
+`
+
+type GetThreadSummaryParams struct {
+	WorkspaceID pgtype.UUID
+	ID          pgtype.UUID
+}
+
+type GetThreadSummaryRow struct {
+	RollingSummary          string
+	SummaryThroughMessageID pgtype.Int8
+}
+
+func (q *Queries) GetThreadSummary(ctx context.Context, arg GetThreadSummaryParams) (GetThreadSummaryRow, error) {
+	row := q.db.QueryRow(ctx, getThreadSummary, arg.WorkspaceID, arg.ID)
+	var i GetThreadSummaryRow
+	err := row.Scan(&i.RollingSummary, &i.SummaryThroughMessageID)
+	return i, err
+}
+
 const insertOutboundAction = `-- name: InsertOutboundAction :exec
 INSERT INTO public.outbound_actions(workspace_id, integration_id, kind, payload, dedupe_key)
 VALUES ($1, $2, 'telegram_message', $3, $4)
@@ -305,6 +326,80 @@ func (q *Queries) SaveAgentMessage(ctx context.Context, arg SaveAgentMessagePara
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const saveThreadSummary = `-- name: SaveThreadSummary :execrows
+UPDATE public.hub_threads SET rolling_summary = $1, summary_through_message_id = $2::bigint, updated_at = now()
+WHERE workspace_id = $3 AND id = $4
+  AND COALESCE(summary_through_message_id, 0) = $5::bigint
+`
+
+type SaveThreadSummaryParams struct {
+	Summary     string
+	Through     int64
+	WorkspaceID pgtype.UUID
+	ID          pgtype.UUID
+	Expected    int64
+}
+
+func (q *Queries) SaveThreadSummary(ctx context.Context, arg SaveThreadSummaryParams) (int64, error) {
+	result, err := q.db.Exec(ctx, saveThreadSummary,
+		arg.Summary,
+		arg.Through,
+		arg.WorkspaceID,
+		arg.ID,
+		arg.Expected,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const summaryCandidates = `-- name: SummaryCandidates :many
+SELECT m.id, m.sender_role, m.sender_name, m.content FROM public.message_logs m
+WHERE m.thread_id = $1::uuid AND m.id > $2::bigint
+  AND m.id < COALESCE((SELECT MIN(n.id) FROM (SELECT r.id FROM public.message_logs r
+                       WHERE r.thread_id = $1::uuid ORDER BY r.id DESC LIMIT 3) n), 0)
+ORDER BY m.id LIMIT 40
+`
+
+type SummaryCandidatesParams struct {
+	Thread pgtype.UUID
+	Cursor int64
+}
+
+type SummaryCandidatesRow struct {
+	ID         int64
+	SenderRole string
+	SenderName string
+	Content    string
+}
+
+// Messages past the summary cursor, excluding the thread's newest three.
+func (q *Queries) SummaryCandidates(ctx context.Context, arg SummaryCandidatesParams) ([]SummaryCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, summaryCandidates, arg.Thread, arg.Cursor)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SummaryCandidatesRow
+	for rows.Next() {
+		var i SummaryCandidatesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SenderRole,
+			&i.SenderName,
+			&i.Content,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const upsertPendingAgentJob = `-- name: UpsertPendingAgentJob :one

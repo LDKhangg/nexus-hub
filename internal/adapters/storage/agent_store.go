@@ -232,3 +232,52 @@ func (s *AgentStore) targetOf(ctx context.Context, job agent.AgentJob) (pgtype.U
 	}
 	return parseDBID(cfg.TargetIntegrationID)
 }
+
+var _ memory.SummaryStore = (*AgentStore)(nil)
+
+func (s *AgentStore) SummaryCandidates(ctx context.Context, workspaceID, threadID string) (string, int64, []memory.Message, error) {
+	ws, thread, err := parseScopedIDs(workspaceID, threadID)
+	if err != nil {
+		return "", 0, nil, err
+	}
+	th, err := s.q.GetThreadSummary(ctx, sqlc.GetThreadSummaryParams{WorkspaceID: ws, ID: thread})
+	if err != nil {
+		return "", 0, nil, err
+	}
+	cursor := th.SummaryThroughMessageID.Int64
+	rows, err := s.q.SummaryCandidates(ctx, sqlc.SummaryCandidatesParams{Thread: thread, Cursor: cursor})
+	if err != nil {
+		return "", 0, nil, err
+	}
+	out := make([]memory.Message, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, memory.Message{ID: r.ID, ThreadID: threadID, SenderRole: memory.SenderRole(r.SenderRole), SenderName: r.SenderName, Content: r.Content})
+	}
+	return th.RollingSummary, cursor, out, nil
+}
+
+// SaveSummary stores the summary under the thread lock, only if the cursor
+// is still expectedCursor.
+func (s *AgentStore) SaveSummary(ctx context.Context, workspaceID, threadID string, expectedCursor, through int64, summary string) error {
+	ws, thread, err := parseScopedIDs(workspaceID, threadID)
+	if err != nil {
+		return err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	q := sqlc.New(tx)
+	if _, err := q.LockMessageThread(ctx, sqlc.LockMessageThreadParams{WorkspaceID: ws, ID: thread}); err != nil {
+		return err
+	}
+	n, err := q.SaveThreadSummary(ctx, sqlc.SaveThreadSummaryParams{WorkspaceID: ws, ID: thread, Expected: expectedCursor, Through: through, Summary: summary})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return memory.ErrSummaryCursorMoved
+	}
+	return tx.Commit(ctx)
+}

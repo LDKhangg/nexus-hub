@@ -77,3 +77,19 @@ ORDER BY m.id;
 INSERT INTO public.outbound_actions(workspace_id, integration_id, kind, payload, dedupe_key)
 VALUES (sqlc.arg(workspace_id), sqlc.arg(integration_id), 'telegram_message', sqlc.arg(payload), sqlc.arg(dedupe_key))
 ON CONFLICT (kind, dedupe_key) DO NOTHING;
+
+-- name: GetThreadSummary :one
+SELECT rolling_summary, summary_through_message_id FROM public.hub_threads WHERE workspace_id = $1 AND id = $2;
+
+-- name: SummaryCandidates :many
+-- Messages past the summary cursor, excluding the thread's newest three.
+SELECT m.id, m.sender_role, m.sender_name, m.content FROM public.message_logs m
+WHERE m.thread_id = sqlc.arg(thread)::uuid AND m.id > sqlc.arg(cursor)::bigint
+  AND m.id < COALESCE((SELECT MIN(n.id) FROM (SELECT r.id FROM public.message_logs r
+                       WHERE r.thread_id = sqlc.arg(thread)::uuid ORDER BY r.id DESC LIMIT 3) n), 0)
+ORDER BY m.id LIMIT 40;
+
+-- name: SaveThreadSummary :execrows
+UPDATE public.hub_threads SET rolling_summary = sqlc.arg(summary), summary_through_message_id = sqlc.arg(through)::bigint, updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id)
+  AND COALESCE(summary_through_message_id, 0) = sqlc.arg(expected)::bigint;
