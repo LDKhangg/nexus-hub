@@ -120,7 +120,7 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 			return nil, err
 		}
 		return c.Default(), nil
-	}, s.SummaryModel, agent.CleanInput)
+	}, s.SummaryModel, func(v string) string { return redactor.RedactSecrets(agent.CleanInput(v)) })
 	limits := tools.DefaultLimits()
 	limits.ReadTimeout, limits.NetworkTimeout = s.ToolTimeout, s.GitNetworkTimeout
 	orch := agent.NewOrchestrator(store, models, reg, runs, redactor, compressor, agent.OrchestratorSettings{

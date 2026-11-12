@@ -1,10 +1,12 @@
 package storage
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -21,6 +23,9 @@ import (
 
 // AgentLease bounds one attempt; an expired lease is recovered by Claim.
 const AgentLease = 30 * time.Minute
+
+// untriagedLimit is the LIMIT of UntriagedAgentMessages.
+const untriagedLimit = 100
 
 // AgentStore is the durable agent job queue.
 type AgentStore struct {
@@ -121,7 +126,35 @@ func (s *AgentStore) Load(ctx context.Context, job agent.AgentJob) (agent.JobCon
 	if jc.Title == "" {
 		jc.Title = th.ExternalID
 	}
-	for _, r := range rows {
+	// The oldest untriaged external messages are loaded on their own, so a
+	// batch is never pushed out of the recent window by later messages.
+	untriaged, err := s.q.UntriagedAgentMessages(ctx, sqlc.UntriagedAgentMessagesParams{ThreadID: thread, AfterID: last})
+	if err != nil {
+		return agent.JobContext{}, err
+	}
+	jc.MoreUntriaged = len(untriaged) == untriagedLimit
+	merged := make([]sqlc.RecentAgentMessagesRow, 0, len(rows)+len(untriaged))
+	for _, r := range untriaged {
+		merged = append(merged, sqlc.RecentAgentMessagesRow(r))
+	}
+	merged = append(merged, rows...)
+	slices.SortStableFunc(merged, func(a, b sqlc.RecentAgentMessagesRow) int { return cmp.Compare(a.ID, b.ID) })
+	merged = slices.CompactFunc(merged, func(a, b sqlc.RecentAgentMessagesRow) bool { return a.ID == b.ID })
+	if jc.MoreUntriaged {
+		// The batch ends at the newest loaded untriaged message; newer
+		// external messages from the recent window belong to the follow-up
+		// job, so the batch stays contiguous.
+		cut := untriaged[len(untriaged)-1].ID
+		kept := merged[:0]
+		for _, r := range merged {
+			if r.ID > cut && r.SenderRole == string(memory.SenderRoleExternalUser) {
+				continue
+			}
+			kept = append(kept, r)
+		}
+		merged = kept
+	}
+	for _, r := range merged {
 		jc.History = append(jc.History, memory.Message{ID: r.ID, ThreadID: job.ThreadID, SenderRole: memory.SenderRole(r.SenderRole), SenderName: r.SenderName, Content: r.Content})
 		var meta map[string]any
 		if json.Unmarshal(r.Metadata, &meta) == nil {
@@ -248,6 +281,16 @@ func (s *AgentStore) commit(ctx context.Context, job agent.AgentJob, status, cod
 		return err
 	}
 	if err := q.RefreshMessageThread(ctx, thread); err != nil {
+		return err
+	}
+	// External messages past this batch (a batch capped by the untriaged
+	// limit) get a due follow-up job in the same transaction, so none is
+	// left untriaged. An existing pending job is kept.
+	source, err := parseDBID(job.SourceIntegrationID)
+	if err != nil {
+		return err
+	}
+	if _, err := q.EnqueueAgentFollowUp(ctx, sqlc.EnqueueAgentFollowUpParams{WorkspaceID: ws, SourceIntegrationID: source, ThreadID: thread, Through: through}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

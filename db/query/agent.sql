@@ -86,6 +86,23 @@ SELECT m.id, m.sender_role, m.sender_name, m.content, m.metadata FROM (
   WHERE thread_id = $1 ORDER BY id DESC LIMIT 60) m
 ORDER BY m.id;
 
+-- name: UntriagedAgentMessages :many
+-- The oldest untriaged external_user messages, so a batch is never pushed
+-- out of the recent window by later messages.
+SELECT id, sender_role, sender_name, content, metadata FROM public.message_logs
+WHERE thread_id = sqlc.arg(thread_id)::uuid AND sender_role = 'external_user' AND id > sqlc.arg(after_id)::bigint
+ORDER BY id ASC LIMIT 100;
+
+-- name: EnqueueAgentFollowUp :execrows
+-- A due pending job for the thread when external_user messages past the
+-- committed batch remain; an existing pending job is kept as is.
+INSERT INTO public.agent_jobs(workspace_id, source_integration_id, thread_id, run_at)
+SELECT sqlc.arg(workspace_id)::uuid, sqlc.arg(source_integration_id)::uuid, sqlc.arg(thread_id)::uuid, now()
+WHERE EXISTS (SELECT 1 FROM public.message_logs m
+              WHERE m.thread_id = sqlc.arg(thread_id)::uuid AND m.sender_role = 'external_user'
+                AND m.id > sqlc.arg(through)::bigint)
+ON CONFLICT (thread_id) WHERE status = 'pending' DO NOTHING;
+
 -- name: InsertOutboundAction :exec
 INSERT INTO public.outbound_actions(workspace_id, integration_id, kind, payload, dedupe_key)
 VALUES (sqlc.arg(workspace_id), sqlc.arg(integration_id), 'telegram_message', sqlc.arg(payload), sqlc.arg(dedupe_key))

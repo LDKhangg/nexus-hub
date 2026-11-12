@@ -115,6 +115,37 @@ func (q *Queries) ClaimAgentJobByID(ctx context.Context, arg ClaimAgentJobByIDPa
 	return i, err
 }
 
+const enqueueAgentFollowUp = `-- name: EnqueueAgentFollowUp :execrows
+INSERT INTO public.agent_jobs(workspace_id, source_integration_id, thread_id, run_at)
+SELECT $1::uuid, $2::uuid, $3::uuid, now()
+WHERE EXISTS (SELECT 1 FROM public.message_logs m
+              WHERE m.thread_id = $3::uuid AND m.sender_role = 'external_user'
+                AND m.id > $4::bigint)
+ON CONFLICT (thread_id) WHERE status = 'pending' DO NOTHING
+`
+
+type EnqueueAgentFollowUpParams struct {
+	WorkspaceID         pgtype.UUID
+	SourceIntegrationID pgtype.UUID
+	ThreadID            pgtype.UUID
+	Through             int64
+}
+
+// A due pending job for the thread when external_user messages past the
+// committed batch remain; an existing pending job is kept as is.
+func (q *Queries) EnqueueAgentFollowUp(ctx context.Context, arg EnqueueAgentFollowUpParams) (int64, error) {
+	result, err := q.db.Exec(ctx, enqueueAgentFollowUp,
+		arg.WorkspaceID,
+		arg.SourceIntegrationID,
+		arg.ThreadID,
+		arg.Through,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const finishAgentJob = `-- name: FinishAgentJob :execrows
 UPDATE public.agent_jobs SET status = $1::text, through_message_id = $2,
   last_error_code = $3, claim_token = NULL, locked_until = NULL, updated_at = now()
@@ -454,6 +485,53 @@ func (q *Queries) TryLockAgentThread(ctx context.Context, threadID pgtype.UUID) 
 	var locked bool
 	err := row.Scan(&locked)
 	return locked, err
+}
+
+const untriagedAgentMessages = `-- name: UntriagedAgentMessages :many
+SELECT id, sender_role, sender_name, content, metadata FROM public.message_logs
+WHERE thread_id = $1::uuid AND sender_role = 'external_user' AND id > $2::bigint
+ORDER BY id ASC LIMIT 100
+`
+
+type UntriagedAgentMessagesParams struct {
+	ThreadID pgtype.UUID
+	AfterID  int64
+}
+
+type UntriagedAgentMessagesRow struct {
+	ID         int64
+	SenderRole string
+	SenderName string
+	Content    string
+	Metadata   []byte
+}
+
+// The oldest untriaged external_user messages, so a batch is never pushed
+// out of the recent window by later messages.
+func (q *Queries) UntriagedAgentMessages(ctx context.Context, arg UntriagedAgentMessagesParams) ([]UntriagedAgentMessagesRow, error) {
+	rows, err := q.db.Query(ctx, untriagedAgentMessages, arg.ThreadID, arg.AfterID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []UntriagedAgentMessagesRow
+	for rows.Next() {
+		var i UntriagedAgentMessagesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SenderRole,
+			&i.SenderName,
+			&i.Content,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const upsertPendingAgentJob = `-- name: UpsertPendingAgentJob :one

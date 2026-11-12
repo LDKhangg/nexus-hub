@@ -38,6 +38,10 @@ type JobContext struct {
 	History                 []memory.Message // ordered by ID
 	LastTriagedID           int64
 	Config                  tenant.AgentConfig
+	// MoreUntriaged means the untriaged batch was capped: History holds only
+	// the oldest untriaged external messages, and the commit enqueues a
+	// follow-up job for the rest.
+	MoreUntriaged bool
 }
 
 // JobResult is committed atomically with the job's completion. Text is the
@@ -151,7 +155,7 @@ func (o *Orchestrator) processNext(ctx context.Context) error {
 	if !jc.Config.Enabled {
 		return o.fallback(ctx, *job, jc, "agent_disabled", through)
 	}
-	packet := memory.BuildPacket(jc.Title, jc.TaskURL, jc.Summary, jc.History, jc.LastTriagedID, CleanInput)
+	packet := memory.BuildPacket(jc.Title, jc.TaskURL, jc.Summary, jc.History, jc.LastTriagedID, o.cleanInput)
 	if len(packet.NewBatch) == 0 {
 		return stale(o.store.CommitOutcome(ctx, *job, JobResult{Outcome: OutcomeIgnore, ThroughMessageID: through}), *job)
 	}
@@ -188,8 +192,12 @@ func (o *Orchestrator) run(ctx context.Context, job *AgentJob, jc JobContext, pa
 	specs := exec.Specs()
 	toolsAvailable := len(specs) > 0 && investigator != nil
 
+	persona := o.cleanInput(cfg.Persona)
 	total := job.Usage
-	d, u, err := triager.Triage(ctx, packet, cfg.Persona, toolsAvailable)
+	if o.budgetExhausted(total) {
+		return &TriageError{Code: CodeTokenBudget}
+	}
+	d, u, err := triager.Triage(ctx, packet, persona, toolsAvailable)
 	if uerr := o.addUsage(ctx, *job, &total, u); uerr != nil {
 		return uerr
 	}
@@ -207,7 +215,10 @@ func (o *Orchestrator) run(ctx context.Context, job *AgentJob, jc JobContext, pa
 		res.Text = o.clean(fmt.Sprintf("🧠 Nexus · %s\n%s · %s\n%s", jc.Title, urgency(d), d.Summary, jc.TaskURL))
 	case OutcomeInvestigate:
 		budget := TokenBudget{MaxInput: o.settings.MaxInputTokens, MaxOutput: o.settings.MaxOutputTokens, Used: total}
-		report, err := investigator.Investigate(ctx, packet, d, cfg.Persona, specs, exec, budget)
+		if budget.exhausted() {
+			return &TriageError{Code: CodeTokenBudget}
+		}
+		report, err := investigator.Investigate(ctx, packet, d, persona, specs, exec, budget)
 		if uerr := o.addUsage(ctx, *job, &total, report.Usage); uerr != nil {
 			return uerr
 		}
@@ -239,6 +250,16 @@ func (o *Orchestrator) compress(ctx context.Context, job AgentJob) {
 }
 
 func (o *Orchestrator) clean(s string) string { return o.redactor.CleanOutbound(s, false) }
+
+// cleanInput prepares untrusted or configured text for an LLM: control
+// characters are stripped and known secrets and secret patterns redacted.
+func (o *Orchestrator) cleanInput(s string) string { return o.redactor.RedactSecrets(CleanInput(s)) }
+
+// budgetExhausted reports whether the job's stored usage already reached
+// the per-job token budget, counted as TokenBudget counts it.
+func (o *Orchestrator) budgetExhausted(used domain.Usage) bool {
+	return TokenBudget{MaxInput: o.settings.MaxInputTokens, MaxOutput: o.settings.MaxOutputTokens, Used: used}.exhausted()
+}
 
 func (o *Orchestrator) fallback(ctx context.Context, job AgentJob, jc JobContext, code string, through int64) error {
 	log.Printf("agent worker: job %d falls back to a notice (%s)", job.ID, code)
