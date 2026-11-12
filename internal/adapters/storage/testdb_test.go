@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,7 +28,7 @@ const (
 )
 
 // testDB touches only a dedicated loopback test instance, never the app DB.
-// Every test owns a fresh database, including its migration and cleanup.
+// Every test owns the public schema under a cross-package advisory lock.
 func testDB(t *testing.T) (context.Context, *pgxpool.Pool) {
 	t.Helper()
 	url := os.Getenv("TEST_DATABASE_URL")
@@ -40,7 +39,7 @@ func testDB(t *testing.T) (context.Context, *pgxpool.Pool) {
 	if err != nil {
 		t.Fatal("invalid test database configuration")
 	}
-	if (cfg.Host != "127.0.0.1" && cfg.Host != "localhost" && cfg.Host != "::1") || cfg.Database != "nexus_storage_test" || len(cfg.Fallbacks) != 0 {
+	if cfg.Host != "127.0.0.1" || cfg.Port != 5434 || cfg.Database != "nexus_storage_test" || len(cfg.Fallbacks) != 0 {
 		t.Fatal("TEST_DATABASE_URL must use loopback, database nexus_storage_test and no fallback hosts (use sslmode=disable)")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -49,24 +48,24 @@ func testDB(t *testing.T) (context.Context, *pgxpool.Pool) {
 	if err != nil {
 		t.Fatal("cannot connect to dedicated local test instance")
 	}
-	name := fmt.Sprintf("nexus_crud_%x", randomTestBytes(t))
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+	// The same key is used by cmd/setup-notices. Keep this connection alive
+	// until the test pool closes; pooled connections cannot own this lock.
+	if _, err := admin.Exec(ctx, "SELECT pg_advisory_lock(762150021)"); err != nil {
 		_ = admin.Close(ctx)
-		t.Fatal(err)
+		t.Fatal("cannot acquire test schema lock")
 	}
 	t.Cleanup(func() {
 		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
 		defer done()
-		if _, err := admin.Exec(cleanup, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
-			t.Error(err)
-		}
 		_ = admin.Close(cleanup)
 	})
+	if _, err := admin.Exec(ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public"); err != nil {
+		t.Fatal("cannot reset authorized test schema")
+	}
 	poolCfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		t.Fatal("invalid test pool configuration")
 	}
-	poolCfg.ConnConfig.Database = name
 	poolCfg.MaxConns = 4
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {

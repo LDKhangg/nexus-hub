@@ -58,7 +58,7 @@ func TestNoticeClaimRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A new repository instance models restart; due work remains in PostgreSQL.
-	fresh, _ := NewNoticeRepository(pool, r.newID)
+	fresh, _ := NewNoticeRepository(pool, r.newID, DebounceSettings{})
 	third, err := fresh.Claim(ctx, now.Add(91*time.Second))
 	if err != nil || third == nil {
 		t.Fatal(third, err)

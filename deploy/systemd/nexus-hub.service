@@ -1,0 +1,41 @@
+# Nexus-Hub server. A unit file only; deployment is a later phase.
+# /etc/nexus-hub/nexus-hub.env holds exactly DATABASE_URL=... (mode 0600).
+# Everything else lives in the database (settings, encrypted credentials).
+[Unit]
+Description=Nexus-Hub ClickUp/GitHub/Telegram agent hub
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexus
+Group=nexus
+ExecStart=/usr/local/bin/nexus-hub
+EnvironmentFile=/etc/nexus-hub/nexus-hub.env
+LoadCredential=master.key:/etc/nexus-hub/master.key
+Environment=NEXUS_MASTER_KEY_FILE=%d/master.key
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ReadWritePaths=/var/lib/nexus-hub
+StateDirectory=nexus-hub
+StateDirectoryMode=0700
+
+MemoryMax=1G
+CPUQuota=80%
+TasksMax=64
+
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

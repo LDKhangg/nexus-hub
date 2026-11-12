@@ -1,8 +1,10 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/sources/clickup"
 	"github.com/LDKhangg/nexus-hub/internal/domain"
@@ -27,11 +29,21 @@ type VerifiedEventParser interface {
 type VerifiedParserFactory interface {
 	ForIntegration(tenant.WebhookIntegration) (VerifiedEventParser, error)
 }
-type IntegrationParserFactory struct{ lookupEnv func(string) (string, bool) }
 
-func NewVerifiedParserFactory(lookupEnv func(string) (string, bool)) *IntegrationParserFactory {
-	return &IntegrationParserFactory{lookupEnv: lookupEnv}
+// SecretResolver resolves a credential reference (implemented by
+// secrets.Resolver).
+type SecretResolver interface {
+	Resolve(ctx context.Context, workspaceID, ref string) (string, error)
 }
+
+type IntegrationParserFactory struct{ resolver SecretResolver }
+
+func NewVerifiedParserFactory(resolver SecretResolver) *IntegrationParserFactory {
+	return &IntegrationParserFactory{resolver: resolver}
+}
+
+const secretResolveTimeout = 5 * time.Second
+
 func (f *IntegrationParserFactory) ForIntegration(integration tenant.WebhookIntegration) (VerifiedEventParser, error) {
 	if err := tenant.ValidateClickUpSource(integration); err != nil {
 		return nil, ErrUnknownSource
@@ -40,11 +52,13 @@ func (f *IntegrationParserFactory) ForIntegration(integration tenant.WebhookInte
 	if err != nil {
 		return nil, err
 	}
-	if f.lookupEnv == nil {
+	if f.resolver == nil {
 		return nil, errors.New("webhook secret unavailable")
 	}
-	secret, ok := f.lookupEnv(cfg.WebhookSecretEnv)
-	if !ok || secret == "" {
+	ctx, cancel := context.WithTimeout(context.Background(), secretResolveTimeout)
+	defer cancel()
+	secret, err := f.resolver.Resolve(ctx, integration.WorkspaceID, cfg.WebhookSecretRef)
+	if err != nil || secret == "" {
 		return nil, errors.New("webhook secret unavailable")
 	}
 	return clickup.NewClickUpParser(secret, cfg.OwnSenderID), nil

@@ -8,6 +8,46 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AgentJob struct {
+	ID                  int64
+	WorkspaceID         pgtype.UUID
+	SourceIntegrationID pgtype.UUID
+	ThreadID            pgtype.UUID
+	Status              string
+	Attempts            int32
+	RunAt               pgtype.Timestamptz
+	FirstEnqueuedAt     pgtype.Timestamptz
+	LockedUntil         pgtype.Timestamptz
+	ClaimToken          pgtype.UUID
+	ThroughMessageID    pgtype.Int8
+	LastErrorCode       pgtype.Text
+	InputTokens         int32
+	OutputTokens        int32
+	CacheReadTokens     int32
+	CacheWriteTokens    int32
+	CreatedAt           pgtype.Timestamptz
+	UpdatedAt           pgtype.Timestamptz
+}
+
+type AppSetting struct {
+	Key       string
+	Value     []byte
+	UpdatedAt pgtype.Timestamptz
+}
+
+// AES-256-GCM ciphertext only; AAD binds workspace, name and kind. The master key lives outside the database.
+type Credential struct {
+	ID          pgtype.UUID
+	WorkspaceID pgtype.UUID
+	Name        string
+	Kind        string
+	Ciphertext  []byte
+	Nonce       []byte
+	KeyVersion  int32
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
 type HubThread struct {
 	ID            pgtype.UUID
 	WorkspaceID   pgtype.UUID
@@ -75,6 +115,25 @@ type NotificationOutbox struct {
 	SentAt              pgtype.Timestamptz
 }
 
+type OutboundAction struct {
+	ID                int64
+	WorkspaceID       pgtype.UUID
+	IntegrationID     pgtype.UUID
+	Kind              string
+	Payload           []byte
+	DedupeKey         string
+	Status            string
+	Attempts          int32
+	NextAttemptAt     pgtype.Timestamptz
+	LockedUntil       pgtype.Timestamptz
+	ClaimToken        pgtype.UUID
+	LastErrorCode     pgtype.Text
+	ProviderMessageID pgtype.Int8
+	CreatedAt         pgtype.Timestamptz
+	UpdatedAt         pgtype.Timestamptz
+	SentAt            pgtype.Timestamptz
+}
+
 // Explicit same-workspace related-to links. A link neither authorizes access nor automatically merges context. Metadata may record the confirmed URL or human decision.
 type ThreadLink struct {
 	WorkspaceID    pgtype.UUID
@@ -82,6 +141,27 @@ type ThreadLink struct {
 	TargetThreadID pgtype.UUID
 	Metadata       []byte
 	CreatedAt      pgtype.Timestamptz
+}
+
+type ToolRun struct {
+	ID             int64
+	WorkspaceID    pgtype.UUID
+	AgentJobID     int64
+	Step           int32
+	Tool           string
+	Tier           string
+	Repo           pgtype.Text
+	Account        pgtype.Text
+	IdempotencyKey string
+	InputRedacted  []byte
+	Status         string
+	ErrorCode      pgtype.Text
+	ExitCode       pgtype.Int4
+	DurationMs     pgtype.Int8
+	OutputBytes    pgtype.Int4
+	ResultSummary  pgtype.Text
+	CreatedAt      pgtype.Timestamptz
+	UpdatedAt      pgtype.Timestamptz
 }
 
 type Workspace struct {

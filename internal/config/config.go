@@ -1,92 +1,17 @@
+// Package config reads the only two environment variables the server uses.
+// Everything else (models, budgets, timeouts, switches, secrets) lives in
+// the database: see internal/settings and internal/secrets.
 package config
 
-import (
-	"os"
-	"strconv"
-	"time"
-)
+import "os"
 
+// Config is the process environment.
 type Config struct {
-	Server  ServerConfig
-	Relay   RelayConfig
-	ClickUp ClickUpConfig
-	LLM     LLMConfig
-	DB      DatabaseConfig
+	DatabaseURL   string
+	MasterKeyFile string
 }
 
-type ServerConfig struct {
-	Port            string
-	BodyLimit       string
-	ShutdownTimeout time.Duration
-}
-
-type RelayConfig struct {
-	DebounceWindow time.Duration
-	MaxWait        time.Duration
-}
-
-type ClickUpConfig struct {
-	APIKey        string
-	PublicBaseURL string
-}
-
-type DatabaseConfig struct {
-	DatabaseURL string
-}
-
+// Load reads exactly DATABASE_URL and NEXUS_MASTER_KEY_FILE.
 func Load() Config {
-	return Config{
-		Server: ServerConfig{
-			Port:            ":" + getEnv("PORT", "8080"),
-			BodyLimit:       getEnv("BODY_LIMIT", "1M"),
-			ShutdownTimeout: getDuration("SHUTDOWN_TIMEOUT", 10*time.Second),
-		},
-		Relay: RelayConfig{
-			DebounceWindow: getDuration("DEBOUNCE_WINDOW", 8*time.Second),
-			MaxWait:        getDuration("DEBOUNCE_MAX_WAIT", 30*time.Second),
-		},
-		ClickUp: ClickUpConfig{
-			APIKey:        os.Getenv("CLICKUP_API"),
-			PublicBaseURL: os.Getenv("PUBLIC_BASE_URL"),
-		},
-		LLM: LLMConfig{
-			DefaultProvider: getEnv("LLM_DEFAULT_PROVIDER", "anthropic"),
-			Timeout:         getDuration("LLM_TIMEOUT", 60*time.Second),
-			Anthropic: AnthropicConfig{
-				APIKey:           os.Getenv("ANTHROPIC_API_KEY"),
-				DefaultModel:     getEnv("ANTHROPIC_MODEL", "claude-opus-5-5"),
-				DefaultMaxTokens: int64(getInt("ANTHROPIC_MAX_TOKENS", 16000)),
-				MaxRetries:       getInt("ANTHROPIC_MAX_RETRIES", 2),
-				BaseURL:          os.Getenv("ANTHROPIC_BASE_URL"),
-			},
-		},
-		DB: DatabaseConfig{
-			DatabaseURL: os.Getenv("DATABASE_URL"),
-		},
-	}
-}
-
-func getEnv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func getDuration(key string, def time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
-	}
-	return def
-}
-
-func getInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return def
+	return Config{DatabaseURL: os.Getenv("DATABASE_URL"), MasterKeyFile: os.Getenv("NEXUS_MASTER_KEY_FILE")}
 }

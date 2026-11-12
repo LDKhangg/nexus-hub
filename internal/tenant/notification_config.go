@@ -9,20 +9,38 @@ import (
 	"strings"
 )
 
-// TelegramTargetConfig refers to credentials in the local environment, never their values.
+// TelegramTargetConfig refers to credentials by reference, never their values.
+// BotTokenRef names a credentials row, or "env:NAME" for a legacy
+// bot_token_env reference that has not been migrated yet.
 type TelegramTargetConfig struct {
 	ChatID          string
 	MessageThreadID *int64
-	BotTokenEnv     string
+	BotTokenRef     string
 }
 
-type ClickUpNoticeConfig struct{ ClickUpTeamID, WebhookID, WebhookSecretEnv, TargetIntegrationID, OwnSenderID string }
+// ClickUpNoticeConfig: WebhookSecretRef follows the same convention.
+type ClickUpNoticeConfig struct{ ClickUpTeamID, WebhookID, WebhookSecretRef, TargetIntegrationID, OwnSenderID string }
 
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// LegacyEnvRefPrefix marks a reference resolved from the process environment.
+const LegacyEnvRefPrefix = "env:"
+
+// credentialRef reads <base>_ref, falling back to the legacy <base>_env.
+func credentialRef(m map[string]any, base string) (string, bool) {
+	if ref := stringField(m, base+"_ref"); ref != "" {
+		return ref, ValidCredentialRef(ref)
+	}
+	if env := stringField(m, base+"_env"); env != "" {
+		return LegacyEnvRefPrefix + env, envName.MatchString(env)
+	}
+	return "", false
+}
+
 func ParseClickUpNoticeConfig(m map[string]any) (ClickUpNoticeConfig, error) {
-	c := ClickUpNoticeConfig{ClickUpTeamID: stringField(m, "clickup_team_id"), WebhookID: stringField(m, "webhook_id"), WebhookSecretEnv: stringField(m, "webhook_secret_env"), TargetIntegrationID: stringField(m, "target_integration_id"), OwnSenderID: stringField(m, "own_sender_id")}
-	if c.ClickUpTeamID == "" || c.WebhookID == "" || !envName.MatchString(c.WebhookSecretEnv) || !ValidUUID(c.TargetIntegrationID) {
+	ref, refOK := credentialRef(m, "webhook_secret")
+	c := ClickUpNoticeConfig{ClickUpTeamID: stringField(m, "clickup_team_id"), WebhookID: stringField(m, "webhook_id"), WebhookSecretRef: ref, TargetIntegrationID: stringField(m, "target_integration_id"), OwnSenderID: stringField(m, "own_sender_id")}
+	if c.ClickUpTeamID == "" || c.WebhookID == "" || !refOK || !ValidUUID(c.TargetIntegrationID) {
 		return c, errors.New("invalid ClickUp notice configuration")
 	}
 	if v, ok := m["own_sender_id"]; ok && v != nil {
@@ -33,9 +51,10 @@ func ParseClickUpNoticeConfig(m map[string]any) (ClickUpNoticeConfig, error) {
 	return c, nil
 }
 func ParseTelegramTargetConfig(m map[string]any) (TelegramTargetConfig, error) {
-	c := TelegramTargetConfig{ChatID: stringField(m, "chat_id"), BotTokenEnv: stringField(m, "bot_token_env")}
+	ref, refOK := credentialRef(m, "bot_token")
+	c := TelegramTargetConfig{ChatID: stringField(m, "chat_id"), BotTokenRef: ref}
 	id, err := strconv.ParseInt(c.ChatID, 10, 64)
-	if err != nil || id == 0 || !envName.MatchString(c.BotTokenEnv) {
+	if err != nil || id == 0 || !refOK {
 		return c, errors.New("invalid Telegram target configuration")
 	}
 	if v, ok := m["message_thread_id"]; ok && v != nil {

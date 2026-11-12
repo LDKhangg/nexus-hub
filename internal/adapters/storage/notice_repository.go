@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
@@ -17,17 +19,49 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// DebounceSettings controls agent-job coalescing: a job runs Window after
+// the latest comment, but never later than MaxWait after the first one.
+type DebounceSettings struct{ Window, MaxWait time.Duration }
+
+const (
+	defaultDebounceWindow  = 8 * time.Second
+	defaultDebounceMaxWait = 30 * time.Second
+)
+
 type NoticeRepository struct {
-	pool    *pgxpool.Pool
-	queries *sqlc.Queries
-	newID   func() (string, error)
+	pool     *pgxpool.Pool
+	queries  *sqlc.Queries
+	newID    func() (string, error)
+	debounce DebounceSettings
+
+	mu    sync.RWMutex
+	known map[string]tenant.Tier
 }
 
-func NewNoticeRepository(pool *pgxpool.Pool, newID func() (string, error)) (*NoticeRepository, error) {
+func NewNoticeRepository(pool *pgxpool.Pool, newID func() (string, error), debounce DebounceSettings) (*NoticeRepository, error) {
 	if pool == nil || newID == nil {
 		return nil, errors.New("notice repository requires pool and ID generator")
 	}
-	return &NoticeRepository{pool: pool, queries: sqlc.New(pool), newID: newID}, nil
+	if debounce.Window <= 0 {
+		debounce.Window = defaultDebounceWindow
+	}
+	if debounce.MaxWait <= 0 {
+		debounce.MaxWait = defaultDebounceMaxWait
+	}
+	return &NoticeRepository{pool: pool, queries: sqlc.New(pool), newID: newID, debounce: debounce}, nil
+}
+
+// SetKnownTools registers the tool tiers used to validate agent configs.
+func (r *NoticeRepository) SetKnownTools(known map[string]tenant.Tier) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.known = known
+}
+
+func (r *NoticeRepository) knownTools() map[string]tenant.Tier {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.known
 }
 
 func lookupNoticeIntegration(ctx context.Context, q *sqlc.Queries, id pgtype.UUID) (tenant.WebhookIntegration, error) {
@@ -101,6 +135,7 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 	if _, err := tenant.ParseTelegramTargetConfig(target.Config); err != nil {
 		return result, err
 	}
+	agentEnabled := r.agentEnabledAtIngest(integration)
 	ordered := append([]domain.NormalizedEvent(nil), events...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		if ordered[i].ExternalID == ordered[j].ExternalID {
@@ -124,6 +159,18 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 		thread, err := q.FindOrCreateNoticeThread(ctx, sqlc.FindOrCreateNoticeThreadParams{ID: dbID, WorkspaceID: workspace, IntegrationID: source, ExternalID: e.ExternalID, Title: e.Title})
 		if err != nil {
 			return result, err
+		}
+		if agentEnabled && e.EventType == domain.EventCommandPosted {
+			accepted, err := r.acceptAgentComment(ctx, q, e, workspace, source, thread.ID, config.OwnSenderID)
+			if err != nil {
+				return result, err
+			}
+			if accepted {
+				result.Accepted++
+			} else {
+				result.Duplicates++
+			}
+			continue
 		}
 		_, err = q.FindNoticeDuplicate(ctx, sqlc.FindNoticeDuplicateParams{WorkspaceID: workspace, SourceIntegrationID: source, EventKey: e.EventKey, TargetIntegrationID: targetID})
 		if err == nil {
@@ -157,4 +204,62 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 		result.Accepted++
 	}
 	return result, tx.Commit(ctx)
+}
+
+// agentEnabledAtIngest decides whether comments go to the agent. A source
+// without agent.enabled == true is never validated here, so a stale agent
+// section cannot break Phase 1 notices. An enabled source whose agent config
+// is invalid falls back to the Phase 1 notice path with one warning; the
+// callback itself never fails because of the agent config.
+func (r *NoticeRepository) agentEnabledAtIngest(integration tenant.WebhookIntegration) bool {
+	if !agentFlagOn(integration.Config) {
+		return false
+	}
+	cfg, err := tenant.ParseAgentConfig(integration.Config, r.knownTools())
+	if err != nil {
+		// Neither the config nor the parse error is logged: both can hold values.
+		log.Printf("notice ingest: integration %s has an invalid agent config; comments use the notice path", integration.ID)
+		return false
+	}
+	return cfg.Enabled
+}
+
+// agentFlagOn reads only agent.enabled; anything but a literal true is off.
+func agentFlagOn(config map[string]any) bool {
+	agent, ok := config["agent"].(map[string]any)
+	if !ok {
+		return false
+	}
+	enabled, ok := agent["enabled"].(bool)
+	return ok && enabled
+}
+
+// acceptAgentComment stores a comment for the agent: an owner comment is
+// context only; any other comment upserts the thread's pending agent job.
+// It reports false for a duplicate callback.
+func (r *NoticeRepository) acceptAgentComment(ctx context.Context, q *sqlc.Queries, e domain.NormalizedEvent, workspace, source, thread pgtype.UUID, ownSenderID string) (bool, error) {
+	role := "external_user"
+	if ownSenderID != "" && e.SenderID == ownSenderID {
+		role = "human_owner"
+	}
+	metadata := []byte("{}")
+	if e.Metadata != nil {
+		var err error
+		if metadata, err = json.Marshal(e.Metadata); err != nil {
+			return false, err
+		}
+	}
+	_, err := q.SaveAgentMessage(ctx, sqlc.SaveAgentMessageParams{ThreadID: thread, ExternalMessageID: pgtype.Text{String: e.ExternalMessageID, Valid: true}, SenderID: pgtype.Text{String: e.SenderID, Valid: e.SenderID != ""}, SenderName: e.SenderName, SenderRole: role, Content: e.Content, OccurredAt: pgtype.Timestamptz{Time: e.OccurredAt, Valid: true}, Metadata: metadata})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if role == "external_user" {
+		if _, err := q.UpsertPendingAgentJob(ctx, sqlc.UpsertPendingAgentJobParams{WorkspaceID: workspace, SourceIntegrationID: source, ThreadID: thread, WindowSecs: r.debounce.Window.Seconds(), MaxWaitSecs: r.debounce.MaxWait.Seconds()}); err != nil {
+			return false, err
+		}
+	}
+	return true, q.RefreshMessageThread(ctx, thread)
 }

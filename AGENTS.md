@@ -1,0 +1,119 @@
+# Agent workflow for Nexus-Hub
+
+This repository is built by several agents with separate roles. Every agent
+working here follows this file. Code, comments, docs and commit messages are in
+English; talk to the owner in Vietnamese.
+
+## Product contract
+
+The destination is `docs/product/PCC-001.md`, the owner's Product Completion
+Contract; never edit it. `docs/product/ROADMAP.md` splits it into phases, and
+`docs/product/TRACEABILITY.md` tracks every PCC ID. Every phase plan names the
+PCC IDs it covers, and every `REQ-n` cites its PCC IDs. At the end of a phase,
+the Lead updates the traceability matrix from Test and Review evidence, and
+writes a Phase Completion Report (PCC §10.4) in `docs/product/reports/`.
+
+## Roles
+
+| Role | Who | Does | Never does |
+|---|---|---|---|
+| **Lead** | the main Claude session | writes the plan with numbered requirements, dispatches implementers, writes Phase and Fix Briefs, judges reports, fixes production code | writes or edits tests; runs `go test`; reviews its own branch; pushes or merges without the owner's OK |
+| **Implementer** | a subagent dispatched by the Lead, one task at a time | writes the production code for one plan task, commits locally | writes or edits tests; runs `go test`; changes other tasks' scope; pushes |
+| **Tester** | a separate agent that the owner runs (`TESTER.md`) | designs test cases from the requirements (requirement, human-behaviour and abuse cases), writes and commits test files, runs them, returns a Test Report | edits production code; weakens tests to pass; pushes |
+| **Reviewer** | a separate agent that the owner runs (`REVIEWER.md`) | judges the branch against the requirements, real user journeys and the constraints; returns a Review Report with proven findings | edits files; runs `go test`; commits |
+| **Owner** | the human | approves plans and the Tester's Test Plans, carries briefs and reports between agents, approves push/merge | n/a |
+
+Lead and Implementer may only run these to prove the code compiles:
+`go build ./...`, `go vet ./...`, `gofmt -l cmd internal`, `make generate`
+(must be clean on a second run), and `goose -dir db/migrations validate`.
+`go vet` also compiles test files, so a production change that breaks a test's
+build is caught here.
+
+## Loop
+
+1. **Plan.** The Lead writes `docs/superpowers/plans/<date>-<topic>.md`: a
+   numbered requirement list (`REQ-1`, …, each an observable behaviour), the
+   tasks, interfaces, global constraints and review focus. The owner approves
+   it.
+2. **Implement.** The Lead dispatches one Implementer per task, in order. Each
+   Implementer writes the production code, runs only the compile checks,
+   commits with a message ending in `Tests not run.` and the attribution line,
+   and returns a short summary: files, and any decision it made with its
+   reason ("Ruling"). The Lead reads the diff and records Rulings in the ledger
+   (`.superpowers/sdd/<plan>/progress.md`).
+3. **Phase Brief.** When the phase (or a batch the owner chooses) is
+   implemented, the Lead writes one Phase Brief (format below). The owner gives
+   the same brief to the Tester and the Reviewer; they can work in parallel.
+4. **Test.** The Tester sends a Test Plan; the owner approves or edits it. The
+   Tester writes and commits the tests, runs them, and returns a Test Report.
+5. **Review.** The Reviewer returns a Review Report.
+6. **Verdict.** The Lead checks every defect (`D…`) and finding (`R…`)
+   against the code, then:
+   - fixes production code for every real Critical/Important finding and every
+     test defect, and Minor findings it agrees with;
+   - answers each finding it rejects, with evidence, in the ledger and in the
+     Fix Brief;
+   - if it believes a test is wrong, it raises a **test dispute** in the Fix
+     Brief for the owner to decide. It never edits the test.
+   Then the Lead writes a Fix Brief. The Tester reruns its suite and adds
+   regression tests; the Reviewer checks the fixes.
+7. **Finish.** When the Test Report is `PASS` and the Review Report is
+   `APPROVE` on the same code head, the Lead asks the owner before any push,
+   merge or PR.
+   The owner may instead merge earlier, accepting **test debt**: the Lead
+   writes every unproven item to `docs/product/test-debt/` (see its README),
+   and the next Phase Brief carries the open debt for the Tester and the
+   Reviewer to pay first.
+
+## Phase Brief format (Lead → Tester and Reviewer)
+
+```markdown
+# Phase Brief <plan-slug> #<n>
+
+- Branch: <branch>   Base: <base sha>   Head: <head sha>
+- Plan: <path>   Ledger: <path>
+- Goal: <one paragraph: what this phase gives the user>
+- Users and journeys:
+  - <who>: <what they do, step by step>
+- Requirements:
+  - REQ-1: <observable behaviour>
+  - REQ-2: ...
+- Constraints: <the plan's Global Constraints, or a pointer to them>
+- Environment: Go >= go.mod version; DB `. ./.superpowers/testdb.env` (loopback, `nexus_storage_test`) or "not needed"; git yes/no; external services: fakes only
+- Existing tests: <where they are; written by implementers, not proof>
+- Out of scope: <what not to test or report>
+```
+
+A **Fix Brief** uses the same header, plus:
+
+```markdown
+- Previous reports: Test Report #<n>, Review Report #<n>
+- Fixed: D1 → <commit>, R2 → <commit>
+- Rejected, with evidence: R3: <why>
+- Test disputes: <test, why the Lead thinks it is wrong> (owner decides)
+- Re-check: <rerun the full suite, add regression tests for the fixed items, review commits <a>..<b>>
+```
+
+## How the Lead judges reports
+
+- The report's code head must equal the brief's head, or it is sent back.
+- Test Report: `PASS` only if every approved case ran, nothing was skipped,
+  and there was no race or panic. Each defect is checked against the code. If
+  the evidence is not enough, the Lead asks for a narrower run (for example
+  `-run '^TestX$' -v`) instead of guessing.
+- Review Report: Critical and Important findings block the merge. A rejected
+  finding needs evidence, not silence.
+- Every fix goes into a Fix Brief, so it is re-tested and re-reviewed.
+
+## Repo constraints (all roles)
+
+- Shell aliases shadow `git`, `ls`, `cp`, `mv`, `wc`, `ss`: use `command git`,
+  `command ls`, etc.
+- Never modify existing migrations or hand-edit generated sqlc code; add a new
+  migration and run `make generate`.
+- Never log or print tokens, Authorization headers, prompts, tool inputs and
+  outputs, or payloads. Secrets never go in argv, logs or errors.
+- Tests never call the real GitHub, ClickUp, Telegram or Anthropic.
+- DB tests use only `TEST_DATABASE_URL` on loopback with the database
+  `nexus_storage_test`.
+- Commit locally; no push or merge without the owner's OK.

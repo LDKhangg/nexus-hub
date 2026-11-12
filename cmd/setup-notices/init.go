@@ -39,6 +39,8 @@ func initNotices(ctx context.Context, pool *pgxpool.Pool, args []string, out io.
 	topic := f.Int64("message-thread-id", 0, "existing topic ID")
 	tokenEnv := f.String("bot-token-env", "NEXUS_TELEGRAM_BOT_TOKEN", "token environment reference")
 	secretEnv := f.String("webhook-secret-env", "NEXUS_CLICKUP_WEBHOOK_SECRET", "signature secret environment reference")
+	tokenRef := f.String("bot-token-ref", "", "Telegram bot token credential name (preferred over --bot-token-env)")
+	secretRef := f.String("webhook-secret-ref", "", "ClickUp webhook secret credential name (preferred over --webhook-secret-env)")
 	own := f.String("own-sender-id", "", "optional own ClickUp bot sender ID")
 	if f.Parse(args) != nil || f.NArg() != 0 || strings.TrimSpace(*name) == "" || strings.TrimSpace(*team) == "" || *topic < 0 {
 		return errors.New("init requires --workspace-name, --chat-id and --team-id; optional topic must be positive")
@@ -59,6 +61,9 @@ func initNotices(ctx context.Context, pool *pgxpool.Pool, args []string, out io.
 		return errors.New("source and target IDs must differ")
 	}
 	targetConfig := map[string]any{"chat_id": *chat, "bot_token_env": *tokenEnv}
+	if *tokenRef != "" {
+		targetConfig = map[string]any{"chat_id": *chat, "bot_token_ref": *tokenRef}
+	}
 	if *topic != 0 {
 		targetConfig["message_thread_id"] = *topic
 	}
@@ -66,6 +71,10 @@ func initNotices(ctx context.Context, pool *pgxpool.Pool, args []string, out io.
 		return err
 	}
 	sourceConfig := map[string]any{"clickup_team_id": *team, "webhook_secret_env": *secretEnv, "target_integration_id": destination, "own_sender_id": *own, "webhook_id": "unbound"}
+	if *secretRef != "" {
+		delete(sourceConfig, "webhook_secret_env")
+		sourceConfig["webhook_secret_ref"] = *secretRef
+	}
 	if _, err := tenant.ParseClickUpNoticeConfig(sourceConfig); err != nil {
 		return err
 	}

@@ -4,47 +4,63 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
+	"github.com/LDKhangg/nexus-hub/internal/secrets"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
 
-type Client struct {
-	http      *http.Client
-	lookupEnv func(string) (string, bool)
-	baseURL   string
+// SecretResolver resolves a credential reference (implemented by
+// secrets.Resolver).
+type SecretResolver interface {
+	Resolve(ctx context.Context, workspaceID, ref string) (string, error)
 }
 
-func NewClient(client *http.Client, lookupEnv func(string) (string, bool)) *Client {
+type Client struct {
+	http     *http.Client
+	resolver SecretResolver
+	baseURL  string
+}
+
+func NewClient(client *http.Client, resolver SecretResolver) *Client {
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
 	// Never follow redirects carrying the bot token to a different host.
 	copyClient := *client
 	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{http: &copyClient, lookupEnv: lookupEnv, baseURL: "https://api.telegram.org"}
+	return &Client{http: &copyClient, resolver: resolver, baseURL: "https://api.telegram.org"}
 }
 
 func (c *Client) Send(ctx context.Context, target tenant.TelegramTargetConfig, e domain.NormalizedEvent) (relay.DeliveryReceipt, error) {
 	fail := func(code string, retry bool, after time.Duration) (relay.DeliveryReceipt, error) {
 		return relay.DeliveryReceipt{}, &relay.DeliveryError{Code: code, Retryable: retry, RetryAfter: after}
 	}
-	if c.lookupEnv == nil {
+	if c.resolver == nil {
 		return fail("missing_token", false, 0)
 	}
-	token, ok := c.lookupEnv(target.BotTokenEnv)
-	if !ok || token == "" {
-		return fail("missing_token", false, 0)
+	token, err := c.resolver.Resolve(ctx, e.WorkspaceID, target.BotTokenRef)
+	if err != nil || token == "" {
+		return fail(secretCode(err), false, 0)
+	}
+	return c.call(ctx, token, target.ChatID, target.MessageThreadID, FormatNotice(e))
+}
+
+// call posts one plain-text sendMessage; errors are *relay.DeliveryError.
+func (c *Client) call(ctx context.Context, token, chatID string, topic *int64, text string) (relay.DeliveryReceipt, error) {
+	fail := func(code string, retry bool, after time.Duration) (relay.DeliveryReceipt, error) {
+		return relay.DeliveryReceipt{}, &relay.DeliveryError{Code: code, Retryable: retry, RetryAfter: after}
 	}
 	body, _ := json.Marshal(struct {
 		ChatID string `json:"chat_id"`
 		Text   string `json:"text"`
 		Topic  *int64 `json:"message_thread_id,omitempty"`
-	}{target.ChatID, FormatNotice(e), target.MessageThreadID})
+	}{chatID, text, topic})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/bot"+token+"/sendMessage", bytes.NewReader(body))
 	if err != nil {
 		return fail("invalid_request", false, 0)
@@ -97,4 +113,13 @@ func (c *Client) Send(ctx context.Context, target tenant.TelegramTargetConfig, e
 		return fail("missing_receipt", true, 0)
 	}
 	return relay.DeliveryReceipt{MessageID: envelope.Result.MessageID}, nil
+}
+
+// secretCode maps a resolver failure to a safe delivery code.
+func secretCode(err error) string {
+	var se *secrets.Error
+	if errors.As(err, &se) && se.Code != secrets.CodeMissingCredentials {
+		return se.Code
+	}
+	return "missing_token"
 }

@@ -47,7 +47,7 @@ func newNoticeDB(t *testing.T) (context.Context, *pgxpool.Pool, *NoticeRepositor
 	mustExec(t, ctx, pool, `INSERT INTO workspaces(id,display_name) VALUES($1,'A'),($2,'B')`, workspaceA, workspaceB)
 	mustExec(t, ctx, pool, `INSERT INTO integrations(id,workspace_id,platform,role,config) VALUES($1,$2,'clickup','source',jsonb_build_object('clickup_team_id','team','webhook_id','w1','webhook_secret_env','SECRET','target_integration_id',($3::uuid)::text)),($3::uuid,$2,'telegram','control','{"chat_id":"-10042","bot_token_env":"TOKEN"}')`, integrationA, workspaceA, integrationB)
 	var n atomic.Int64
-	r, err := NewNoticeRepository(pool, func() (string, error) { return fmt.Sprintf("019a6690-abcd-7000-8000-%012d", 1000+n.Add(1)), nil })
+	r, err := NewNoticeRepository(pool, func() (string, error) { return fmt.Sprintf("019a6690-abcd-7000-8000-%012d", 1000+n.Add(1)), nil }, DebounceSettings{})
 	if err != nil {
 		t.Fatal(err)
 	}

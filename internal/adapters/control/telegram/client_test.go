@@ -36,9 +36,9 @@ func TestSendRequest(t *testing.T) {
 			}
 			w.Write([]byte(`{"ok":true,"result":{"message_id":42}}`))
 		}))
-		c := NewClient(s.Client(), func(string) (string, bool) { return "fake-token", true })
+		c := NewClient(s.Client(), envResolver(func(string) (string, bool) { return "fake-token", true }))
 		c.baseURL = s.URL
-		receipt, err := c.Send(context.Background(), tenant.TelegramTargetConfig{ChatID: "-1001234567890", MessageThreadID: topic, BotTokenEnv: "TOKEN"}, domain.NormalizedEvent{ExternalID: "t1", Content: "Tiếng Việt <>& 😀"})
+		receipt, err := c.Send(context.Background(), tenant.TelegramTargetConfig{ChatID: "-1001234567890", MessageThreadID: topic, BotTokenRef: "env:TOKEN"}, domain.NormalizedEvent{ExternalID: "t1", Content: "Tiếng Việt <>& 😀"})
 		if err != nil || receipt.MessageID != 42 {
 			t.Fatalf("receipt=%v err=%v", receipt, err)
 		}
@@ -64,9 +64,9 @@ func TestSendErrorsAreSafe(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(tc.status); w.Write([]byte(tc.body)) }))
 			defer s.Close()
-			c := NewClient(s.Client(), func(string) (string, bool) { return "fake-token", true })
+			c := NewClient(s.Client(), envResolver(func(string) (string, bool) { return "fake-token", true }))
 			c.baseURL = s.URL
-			_, err := c.Send(context.Background(), tenant.TelegramTargetConfig{ChatID: "-42", BotTokenEnv: "TOKEN"}, domain.NormalizedEvent{})
+			_, err := c.Send(context.Background(), tenant.TelegramTargetConfig{ChatID: "-42", BotTokenRef: "env:TOKEN"}, domain.NormalizedEvent{})
 			var delivery *relay.DeliveryError
 			if !errors.As(err, &delivery) || delivery.Retryable != tc.retry || strings.Contains(err.Error(), "fake-token") {
 				t.Fatalf("unsafe/wrong error %v", err)
@@ -79,16 +79,16 @@ func TestSendErrorsAreSafe(t *testing.T) {
 	called := false
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
 	defer s.Close()
-	c := NewClient(s.Client(), func(string) (string, bool) { return "", false })
+	c := NewClient(s.Client(), envResolver(func(string) (string, bool) { return "", false }))
 	c.baseURL = s.URL
-	if _, err := c.Send(context.Background(), tenant.TelegramTargetConfig{ChatID: "-42", BotTokenEnv: "TOKEN"}, domain.NormalizedEvent{}); err == nil || called {
+	if _, err := c.Send(context.Background(), tenant.TelegramTargetConfig{ChatID: "-42", BotTokenRef: "env:TOKEN"}, domain.NormalizedEvent{}); err == nil || called {
 		t.Fatal("missing token must not send")
 	}
-	c = NewClient(s.Client(), func(string) (string, bool) { return "fake-token", true })
+	c = NewClient(s.Client(), envResolver(func(string) (string, bool) { return "fake-token", true }))
 	c.baseURL = s.URL
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := c.Send(ctx, tenant.TelegramTargetConfig{ChatID: "-42", BotTokenEnv: "TOKEN"}, domain.NormalizedEvent{})
+	_, err := c.Send(ctx, tenant.TelegramTargetConfig{ChatID: "-42", BotTokenRef: "env:TOKEN"}, domain.NormalizedEvent{})
 	if err == nil || strings.Contains(err.Error(), "fake-token") {
 		t.Fatalf("cancellation error %v", err)
 	}
@@ -102,3 +102,80 @@ func TestFormatBounded(t *testing.T) {
 	}
 }
 func ptr[T any](v T) *T { return &v }
+
+type fakeResolver struct {
+	ws, ref string
+	value   string
+	err     error
+}
+
+func (f *fakeResolver) Resolve(_ context.Context, ws, ref string) (string, error) {
+	f.ws, f.ref = ws, ref
+	return f.value, f.err
+}
+
+// envResolver adapts the old lookup-style fakes.
+func envResolver(lookup func(string) (string, bool)) *fakeResolver {
+	v, ok := lookup("TOKEN")
+	r := &fakeResolver{value: v}
+	if !ok || v == "" {
+		r.err = errors.New("missing_credentials")
+	}
+	return r
+}
+
+func TestTelegramClient_UsesResolver(t *testing.T) {
+	var path string
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		w.Write([]byte(`{"ok":true,"result":{"message_id":7}}`))
+	}))
+	defer s.Close()
+	res := &fakeResolver{value: "db-token"}
+	c := NewClient(s.Client(), res)
+	c.baseURL = s.URL
+	if _, err := c.Send(context.Background(), tenant.TelegramTargetConfig{ChatID: "-42", BotTokenRef: "telegram"}, domain.NormalizedEvent{WorkspaceID: "ws-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if res.ws != "ws-1" || res.ref != "telegram" || path != "/botdb-token/sendMessage" {
+		t.Fatalf("resolver %+v path %s", res, path)
+	}
+	failing := &fakeResolver{err: errors.New("secrets: decrypt_failed")}
+	c = NewClient(s.Client(), failing)
+	c.baseURL = s.URL
+	_, err := c.Send(context.Background(), tenant.TelegramTargetConfig{ChatID: "-42", BotTokenRef: "telegram"}, domain.NormalizedEvent{WorkspaceID: "ws-1"})
+	var de *relay.DeliveryError
+	if !errors.As(err, &de) || de.Retryable {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestSendText_ClipsPlainText(t *testing.T) {
+	var body map[string]any
+	var path string
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Write([]byte(`{"ok":true,"result":{"message_id":99}}`))
+	}))
+	defer s.Close()
+	res := &fakeResolver{value: "bot-token"}
+	c := NewClient(s.Client(), res)
+	c.baseURL = s.URL
+	topic := int64(5)
+	id, err := c.SendText(context.Background(), "ws-9", "telegram", "-100", &topic, strings.Repeat("😀", 3000)+"<b>x</b>")
+	if err != nil || id != 99 {
+		t.Fatalf("%d %v", id, err)
+	}
+	text := body["text"].(string)
+	if res.ws != "ws-9" || res.ref != "telegram" || path != "/botbot-token/sendMessage" || body["parse_mode"] != nil || body["message_thread_id"] != float64(5) {
+		t.Fatalf("%+v %s %v", res, path, body)
+	}
+	if len(utf16.Encode([]rune(text))) > 4000 || !strings.HasSuffix(text, "[truncated]") {
+		t.Fatalf("len %d", len(utf16.Encode([]rune(text))))
+	}
+	c = NewClient(s.Client(), &fakeResolver{err: errors.New("x")})
+	if _, err := c.SendText(context.Background(), "ws", "telegram", "-1", nil, "hi"); err == nil {
+		t.Fatal("missing token accepted")
+	}
+}
