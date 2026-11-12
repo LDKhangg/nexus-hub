@@ -112,7 +112,7 @@ Register a webhook on your team (as in `clickup-telegram-local.md` §5), with:
 
 Store the returned secret with `nh secret set --workspace-id $WS --name
 clickup-webhook --kind clickup_webhook`, then run `nh bind-webhook
---source-id $SRC --webhook-id <id>`, then `systemctl --user restart nexus-hub`.
+--source-id $SRC --webhook-id <id>` (restart the server if it is already running).
 
 ## 6. Run the server as a user service
 
