@@ -18,7 +18,8 @@ const (
 	defaultAnthropicMaxTokens = 16000
 )
 
-var ErrRefused = errors.New("anthropic: request refused by safety classifier")
+// ErrRefused aliases domain.ErrLLMRefused.
+var ErrRefused = domain.ErrLLMRefused
 
 type Anthropic struct {
 	client           *anthropic.Client
@@ -99,7 +100,7 @@ func (a *Anthropic) Generate(ctx context.Context, req *domain.LLMRequest) (*doma
 
 	resp, err := a.client.Messages.New(ctx, params)
 	if err != nil {
-		return nil, fmt.Errorf("anthropic generate: %w", err)
+		return nil, safeErr(err)
 	}
 	if resp.StopReason == anthropic.StopReasonRefusal {
 		return nil, ErrRefused
@@ -111,7 +112,7 @@ func (a *Anthropic) Generate(ctx context.Context, req *domain.LLMRequest) (*doma
 			text.WriteString(b.Text)
 		}
 	}
-	return &domain.LLMResponse{Text: text.String()}, nil
+	return &domain.LLMResponse{Text: text.String(), Usage: usageOf(resp.Usage)}, nil
 }
 
 var _ domain.LLMProvider = (*Anthropic)(nil)

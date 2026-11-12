@@ -1,6 +1,9 @@
 package domain
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+)
 
 type Role string
 
@@ -93,3 +96,6 @@ type ToolResponse struct {
 	Stop  StopReason
 	Usage Usage
 }
+
+// ErrLLMRefused is returned when the provider's safety system refuses.
+var ErrLLMRefused = errors.New("llm: request refused")

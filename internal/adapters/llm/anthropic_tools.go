@@ -33,10 +33,6 @@ func safeErr(err error) error {
 	return &APIError{Retryable: true}
 }
 
-func usageOf(u anthropic.Usage) domain.Usage {
-	return domain.Usage{Input: u.InputTokens, Output: u.OutputTokens, CacheRead: u.CacheReadInputTokens, CacheWrite: u.CacheCreationInputTokens}
-}
-
 func toolParam(d domain.ToolDef) (anthropic.ToolParam, error) {
 	var schema map[string]any
 	if err := json.Unmarshal(d.InputSchema, &schema); err != nil {
