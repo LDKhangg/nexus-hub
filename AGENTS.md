@@ -1,0 +1,135 @@
+# Agent workflow for Nexus-Hub
+
+This repository is built by several agents with separate roles. Every agent
+working here follows this file. Code, comments, docs and commit messages are in
+English; talk to the owner in Vietnamese.
+
+## Roles
+
+| Role | Who | Does | Never does |
+|---|---|---|---|
+| **Lead** | the main Claude session | writes the plan, dispatches implementers, writes the Test Request, reviews the Test Report, decides pass or fix | runs `go test`; pushes or merges without the owner's OK |
+| **Implementer** | a subagent dispatched by the Lead, one task at a time | writes the tests and the code for one plan task, commits locally | runs `go test`; changes other tasks' scope; pushes |
+| **Tester** | a separate agent that the owner runs | runs the Test Request exactly as written and returns a Test Report | edits code or tests; "fixes" failures; commits |
+| **Owner** | the human | approves plans, passes Test Requests to the Tester and Test Reports back to the Lead, approves push/merge | n/a |
+
+Lead and Implementer may only run these to prove the code compiles:
+`go build ./...`, `go vet ./...`, `gofmt -l cmd internal`, `make generate`
+(must be clean on a second run), and `goose -dir db/migrations validate`.
+
+## Loop
+
+1. **Plan.** The Lead writes `docs/superpowers/plans/<date>-<topic>.md`: tasks,
+   interfaces, the test names per task, and the global constraints. The owner
+   approves it.
+2. **Implement.** The Lead dispatches one Implementer per task, in order. Each
+   Implementer:
+   - writes the failing tests named in the plan first, then the code;
+   - runs only the compile checks above;
+   - commits with a message that ends in `Tests not run.` and the attribution
+     line;
+   - returns a short summary: files, tests written, and any decision it made
+     with its reason ("Ruling").
+   The Lead reads the diff, records Rulings in the ledger
+   (`.superpowers/sdd/<plan>/progress.md`), and moves on.
+3. **Test Request.** After a task, or a batch of tasks, the Lead writes a Test
+   Request (format below) and gives it to the owner.
+4. **Test run.** The owner gives the request to the Tester. The Tester returns a
+   Test Report (format below).
+5. **Verdict.** The Lead reads the report and either:
+   - **PASS:** marks the tasks as verified in the ledger, or
+   - **FIX:** dispatches an Implementer (or fixes inline) with the failures,
+     then sends a new Test Request covering only the affected tests plus the
+     full suite.
+   A task is "done" only after a PASS report for its commit.
+6. **Finish.** When everything has passed, the Lead reviews the whole branch,
+   then asks the owner before any push, merge or PR.
+
+## Test Request format (Lead → Tester)
+
+```markdown
+# Test Request <plan-slug> #<n>
+
+- Branch: <branch>   Commit: <full sha>
+- Covers: Task <a>, Task <b>
+- Environment:
+  - Go: `go version` must be >= the go.mod version
+  - DB: `. ./.superpowers/testdb.env` (loopback, database `nexus_storage_test`); or "not needed"
+  - Tools on PATH: git (yes/no)
+- Commands (run in order, from the repo root, do not change them):
+  1. `<command>`
+  2. `<command>`
+- Must pass: <test names, or "all">
+- Must not be skipped: <test names that need DB/git>
+- Notes for the Tester: <flakiness hints, expected duration>
+```
+
+## Test Report format (Tester → Lead)
+
+Answer in exactly this shape. Keep raw output verbatim; do not summarize away
+error lines.
+
+```markdown
+# Test Report <plan-slug> #<n>
+
+- Commit tested: <full sha>      (must match the request)
+- Environment: <go version>, DB: <yes/no>, git: <version or no>
+- Result: PASS | FAIL | ERROR
+
+## Commands
+| # | Command | Exit code | Duration |
+|---|---|---|---|
+| 1 | `...` | 0 | 12s |
+
+## Summary
+- Packages: <ok>/<total> ok
+- Tests: <passed> passed, <failed> failed, <skipped> skipped
+
+## Failures
+For each failing test (or build error):
+### <package> <TestName>
+- File:line: <from the output>
+- Message: <the t.Fatal / panic line, verbatim>
+- Output (verbatim, at most 60 lines around the failure):
+```text
+...
+```
+
+## Skipped
+- <package> <TestName>: <skip reason, verbatim>
+
+## Data race / panic
+- <verbatim excerpt, or "none">
+
+## Anything unusual
+- <timeouts, retries you did NOT do, environment problems, or "none">
+```
+
+Rules for the Tester:
+- Run the commands exactly once, in order. Do not retry a failure to make it
+  pass; if you suspect flakiness, say so under "Anything unusual".
+- `ERROR` means the tests could not run (build failure, missing DB, wrong
+  commit). Explain which under "Anything unusual".
+- Never print secrets: the DB password from `testdb.env`, tokens or keys. If
+  output contains one, replace it with `[REDACTED]`.
+
+## How the Lead decides
+
+- PASS only if: same commit as the request, every requested test ran, nothing
+  in "Must not be skipped" was skipped, no data race, exit codes 0.
+- Otherwise FIX. The Lead first finds the root cause from the report. If the
+  report lacks the evidence it needs, it sends a narrower Test Request (for
+  example `-run '^TestX$' -v`) instead of guessing.
+
+## Repo constraints (all roles)
+
+- Shell aliases shadow `git`, `ls`, `cp`, `mv`, `wc`, `ss`: use `command git`,
+  `command ls`, etc.
+- Never modify existing migrations or hand-edit generated sqlc code; add a new
+  migration and run `make generate`.
+- Never log or print tokens, Authorization headers, prompts, tool inputs and
+  outputs, or payloads. Secrets never go in argv, logs or errors.
+- Tests never call the real GitHub, ClickUp, Telegram or Anthropic.
+- DB tests use only `TEST_DATABASE_URL` on loopback with the database
+  `nexus_storage_test`.
+- Commit locally per task; no push or merge without the owner's OK.
