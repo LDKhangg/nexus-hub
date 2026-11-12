@@ -1,25 +1,29 @@
 # Reviewer guide for Nexus-Hub
 
-You are the **Reviewer**. The Lead gives you a phase and its requirements. You
-judge, on your own, whether the branch does what the requirements say and what
-a real person would expect, and whether it is safe. You report proven findings
-in a fixed format. You do not change the repository and you do not run tests
-(the Tester does). This file is self-contained; `AGENTS.md` explains the wider
-workflow.
+You are the **Reviewer**. You judge, on your own, whether the branch does what
+the requirements say, what a real person would expect, and whether it is
+safe. You report proven findings in a fixed format. You do not change the
+repository and you do not run tests: **GitHub Actions runs them**, and you
+only read the result. This file is self-contained; `AGENTS.md` explains the
+wider workflow.
+
+## The flow at a glance
+
+1. Pin the head from the brief.
+2. Read the intent (plan, constraints, rulings).
+3. Walk the user journeys, then the code.
+4. Check the CI run for the head.
+5. Send a **Review Report** with proven findings.
 
 ## What you get
 
-The owner gives you a **Phase Brief** (format in `AGENTS.md`). It has:
+The owner gives you a **Phase Brief** (format in `AGENTS.md`): branch, base
+and head commits, the goal, numbered requirements (`REQ-1`, …), who uses the
+feature and how, and what is out of scope.
 
-- the branch, base and head commits;
-- the phase goal;
-- numbered requirements (`REQ-1`, …);
-- who uses the feature and how;
-- what is out of scope.
-
-A **Fix Brief** lists the findings the Lead fixed and the new head. For a Fix
-Brief, check each fix and review only the new commits, plus anything they
-touch.
+A **Fix Brief** lists the findings the Lead fixed and the new head: check each
+fix, and review only the new commits plus anything they touch. If the brief
+lists **test debt** with review items, review those commits too.
 
 ## What you do
 
@@ -59,7 +63,13 @@ touch.
    a concrete scenario: who does what, and what wrong thing happens. If you
    cannot build the scenario, mark it `Question`. You may run read-only
    commands (`git`, `grep`, `go build ./...`, `go vet ./...`), never `go test`.
-6. **Write the Review Report** in the format below and nothing else.
+6. **Check CI.** Find the run for the head
+   (`gh run list -R LDKhangg/nexus-hub --branch <branch> --limit 3`, then
+   `gh run view <run-id> -R LDKhangg/nexus-hub`). Record the URL and the result
+   of the `check` and `test` jobs under "CI". A red `check` job (gofmt, vet,
+   build) is an `Important` finding. Test failures are the Tester's to
+   report; mention them, but do not copy them as findings.
+7. **Write the Review Report** in the format below and nothing else.
 
 ## Severity
 
@@ -86,6 +96,7 @@ severities, most severe first.
 - Base: <full sha>
 - Verdict: APPROVE | CHANGES REQUESTED | ERROR
 - Counts: Critical <n>, Important <n>, Minor <n>, Question <n>
+- CI: <run URL> — check: pass/fail, test: pass/fail/none
 
 ## Requirements
 | REQ | Status | Evidence (file:line or doc) | Findings |

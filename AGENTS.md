@@ -19,9 +19,9 @@ writes a Phase Completion Report (PCC §10.4) in `docs/product/reports/`.
 |---|---|---|---|
 | **Lead** | the main Claude session | writes the plan with numbered requirements, dispatches implementers, writes Phase and Fix Briefs, judges reports, fixes production code | writes or edits tests; runs `go test`; reviews its own branch; pushes or merges without the owner's OK |
 | **Implementer** | a subagent dispatched by the Lead, one task at a time | writes the production code for one plan task, commits locally | writes or edits tests; runs `go test`; changes other tasks' scope; pushes |
-| **Tester** | a separate agent that the owner runs (`TESTER.md`) | designs test cases from the requirements (requirement, human-behaviour and abuse cases), writes and commits test files, runs them, returns a Test Report | edits production code; weakens tests to pass; pushes |
+| **Tester** | a separate agent that the owner runs (`TESTER.md`) | designs test cases from the requirements (requirement, human-behaviour and abuse cases), writes and commits test files, reads the CI run, returns a Test Report | edits production code; weakens tests to pass; pushes |
 | **Reviewer** | a separate agent that the owner runs (`REVIEWER.md`) | judges the branch against the requirements, real user journeys and the constraints; returns a Review Report with proven findings | edits files; runs `go test`; commits |
-| **Owner** | the human | approves plans and the Tester's Test Plans, carries briefs and reports between agents, approves push/merge | n/a |
+| **Owner** | the human | approves plans and the Tester's Test Plans, carries briefs and reports between agents, pushes branches so CI runs, approves merge | n/a |
 
 Lead and Implementer may only run these to prove the code compiles:
 `go build ./...`, `go vet ./...`, `gofmt -l cmd internal`, `make generate`
@@ -39,8 +39,8 @@ kept 14 days) and writes failed/skipped tests, races and panics to the run
 summary. On `main` and `v*` tags it publishes `ghcr.io/<repo>` tagged with
 the short SHA (and `latest` on main). Deploying to the VPS is a later phase.
 
-- The Tester may report a CI run on the brief's head instead of a local run
-  (see `TESTER.md`).
+- CI is where the suite runs. The Tester writes tests and reports the CI
+  run; nobody runs the full suite locally (see `TESTER.md`).
 - The Lead may read CI results (`gh run view`, `gh run download`) to judge a
   report; reading CI is not running tests. A red `check` job on a Lead or
   Implementer commit is fixed before the Phase Brief.
@@ -62,7 +62,8 @@ the short SHA (and `latest` on main). Deploying to the VPS is a later phase.
    implemented, the Lead writes one Phase Brief (format below). The owner gives
    the same brief to the Tester and the Reviewer; they can work in parallel.
 4. **Test.** The Tester sends a Test Plan; the owner approves or edits it. The
-   Tester writes and commits the tests, runs them, and returns a Test Report.
+   Tester writes and commits the tests, the owner pushes, CI runs the suite,
+   and the Tester returns a Test Report from the CI run.
 5. **Review.** The Reviewer returns a Review Report.
 6. **Verdict.** The Lead checks every defect (`D…`) and finding (`R…`)
    against the code, then:
