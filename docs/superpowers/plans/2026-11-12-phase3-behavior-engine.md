@@ -1,6 +1,6 @@
 # Phase 3: Behavior engine with graded autonomy
 
-- Date: 2026-11-12. Status: **draft v2, waiting for the owner's approval**.
+- Date: 2026-11-12. Status: **draft v3 (personalization added), waiting for the owner's approval**.
 - Roadmap: `docs/product/ROADMAP.md` Phase 3. Contract: `docs/product/PCC-001.md`.
 - Branch (when approved): `feature/phase3` from `main`.
 
@@ -178,6 +178,38 @@ Change from draft v1: the owner rejected a hard-coded spec-review feature
   it when nothing changed since.
 - REQ-17: `notify` items arrive as one digest per run.
 
+**Personalization**
+
+- REQ-22: A user profile in the DB (CLI `profile set/show`) holds:
+  - language and tone for every message the hub writes;
+  - quiet hours, during which `notify` and FYI messages wait and `ask`
+    messages still arrive;
+  - digest mode: per run, or batched hourly or daily;
+  - the default model and budgets.
+  Every behavior uses the profile unless it overrides a field.
+- REQ-23: **Decision memory.** Every answer the owner gives to an `ask`, and
+  every `auto` answer the owner posts or undoes, is stored with:
+  - its topic;
+  - its question;
+  - its answer;
+  - its scope: the behavior, the ClickUp list, the repo.
+  A read tool `memory_search` (allowed through `reads` like any other) returns
+  matching past decisions with a locator (`memory:decision/<id>`), so they can
+  be cited.
+  - Over time, items the owner already decided become `auto`, with the
+    earlier decision as evidence.
+  - A past decision never overrides `always_ask_topics`.
+  - `memory list/forget` in the CLI manages them.
+- REQ-24: Behaviors can declare `vars` (for example status names, list IDs,
+  headings) used as `{{vars.x}}` inside `triggers`, `instructions` and
+  `actions`. `behavior import` can take a second file of values. The same
+  behavior file can then be reused with different settings, or shared.
+- REQ-25: Feedback buttons on every message from a behavior: "👍" and
+  "👎 + lý do". The rating is stored on the item and shown in `/trace`. CLI
+  `behavior stats <name>` shows, per version, the counts of
+  auto/notify/ask, undos, conflicts and 👎. The owner can then tune the
+  thresholds and instructions with data.
+
 **Trace**
 
 - REQ-18: `/trace` and the CLI `trace` show a run and its items. For the run:
@@ -243,6 +275,7 @@ triage can itself become a behavior; this phase does not move it.
 | T5 | Run executor: reads, locators, the LLM with generic schema, citation verifier, classifier, injection flag | 8–11 |
 | T6 | Action library, dry-run drafts, approvals and ask flow, conflict checks, description block and undo, digest | 12–17 |
 | T7 | Trace CLI and `/trace`, correlation IDs, `examples/behaviors/spec-review.yaml` | 18–20 |
+| T8 | Profile, decision memory and `memory_search`, behavior `vars`, feedback and `behavior stats` | 22–25 |
 
 ## Global constraints
 
