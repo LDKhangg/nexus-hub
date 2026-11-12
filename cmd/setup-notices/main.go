@@ -23,6 +23,9 @@ func main() {
 }
 
 func run(args []string, out io.Writer, lookup func(string) (string, bool)) error {
+	if len(args) > 0 && args[0] == "master-key" {
+		return masterKeyInit(args[1:], out) // needs no database
+	}
 	url, ok := lookup("DATABASE_URL")
 	if !ok || url == "" {
 		return errors.New("explicit DATABASE_URL is required")
@@ -48,11 +51,29 @@ func commandFlags(name string) *flag.FlagSet {
 
 func runCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.Writer, lookup func(string) (string, bool)) error {
 	if len(args) == 0 {
-		return errors.New("usage: setup-notices init|bind-webhook|inspect|retry-failed")
+		return errors.New("usage: setup-notices init|bind-webhook|inspect|retry-failed|master-key|secret|migrate-secrets|settings|enable-agent|disable-agent|github-account|github-repo|github-check")
 	}
 	switch args[0] {
 	case "init":
 		return initNotices(ctx, pool, args[1:], out)
+	case "master-key":
+		return masterKeyInit(args[1:], out)
+	case "secret":
+		return secretCommand(ctx, pool, args[1:], out, lookup)
+	case "migrate-secrets":
+		return migrateSecrets(ctx, pool, args[1:], out, lookup)
+	case "settings":
+		return settingsCommand(ctx, pool, args[1:], out)
+	case "enable-agent":
+		return setAgentEnabled(ctx, pool, args[0], args[1:], out, true)
+	case "disable-agent":
+		return setAgentEnabled(ctx, pool, args[0], args[1:], out, false)
+	case "github-account":
+		return githubAccountCommand(ctx, pool, args[1:], out)
+	case "github-repo":
+		return githubRepoCommand(ctx, pool, args[1:], out)
+	case "github-check":
+		return githubCheck(ctx, pool, args[1:], out, lookup)
 	case "bind-webhook":
 		f := commandFlags(args[0])
 		source := f.String("source-id", "", "source integration UUID")
@@ -104,27 +125,7 @@ func runCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.W
 		if len(args) != 1 {
 			return errors.New("inspect takes no arguments")
 		}
-		rows, err := pool.Query(ctx, `SELECT id,status,attempts,COALESCE(last_error_code,''),next_attempt_at FROM notification_outbox ORDER BY id DESC LIMIT 100`)
-		if err != nil {
-			return errors.New("inspect failed; check database migrations")
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var id int64
-			var status, code string
-			var attempts int
-			var next time.Time
-			if rows.Scan(&id, &status, &attempts, &code, &next) != nil {
-				return errors.New("inspect decode failed")
-			}
-			if err := json.NewEncoder(out).Encode(map[string]any{"job_id": id, "status": status, "attempts": attempts, "error_code": code, "next_attempt_at": next}); err != nil {
-				return err
-			}
-		}
-		if rows.Err() != nil {
-			return errors.New("inspect failed")
-		}
-		return nil
+		return inspect(ctx, pool, out)
 	case "retry-failed":
 		f := commandFlags(args[0])
 		id := f.Int64("job-id", 0, "failed delivery job ID")

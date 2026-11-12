@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/control/telegram"
+	"github.com/LDKhangg/nexus-hub/internal/adapters/netguard"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage"
 	"github.com/LDKhangg/nexus-hub/internal/agent"
 	"github.com/LDKhangg/nexus-hub/internal/config"
@@ -75,9 +76,17 @@ func run() error {
 	if err != nil {
 		return errors.New("notice repository startup failed")
 	}
+	if err := ensurePrivateDirs(s.ReposDir, s.TmpDir); err != nil {
+		return err
+	}
 	workerSettings := relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout}
-	sender := telegram.NewClient(&http.Client{Timeout: s.NoticeRequestTimeout}, resolver)
+	sender := telegram.NewClient(netguard.Client(s.NoticeRequestTimeout, netguard.DefaultHosts), resolver)
 	worker := relay.NewNoticeWorker(notices, sender, workerSettings)
+	ag, err := buildAgent(pool, s, resolver, redactor, sender)
+	if err != nil {
+		return err
+	}
+	notices.SetKnownTools(ag.known)
 	handler := httpdelivery.NewWebhookHandler(integrations, httpdelivery.NewVerifiedParserFactory(resolver), relay.NewNoticeService(notices))
 	e := echo.New()
 	e.HideBanner = true
@@ -88,13 +97,14 @@ func run() error {
 	e.POST("/webhook/:source/:integrationID", handler.HandleWebhook)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runServices(ctx, e, worker, s.ListenAddr, shutdownTimeout)
+	return runServices(ctx, e, []serviceWorker{worker, ag.orchestrator, ag.actions}, s.ListenAddr, shutdownTimeout)
 }
 
 type serviceWorker interface{ Run(context.Context) error }
 
-// runServices owns cancellation and waits for all DB users before returning.
-func runServices(ctx context.Context, e *echo.Echo, worker serviceWorker, address string, shutdownTimeout time.Duration) error {
+// runServices owns cancellation: any worker or the server stopping shuts
+// everything down, and it waits for every DB user before returning.
+func runServices(ctx context.Context, e *echo.Echo, workers []serviceWorker, address string, shutdownTimeout time.Duration) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return errors.New("HTTP listener startup failed")
@@ -102,12 +112,14 @@ func runServices(ctx context.Context, e *echo.Echo, worker serviceWorker, addres
 	e.Listener = listener
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	workerDone := make(chan error, 1)
+	workerDone := make(chan error, len(workers))
 	serverDone := make(chan error, 1)
-	go func() { workerDone <- worker.Run(workerCtx) }()
+	for _, w := range workers {
+		go func() { workerDone <- w.Run(workerCtx) }()
+	}
 	go func() { serverDone <- e.Start(address) }()
 	var result error
-	workerStopped := false
+	stopped := 0
 	select {
 	case <-ctx.Done():
 	case err := <-serverDone:
@@ -115,8 +127,8 @@ func runServices(ctx context.Context, e *echo.Echo, worker serviceWorker, addres
 			result = errors.New("HTTP server stopped unexpectedly")
 		}
 	case <-workerDone:
-		workerStopped = true
-		result = errors.New("notice worker stopped unexpectedly")
+		stopped = 1
+		result = errors.New("worker stopped unexpectedly")
 	}
 	cancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
@@ -125,7 +137,7 @@ func runServices(ctx context.Context, e *echo.Echo, worker serviceWorker, addres
 		_ = e.Close()
 		result = errors.New("HTTP shutdown timed out")
 	}
-	if !workerStopped {
+	for ; stopped < len(workers); stopped++ {
 		<-workerDone
 	}
 	return result

@@ -228,3 +228,123 @@ go test -race ./... -count=1
 Phase 1 live acceptance is complete only after BOTH a real comment and a real
 status notice are observed in the intended group. Record automated and live
 results separately; neither substitutes for the other.
+
+## Phase 2: agent core, tools and DB secrets
+
+Phase 2 adds an AI agent for ClickUp comments on sources where `agent.enabled` is true. Tier-1 triages each comment burst. Tier-2 investigates with tools when needed. The result is a one-way Telegram report. Nexus-Hub still posts nothing to ClickUp. Sources without the agent keep the Phase 1 notices unchanged.
+
+The process reads only `DATABASE_URL` and `NEXUS_MASTER_KEY_FILE`. Settings live in `app_settings`, and secrets are AES-256-GCM rows in `credentials`. Each row is bound to its workspace, name and kind.
+
+### P2.1 Master key
+
+```sh
+go run ./cmd/setup-notices master-key init --path /etc/nexus-hub/master.key   # 32 random bytes, mode 0600, never overwrites
+export NEXUS_MASTER_KEY_FILE=/etc/nexus-hub/master.key
+```
+
+Back the key up offline. Without it, no DB credential can be decrypted. If the key file is missing at startup, the server keeps running with a warning, and only legacy `env:` references resolve.
+
+### P2.2 Secrets
+
+Values are read from stdin, never from flags. On a TTY the input is hidden.
+
+```sh
+go run ./cmd/setup-notices secret set --workspace-id <ws> --name telegram  --kind telegram_bot
+go run ./cmd/setup-notices secret set --workspace-id <ws> --name anthropic --kind anthropic_key
+go run ./cmd/setup-notices secret set --workspace-id <ws> --name clickup   --kind clickup_token   # agent's clickup_get_task
+printf %s "$VALUE" | go run ./cmd/setup-notices secret set --workspace-id <ws> --name gh_personal --kind github_pat
+go run ./cmd/setup-notices secret list --workspace-id <ws>   # names, kinds, updated_at only
+```
+
+To move Phase 1 `*_env` references into the DB, export the old variables and run:
+
+```sh
+go run ./cmd/setup-notices migrate-secrets --workspace-id <ws>
+```
+
+This step copies each value and rewrites `bot_token_env` / `webhook_secret_env` to `bot_token_ref` / `webhook_secret_ref`. The credential names are derived from the variable names. If any variable is missing, it changes nothing. New setups can use `init --bot-token-ref telegram --webhook-secret-ref clickup-webhook` directly.
+
+### P2.3 Settings
+
+```sh
+go run ./cmd/setup-notices settings list
+go run ./cmd/setup-notices settings set max_input_tokens 40000
+go run ./cmd/setup-notices settings set listen_addr 127.0.0.1:8080
+```
+
+Unknown keys and invalid values are rejected. Restart the server to apply a change. The defaults are `claude-haiku-5-5` for triage and summaries, `claude-sonnet-5-5` for the actor, a per-job budget of 60000 input and 6000 output tokens, and `allow_dangerous=false`.
+
+### P2.4 GitHub accounts (least privilege)
+
+**PAT.** Use a fine-grained token limited to the repositories you grant. For read and review, give it Contents, Pull requests, Issues, Checks and Commit statuses as read. Add Contents write only if you allow `git_push`, and Issues/Pull requests write only for `github_pr_comment` or the close tools.
+
+```sh
+go run ./cmd/setup-notices github-account add --source-id <src> --name personal --pat-ref gh_personal --login <login> --commit-name "Nexus Bot" --commit-email nexus@example.invalid
+```
+
+The login is verified with `GET /user` before every token use (cached for 10 minutes). A mismatch is reported as `account_mismatch`.
+
+**GitHub App.** Install the app only on the target repositories, with the same permissions as above. Store the PEM with `--kind github_app_key`. Every call mints an installation token limited to that one repository and that call's permissions.
+
+```sh
+go run ./cmd/setup-notices github-account add --source-id <src> --name workbot --app-id <id> --installation-id <id> --key-ref gh_app_key --commit-name "nexus[bot]" --commit-email nexus@example.invalid
+```
+
+Grant repositories and tools, then verify:
+
+```sh
+go run ./cmd/setup-notices github-repo set --source-id <src> --repo owner/name --account personal --managed \
+  --allow github_pr_comment --allow git_sync --allow git_push --push-branch 'nexus/*' --merge-method squash --merge-base develop
+go run ./cmd/setup-notices github-check --source-id <src>   # ok/code per account, never a token
+go run ./cmd/setup-notices enable-agent --source-id <src>
+```
+
+### P2.5 Managed clones
+
+Workspace tools (`git_sync`, `git_pull`, `git_checkout`, `git_commit`, `git_push`, `git_reset_hard`, `git_clean`) work only on managed clones under `repos_dir` (default `/var/lib/nexus-hub/repos`). The server creates `repos_dir` and `tmp_dir` with mode 0700.
+
+`git` is the only binary ever executed, and it never runs through a shell. Each git process runs with a minimal environment, rlimits and a timeout. Tokens reach git only through child-environment config, never through argv or remote URLs. A clone larger than `max_clone_bytes` is removed.
+
+### P2.6 Dry run first, then the dangerous switch
+
+Start with `"dry_run": true` in `agent.tools`. Write and dangerous calls are then recorded as `dry_run` and reported with 🧪, without running. Once the reports look right, set dry run back to false.
+
+Dangerous tools are `github_pr_merge`, `github_pr_close`, `github_issue_close`, `git_reset_hard`, `git_clean`, and `git_push` to a protected or base branch. Each needs all of the following:
+
+- `settings set allow_dangerous true` (global)
+- the tool in the repository's `allow` list
+- the tool's own preconditions (merge: open, not draft, exact head SHA, base in `merge_base_branches`, allowed method, green checks)
+- at most one dangerous call per job
+
+There is no per-call approval in Phase 2.
+
+### P2.7 systemd
+
+`deploy/systemd/nexus-hub.service` is a unit file only; deployment comes in a later phase. It runs as `nexus` with:
+
+- no new privileges and an empty capability set
+- a read-only system and no home access
+- private /tmp and devices
+- write access only to `/var/lib/nexus-hub`
+- `MemoryMax=1G`, `CPUQuota=80%`, `TasksMax=64`
+- only IP and Unix sockets
+- the `@system-service` syscall filter
+
+The master key is passed with `LoadCredential`, so it never sits in the environment. `/etc/nexus-hub/nexus-hub.env` holds only `DATABASE_URL`.
+
+### P2.8 Reading `inspect`
+
+`go run ./cmd/setup-notices inspect` prints one JSON line per row, with a `table` field:
+
+- `agent_jobs`: status, attempts, error code and token usage.
+- `tool_runs`: tool, tier, repo, account, status, error code and duration. Statuses are `ok`, `error`, `denied` (policy), `dry_run`, `timeout` and `unknown_outcome`. `unknown_outcome` means a write may have happened, and that exact call is never repeated.
+- `outbound_actions`: Telegram delivery state.
+- `credentials`: name, kind and updated_at.
+
+`inspect` never prints message content, reports, tool inputs or outputs, configs or ciphertext.
+
+On failure, a job retries with backoff (5, 15, 30, then 60 seconds), up to 5 attempts. After that it sends `⚠️ AI triage unavailable (<code>)` with the plain notice. `llm_unconfigured` and `llm_refused` fall back immediately.
+
+### P2.9 Live acceptance
+
+Phase 2 is verified with fakes only: no real GitHub, ClickUp, Telegram or Anthropic calls run in tests. Live acceptance against real services, an independent review, and owner commands from Telegram come in Phase 3.

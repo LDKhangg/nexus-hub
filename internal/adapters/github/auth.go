@@ -222,3 +222,10 @@ func doJSON(ctx context.Context, hc *http.Client, base, method, path, auth strin
 	}
 	return nil
 }
+
+// NewCredentialsAt is NewCredentials against another API base.
+func NewCredentialsAt(baseURL string, httpc *http.Client, resolver SecretResolver, redactor Redactor, now func() time.Time) Credentials {
+	c := NewCredentials(httpc, resolver, redactor, now).(*credentials)
+	c.baseURL = baseURL
+	return c
+}

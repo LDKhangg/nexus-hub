@@ -219,3 +219,16 @@ func ParseCLIValue(key, text string) (json.RawMessage, error) {
 	}
 	return raw, nil
 }
+
+// DefaultJSON is the stored-JSON form of key's default value.
+func DefaultJSON(key string) (json.RawMessage, error) {
+	sp, ok := specs[key]
+	if !ok {
+		return nil, fmt.Errorf("settings: unknown key %q", key)
+	}
+	v := sp.def
+	if d, isDur := v.(time.Duration); isDur {
+		v = d.String()
+	}
+	return json.Marshal(v)
+}

@@ -105,3 +105,11 @@ func retryAfter(resp *http.Response) time.Duration {
 	}
 	return 0
 }
+
+// NewClientAt is NewClient against another API base (GitHub Enterprise or
+// a local test server).
+func NewClientAt(baseURL string, httpc *http.Client, creds Credentials) *Client {
+	c := NewClient(httpc, creds)
+	c.baseURL = baseURL
+	return c
+}

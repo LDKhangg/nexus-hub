@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"testing"
 	"unicode/utf8"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/tools/execrunner"
@@ -512,4 +513,14 @@ func gitClean(ctx context.Context, w *workspace, _ tools.Call, root string, _ in
 	}
 	removed := strings.Count(string(res.Stdout), "Removing ")
 	return tools.ToolOutput{Text: fmt.Sprintf("removed %d untracked path(s)", removed), Summary: fmt.Sprintf("clean removed %d", removed)}, nil
+}
+
+// NewWorkspaceToolsWithLocalRemote uses remoteBase (a file:// URL ending in
+// "/") instead of github.com. It exists for cross-package end-to-end tests
+// and panics outside `go test`, so production can never enable file://.
+func NewWorkspaceToolsWithLocalRemote(r Runner, tokens TokenSource, reposDir string, maxCloneBytes int64, s tools.Sanitizer, remoteBase string) []tools.Tool {
+	if !testing.Testing() || !strings.HasPrefix(remoteBase, "file://") {
+		panic("codetools: local remotes are test-only")
+	}
+	return newWorkspaceTools(r, tokens, reposDir, maxCloneBytes, s, remoteBase)
 }
