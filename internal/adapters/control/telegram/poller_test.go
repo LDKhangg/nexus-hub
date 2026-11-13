@@ -80,6 +80,7 @@ type fakeUpdatesAPI struct {
 	fpErr        map[string]error
 	deletes      []string
 	deleteErr    error
+	onDelete     func() // called inside DeleteWebhook, before it returns
 }
 
 func newFakeAPI() *fakeUpdatesAPI {
@@ -109,6 +110,9 @@ func (f *fakeUpdatesAPI) DeleteWebhook(_ context.Context, _, tokenRef string) er
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deletes = append(f.deletes, tokenRef)
+	if f.onDelete != nil {
+		f.onDelete()
+	}
 	return f.deleteErr
 }
 
@@ -489,27 +493,94 @@ func TestPollerConflictDeletesWebhookOnce(t *testing.T) {
 	c.reply <- getReply{}
 }
 
-// TC-P7-15: when deleteWebhook fails the failure is logged with a safe
-// code, the loop backs off and it is not retried.
-func TestPollerConflictDeleteFails(t *testing.T) {
+// TC-P7-15 (R9): a failed deleteWebhook is logged with a safe code, backs
+// off by the larger retry_after of getUpdates and deleteWebhook, and is
+// tried again on the next conflict; after one successful delete a later
+// conflict does not delete again.
+func TestPollerConflictDeleteRetried(t *testing.T) {
 	logs := captureLog(t)
 	api, targets := newFakeAPI(), newFakeTargets(targetA)
-	api.deleteErr = &relay.DeliveryError{Code: "rejected"}
+	setDeleteErr := func(err error) {
+		api.mu.Lock()
+		api.deleteErr = err
+		api.mu.Unlock()
+	}
+	setDeleteErr(&relay.DeliveryError{Code: "rate_limited", Retryable: true, RetryAfter: 150 * time.Millisecond})
 	startPoller(t, NewPoller(targets, api, &fakeHandler{}, fastSettings()))
 	conflict := &relay.DeliveryError{Code: "conflict", Retryable: true}
+
 	c := api.next(t)
+	sent := time.Now()
 	c.reply <- getReply{err: conflict}
 	c = api.next(t)
-	c.reply <- getReply{err: conflict}
-	c = api.next(t)
+	if gap := c.at.Sub(sent); gap < 150*time.Millisecond {
+		t.Fatalf("deleteWebhook retry_after ignored: gap %v", gap)
+	}
 	if api.deleteCount() != 1 {
-		t.Fatalf("deleteWebhook calls=%d", api.deleteCount())
+		t.Fatalf("deleteWebhook calls=%d want 1", api.deleteCount())
+	}
+
+	// Second conflict: the delete is tried again; getUpdates' retry_after
+	// (250ms) is larger than deleteWebhook's (150ms) and wins.
+	sent = time.Now()
+	c.reply <- getReply{err: &relay.DeliveryError{Code: "conflict", Retryable: true, RetryAfter: 250 * time.Millisecond}}
+	c = api.next(t)
+	if gap := c.at.Sub(sent); gap < 250*time.Millisecond {
+		t.Fatalf("larger retry_after not used: gap %v", gap)
+	}
+	if api.deleteCount() != 2 {
+		t.Fatalf("failed delete not retried: calls=%d want 2", api.deleteCount())
 	}
 	out := logs.String()
-	if strings.Contains(out, "webhook removed for polling") || !strings.Contains(out, "removing webhook failed integration=int-a code=rejected") {
-		t.Fatalf("logs %q", out)
+	if n := strings.Count(out, "removing webhook failed integration=int-a code=rate_limited"); n != 2 {
+		t.Fatalf("delete failure logged %d times: %q", n, out)
+	}
+	if strings.Contains(out, "webhook removed for polling") {
+		t.Fatalf("notice logged although the delete failed: %q", out)
+	}
+
+	// Third conflict: the delete succeeds, the notice is logged and the
+	// loop polls again at once.
+	setDeleteErr(nil)
+	c.reply <- getReply{err: conflict}
+	c = api.next(t)
+	if api.deleteCount() != 3 || strings.Count(logs.String(), "telegram: webhook removed for polling") != 1 {
+		t.Fatalf("delete calls=%d logs=%q", api.deleteCount(), logs.String())
+	}
+
+	// Later conflicts never delete again.
+	for i := 0; i < 2; i++ {
+		c.reply <- getReply{err: conflict}
+		c = api.next(t)
+	}
+	if api.deleteCount() != 3 {
+		t.Fatalf("deleted again after success: calls=%d", api.deleteCount())
 	}
 	c.reply <- getReply{}
+}
+
+// TC-P7-15b (R9): a cancel while deleteWebhook runs stops the loop.
+func TestPollerConflictDeleteCanceled(t *testing.T) {
+	api, targets := newFakeAPI(), newFakeTargets(targetA)
+	api.deleteErr = context.Canceled
+	ctx, cancel := context.WithCancel(context.Background())
+	api.onDelete = cancel
+	done := make(chan error, 1)
+	go func() { done <- NewPoller(targets, api, &fakeHandler{}, fastSettings()).Run(ctx) }()
+	c := api.next(t)
+	c.reply <- getReply{err: &relay.DeliveryError{Code: "conflict", Retryable: true}}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run=%v", err)
+		}
+	case <-time.After(waitLong):
+		cancel()
+		t.Fatal("Run did not return after cancel during deleteWebhook")
+	}
+	if api.deleteCount() != 1 || api.inflight.Load() != 0 {
+		t.Fatalf("deletes=%d inflight=%d", api.deleteCount(), api.inflight.Load())
+	}
 }
 
 // TC-P7-16: two integrations of the same bot (same fingerprint) are polled
@@ -795,4 +866,146 @@ func TestPollerWithClientLogsNoSecrets(t *testing.T) {
 			t.Fatalf("log contains %q: %q", leak, out)
 		}
 	}
+}
+
+// panicValue is a panic value that carries text and a token.
+func panicValue(id int64) string {
+	return fmt.Sprintf("boom on secret text %d with %s", id, p7Token)
+}
+
+func assertNoPanicLeak(t *testing.T, out string) {
+	t.Helper()
+	for _, leak := range []string{"boom", "secret text", p7Token, "P7-SECRET", "goroutine "} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("log contains %q: %q", leak, out)
+		}
+	}
+}
+
+// TC-P7-23 (R10): a panicking handler does not crash the poller; the panic
+// is logged as handler_panic with ids only, the offset stays and the
+// update is offered again after a backoff.
+func TestPollerHandlerPanicRecovered(t *testing.T) {
+	logs := captureLog(t)
+	api, targets := newFakeAPI(), newFakeTargets(targetA)
+	var panicked atomic.Bool
+	h := &fakeHandler{result: func(id int64) (string, error) {
+		if id == 60 && panicked.CompareAndSwap(false, true) {
+			panic(panicValue(id))
+		}
+		return "queued", nil
+	}}
+	s := fastSettings()
+	s.MinBackoff, s.MaxBackoff = 50*time.Millisecond, 50*time.Millisecond
+	startPoller(t, NewPoller(targets, api, h, s))
+
+	c := api.next(t)
+	sent := time.Now()
+	c.reply <- getReply{updates: []json.RawMessage{upd(60), upd(61)}}
+	c = api.next(t)
+	if c.offset != 0 {
+		t.Fatalf("offset moved to %d after a panic", c.offset)
+	}
+	if gap := c.at.Sub(sent); gap < 50*time.Millisecond {
+		t.Fatalf("no backoff after a panic: gap %v", gap)
+	}
+	if got := h.ids(); fmt.Sprint(got) != "[60]" {
+		t.Fatalf("handled %v: the batch must stop at the panicking update", got)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "update deferred integration=int-a update=60 code=handler_panic") {
+		t.Fatalf("panic not logged: %q", out)
+	}
+	assertNoPanicLeak(t, out)
+
+	c.reply <- getReply{updates: []json.RawMessage{upd(60), upd(61)}}
+	c = api.next(t)
+	if c.offset != 62 {
+		t.Fatalf("offset=%d want 62 after recovery", c.offset)
+	}
+	if got := h.ids(); fmt.Sprint(got) != "[60 60 61]" {
+		t.Fatalf("handled %v", got)
+	}
+	c.reply <- getReply{}
+}
+
+// TC-P7-24 (R10): the third panic in a row on one update_id skips it with
+// update_skipped_after_panics, and the next update is handled.
+func TestPollerSkipsUpdateAfterThreePanics(t *testing.T) {
+	logs := captureLog(t)
+	api, targets := newFakeAPI(), newFakeTargets(targetA)
+	h := &fakeHandler{result: func(id int64) (string, error) {
+		if id == 70 {
+			panic(panicValue(id))
+		}
+		return "queued", nil
+	}}
+	startPoller(t, NewPoller(targets, api, h, fastSettings()))
+
+	c := api.next(t)
+	for i := 1; i <= 2; i++ {
+		c.reply <- getReply{updates: []json.RawMessage{upd(70), upd(71)}}
+		c = api.next(t)
+		if c.offset != 0 {
+			t.Fatalf("panic %d: offset=%d want 0", i, c.offset)
+		}
+	}
+	if strings.Contains(logs.String(), "update_skipped_after_panics") {
+		t.Fatalf("skipped before the third panic: %q", logs.String())
+	}
+	c.reply <- getReply{updates: []json.RawMessage{upd(70), upd(71)}}
+	c = api.next(t)
+	if c.offset != 72 {
+		t.Fatalf("offset=%d want 72 (70 skipped, 71 handled)", c.offset)
+	}
+	if got := h.ids(); fmt.Sprint(got) != "[70 70 70 71]" {
+		t.Fatalf("handled %v", got)
+	}
+	out := logs.String()
+	if strings.Count(out, "code=handler_panic") != 3 || strings.Count(out, "update_skipped_after_panics integration=int-a update=70") != 1 {
+		t.Fatalf("logs %q", out)
+	}
+	assertNoPanicLeak(t, out)
+	c.reply <- getReply{}
+}
+
+// TC-P7-25 (R10): the panic count is per update_id in a row: a panic on
+// another update resets it, so the first update needs three new panics
+// before it is skipped.
+func TestPollerPanicCountResetsOnOtherUpdate(t *testing.T) {
+	logs := captureLog(t)
+	api, targets := newFakeAPI(), newFakeTargets(targetA)
+	h := &fakeHandler{result: func(id int64) (string, error) {
+		if id == 80 || id == 81 {
+			panic(panicValue(id))
+		}
+		return "queued", nil
+	}}
+	startPoller(t, NewPoller(targets, api, h, fastSettings()))
+
+	c := api.next(t)
+	for i, batch := range [][]json.RawMessage{
+		{upd(80)}, {upd(80)}, // 80: 2 panics
+		{upd(81)},            // 81: 1 panic, resets the count
+		{upd(80)}, {upd(80)}, // 80: 2 panics again, not yet skipped
+	} {
+		c.reply <- getReply{updates: batch}
+		c = api.next(t)
+		if c.offset != 0 {
+			t.Fatalf("batch %d: offset=%d want 0 (nothing skipped yet)", i, c.offset)
+		}
+	}
+	if strings.Contains(logs.String(), "update_skipped_after_panics") {
+		t.Fatalf("count not reset by the other update: %q", logs.String())
+	}
+	c.reply <- getReply{updates: []json.RawMessage{upd(80)}}
+	c = api.next(t)
+	if c.offset != 81 {
+		t.Fatalf("offset=%d want 81 after the third panic in a row", c.offset)
+	}
+	if n := strings.Count(logs.String(), "update_skipped_after_panics integration=int-a update=80"); n != 1 {
+		t.Fatalf("skip logged %d times: %q", n, logs.String())
+	}
+	assertNoPanicLeak(t, logs.String())
+	c.reply <- getReply{}
 }
