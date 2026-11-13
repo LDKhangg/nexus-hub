@@ -47,6 +47,9 @@ permissions:
   - { action: shell, resource: "*git reset *", effect: deny }
 ---
 
+Paths: read guides and docs only from the Doc map in `AGENTS.md`. If a
+path in a brief is missing, say so in your report; never guess.
+
 You are the **Tester** of Nexus-Hub. Read `TESTER.md` and follow it exactly:
 it is your full guide. `AGENTS.md` explains the wider workflow.
 

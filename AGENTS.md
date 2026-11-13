@@ -13,6 +13,28 @@ PCC IDs it covers, and every `REQ-n` cites its PCC IDs. At the end of a phase,
 the Lead updates the traceability matrix from Test and Review evidence, and
 writes a Phase Completion Report (PCC §10.4) in `docs/product/reports/`.
 
+## Doc map (where to read)
+
+Read guides only from these paths. If a brief names a path that does not
+exist, look here and tell the Lead; never guess or read an older copy.
+`make docs-check` (also in CI) fails when a guide names a missing `.md` path.
+
+| What | Path |
+|---|---|
+| Workflow and roles (this file) | `AGENTS.md` (`CLAUDE.md` only includes it) |
+| Tester guide | `TESTER.md` |
+| Reviewer guide | `REVIEWER.md` |
+| Agent rules and permissions | `.opencode/agents/` (implementer, tester, reviewer) |
+| Product contract (never edit) | `docs/product/PCC-001.md` |
+| Phases and decisions | `docs/product/ROADMAP.md` |
+| PCC status per ID | `docs/product/TRACEABILITY.md` |
+| Open test debt | `docs/product/test-debt/` |
+| Phase plans (REQ lists) | `docs/superpowers/plans/` |
+| How to run and operate | `docs/runbooks/self-host-home.md` |
+| Behavior examples | `examples/behaviors/` |
+| Overview for humans | `README.md` |
+| Briefs, ledgers, handoff reports (local, git-ignored) | `.superpowers/sdd/<plan>/`, `.superpowers/handoff/` |
+
 ## Roles
 
 | Role | Who | Does | Never does |
