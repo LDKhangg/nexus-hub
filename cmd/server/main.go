@@ -19,6 +19,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/config"
 	httpdelivery "github.com/LDKhangg/nexus-hub/internal/delivery/http"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
+	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/secrets"
 	"github.com/LDKhangg/nexus-hub/internal/settings"
 	"github.com/google/uuid"
@@ -98,7 +99,8 @@ func run() error {
 	// inbox worker does the work. Behavior commands create pending runs;
 	// buttons, replies and /undo go to the action engine; /trace answers
 	// "not available" until it is wired.
-	telegramHandler := httpdelivery.NewTelegramHandler(integrations, resolver, behaviors, behaviors, s.OwnerTelegramChatID).WithOwnerUser(s.OwnerTelegramUserID)
+	reportSettings := reporting.NewPostgresStore(pool)
+	telegramHandler := httpdelivery.NewTelegramHandler(integrations, resolver, behaviors, behaviors, s.OwnerTelegramChatID, reportSettings).WithOwnerUser(s.OwnerTelegramUserID)
 	commands, err := behavior.NewCommandRunner(behaviors, behaviors)
 	if err != nil {
 		return errors.New("behavior command runner startup failed")
@@ -111,7 +113,8 @@ func run() error {
 	inbox := behavior.NewInboxWorker(behavior.InboxDeps{
 		Inbox: behaviors, Approvals: behaviors, Defs: behaviors, Messenger: messenger,
 		Commands: commands, Undoer: engine, Callbacks: engine,
-		Tracer: &behavior.TraceService{Store: behaviors, Profiles: behaviors},
+		Tracer:  &behavior.TraceService{Store: behaviors, Profiles: behaviors},
+		Reports: reportSettings,
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
 	workspaces, err := storage.NewWorkspaceRepository(pool)
 	if err != nil {

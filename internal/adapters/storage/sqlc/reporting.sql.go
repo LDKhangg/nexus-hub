@@ -11,6 +11,72 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const consumeReportTemplateReply = `-- name: ConsumeReportTemplateReply :one
+DELETE FROM public.report_template_prompts
+WHERE workspace_id = $1::uuid
+  AND id = $2::uuid
+  AND pending_body IS NOT NULL
+RETURNING user_id, behavior_name, kind, pending_body
+`
+
+type ConsumeReportTemplateReplyParams struct {
+	WorkspaceID pgtype.UUID
+	ID          pgtype.UUID
+}
+
+type ConsumeReportTemplateReplyRow struct {
+	UserID       pgtype.UUID
+	BehaviorName pgtype.Text
+	Kind         string
+	PendingBody  pgtype.Text
+}
+
+func (q *Queries) ConsumeReportTemplateReply(ctx context.Context, arg ConsumeReportTemplateReplyParams) (ConsumeReportTemplateReplyRow, error) {
+	row := q.db.QueryRow(ctx, consumeReportTemplateReply, arg.WorkspaceID, arg.ID)
+	var i ConsumeReportTemplateReplyRow
+	err := row.Scan(
+		&i.UserID,
+		&i.BehaviorName,
+		&i.Kind,
+		&i.PendingBody,
+	)
+	return i, err
+}
+
+const createReportTemplatePrompt = `-- name: CreateReportTemplatePrompt :exec
+INSERT INTO public.report_template_prompts(
+  user_id, workspace_id, message_id, behavior_name, kind, expires_at
+) VALUES (
+  $1::uuid, $2::uuid, $3::bigint,
+  $4::text, $5, $6::timestamptz
+)
+ON CONFLICT (workspace_id, message_id) DO UPDATE SET
+  user_id = EXCLUDED.user_id, behavior_name = EXCLUDED.behavior_name,
+  kind = EXCLUDED.kind, pending_body = NULL, expires_at = EXCLUDED.expires_at,
+  created_at = now()
+`
+
+type CreateReportTemplatePromptParams struct {
+	UserID       pgtype.UUID
+	WorkspaceID  pgtype.UUID
+	MessageID    int64
+	BehaviorName pgtype.Text
+	Kind         string
+	ExpiresAt    pgtype.Timestamptz
+}
+
+func (q *Queries) CreateReportTemplatePrompt(ctx context.Context, arg CreateReportTemplatePromptParams) error {
+	_, err := q.db.Exec(ctx, createReportTemplatePrompt,
+		arg.UserID,
+		arg.WorkspaceID,
+		arg.MessageID,
+		arg.BehaviorName,
+		arg.Kind,
+		arg.ExpiresAt,
+	)
+	return err
+}
+
 const deleteReportTemplate = `-- name: DeleteReportTemplate :execrows
 DELETE FROM public.report_templates
 WHERE user_id = $1::uuid
@@ -275,4 +341,33 @@ func (q *Queries) SetReportTemplate(ctx context.Context, arg SetReportTemplatePa
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const stageReportTemplateReply = `-- name: StageReportTemplateReply :one
+UPDATE public.report_template_prompts
+SET pending_body = $1
+WHERE workspace_id = $2::uuid
+  AND message_id = $3::bigint
+  AND (pending_body IS NULL OR pending_body = $1)
+  AND expires_at > $4::timestamptz
+RETURNING id
+`
+
+type StageReportTemplateReplyParams struct {
+	Body        pgtype.Text
+	WorkspaceID pgtype.UUID
+	MessageID   int64
+	AtTime      pgtype.Timestamptz
+}
+
+func (q *Queries) StageReportTemplateReply(ctx context.Context, arg StageReportTemplateReplyParams) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, stageReportTemplateReply,
+		arg.Body,
+		arg.WorkspaceID,
+		arg.MessageID,
+		arg.AtTime,
+	)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
 }

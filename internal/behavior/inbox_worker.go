@@ -52,6 +52,7 @@ type InboxDeps struct {
 	Tracer    Tracer
 	Undoer    Undoer
 	Callbacks CallbackHandler
+	Reports   ReportSettings
 }
 
 // InboxWorker processes stored Telegram updates: built-in commands,
@@ -177,6 +178,9 @@ func (w *InboxWorker) dispatch(ctx context.Context, u InboundUpdate, corr string
 	actor := "telegram:" + strconv.FormatInt(u.ChatID, 10)
 	switch u.Kind {
 	case UpdateCallback:
+		if strings.HasPrefix(u.Command, "rp:") {
+			return w.reportCallback(ctx, u, to)
+		}
 		return w.callback(ctx, u, to, actor, corr)
 	case UpdateCommand, UpdateText, UpdateOther:
 		if text, code := noteText(u.Note); text != "" {
@@ -285,6 +289,8 @@ func (w *InboxWorker) command(ctx context.Context, u InboundUpdate, to ChatRef, 
 			return w.reply(ctx, to, usageUndo, "usage")
 		}
 		reply, err = w.d.Undoer.Undo(hctx, UndoRequest{WorkspaceID: u.WorkspaceID, RunID: id, Actor: actor, CorrelationID: corr})
+	case "/prefs", "/template":
+		return w.reportCommand(hctx, u, to)
 	default:
 		reply, err = w.d.Commands.TriggerCommand(hctx, CommandRequest{
 			WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, UpdateID: u.UpdateID,
@@ -301,6 +307,8 @@ func (w *InboxWorker) helpText(ctx context.Context, workspaceID string) string {
 	b.WriteString("Lệnh có sẵn:\n")
 	b.WriteString("/help: danh sách lệnh\n")
 	b.WriteString("/trace <run id hoặc task> [item]: xem một lần chạy\n")
+	b.WriteString("/prefs [short|normal|detailed]: tùy chọn báo cáo\n")
+	b.WriteString("/template <kind> [reset]: mẫu báo cáo\n")
 	b.WriteString("/undo <run id>: hoàn tác một lần chạy")
 	if w.d.Defs == nil {
 		return b.String()
@@ -409,6 +417,9 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 
 func (w *InboxWorker) freeText(ctx context.Context, u InboundUpdate, to ChatRef, actor, corr string) outcome {
 	nonce := strings.TrimSpace(u.Args)
+	if strings.HasPrefix(nonce, templateReplyPrefix) {
+		return w.reportTemplateReply(ctx, u, to)
+	}
 	if nonce == "" {
 		return w.reply(ctx, to, msgHint, "")
 	}

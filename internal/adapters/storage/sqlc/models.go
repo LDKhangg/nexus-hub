@@ -336,6 +336,18 @@ type ReportTemplate struct {
 	UpdatedAt    pgtype.Timestamptz
 }
 
+type ReportTemplatePrompt struct {
+	ID           pgtype.UUID
+	UserID       pgtype.UUID
+	WorkspaceID  pgtype.UUID
+	MessageID    int64
+	BehaviorName pgtype.Text
+	Kind         string
+	PendingBody  pgtype.Text
+	ExpiresAt    pgtype.Timestamptz
+	CreatedAt    pgtype.Timestamptz
+}
+
 type RunItem struct {
 	ID            int64
 	WorkspaceID   pgtype.UUID

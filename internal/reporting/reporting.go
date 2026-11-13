@@ -1,7 +1,14 @@
 // Package reporting defines report preference and template contracts.
 package reporting
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrTemplatePromptNotFound means a Telegram reply did not target a live
+// report-template prompt.
+var ErrTemplatePromptNotFound = errors.New("report template prompt not found")
 
 // Style controls the amount of detail in a report.
 type Style string
@@ -11,6 +18,25 @@ const (
 	StyleNormal   Style = "normal"
 	StyleDetailed Style = "detailed"
 )
+
+// ParseKind validates an owner-customizable report kind.
+func ParseKind(value string) (Kind, error) {
+	kind := Kind(value)
+	switch kind {
+	case KindPRApprove, KindPRSkipped, KindVerdictUnavailable, KindMention, KindNotify, KindFYI, KindDigest, KindFailure:
+		return kind, nil
+	default:
+		return "", errors.New("invalid report kind; valid kinds: pr_approve, pr_skipped, verdict_unavailable, mention, notify, fyi, digest, failure")
+	}
+}
+
+// Valid reports whether preferences contain only supported values.
+func (p Prefs) Valid() bool {
+	if p.Style != StyleShort && p.Style != StyleNormal && p.Style != StyleDetailed {
+		return false
+	}
+	return p.Language == "" || p.Language == "vi" || p.Language == "en"
+}
 
 // Kind identifies an owner-customizable report template.
 type Kind string

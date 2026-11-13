@@ -18,6 +18,7 @@ import (
 
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/people"
+	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/secrets"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/labstack/echo/v4"
@@ -29,6 +30,12 @@ const TelegramSecretHeader = "X-Telegram-Bot-Api-Secret-Token"
 // AnswerStager stages a free-text reply on the approval waiting for it.
 type AnswerStager interface {
 	StageAnswer(ctx context.Context, workspaceID string, messageID int64, answer string, now time.Time) (string, error)
+}
+
+// TemplateReplyStager keeps an owner template reply out of the generic
+// Telegram update row and returns a short opaque reference for the worker.
+type TemplateReplyStager interface {
+	StageTemplateReply(ctx context.Context, workspaceID string, messageID int64, body string, now time.Time) (string, error)
 }
 
 // TelegramHandler receives Telegram updates for the owner. It verifies the
@@ -48,14 +55,19 @@ type TelegramHandler struct {
 	secrets      SecretResolver
 	inbox        behavior.InboxStore
 	answers      AnswerStager
+	templates    TemplateReplyStager
 	ownerChatID  int64
 	ownerUserID  int64
 	now          func() time.Time
 	ignored      atomic.Int64
 }
 
-func NewTelegramHandler(integrations WebhookIntegrationLookup, resolver SecretResolver, inbox behavior.InboxStore, answers AnswerStager, ownerChatID int64) *TelegramHandler {
-	return &TelegramHandler{integrations: integrations, secrets: resolver, inbox: inbox, answers: answers, ownerChatID: ownerChatID, now: time.Now}
+func NewTelegramHandler(integrations WebhookIntegrationLookup, resolver SecretResolver, inbox behavior.InboxStore, answers AnswerStager, ownerChatID int64, templates ...TemplateReplyStager) *TelegramHandler {
+	h := &TelegramHandler{integrations: integrations, secrets: resolver, inbox: inbox, answers: answers, ownerChatID: ownerChatID, now: time.Now}
+	if len(templates) > 0 {
+		h.templates = templates[0]
+	}
+	return h
 }
 
 type tgUser struct {
@@ -288,8 +300,19 @@ func (h *TelegramHandler) normalize(ctx context.Context, workspaceID string, upd
 		// The answer is staged on the approval, never in the update row.
 		nonce, err := h.answers.StageAnswer(ctx, workspaceID, m.ReplyTo.MessageID, text, h.now())
 		if errors.Is(err, behavior.ErrNotFound) {
-			u.Note = behavior.NoteNoOpenReply
-			return u, true, nil
+			if h.templates == nil {
+				u.Note = behavior.NoteNoOpenReply
+				return u, true, nil
+			}
+			nonce, err = h.templates.StageTemplateReply(ctx, workspaceID, m.ReplyTo.MessageID, text, h.now())
+			if errors.Is(err, reporting.ErrTemplatePromptNotFound) {
+				u.Note = behavior.NoteNoOpenReply
+				return u, true, nil
+			}
+			if err == nil {
+				u.Args = "report-template:" + nonce
+				return u, true, nil
+			}
 		}
 		if err != nil {
 			return u, true, err
