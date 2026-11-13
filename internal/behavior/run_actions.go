@@ -508,7 +508,7 @@ func (e *Engine) runTelegram(ctx context.Context, rc RunContext, env runActionEn
 	if err != nil {
 		return RunActionOutcome{}, true, nil
 	}
-	id, err := e.sendOnce(ctx, rc.Run, fmt.Sprintf("run_action:%d", i), chat, OutMessage{Text: text})
+	id, err := e.sendOnce(ctx, rc.Run, fmt.Sprintf("run_action:%d", i), chat, e.withAliasButton(ctx, rc, OutMessage{Text: text}))
 	switch {
 	case err != nil && id == 0:
 		if env.final {

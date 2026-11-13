@@ -194,7 +194,8 @@ func buildBehaviorEngine(pool *pgxpool.Pool, s settings.Settings, store *storage
 		Decisions: behavior.MemoryRecorder{Store: store},
 		Digests:   store,
 		Redactor:  redactor,
-		Reports:   reporting.NewRenderer(reporting.NewPostgresStore(pool), nil),
+		Reports:   reporting.NewRenderer(reporting.NewPostgresStore(pool), ag.people),
+		People:    ag.people,
 	}, behavior.ActionSettings{OwnerClickUpUserID: s.OwnerClickUpUserID, RequestTimeout: s.NoticeRequestTimeout})
 	if err != nil {
 		return nil, nil, errors.New("behavior action engine startup failed")

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/google/uuid"
 )
 
@@ -30,6 +31,7 @@ const (
 	msgNoAnswer     = "Không thấy câu trả lời, hãy gửi lại."
 	usageTrace      = "Cú pháp: /trace <run id hoặc task> [item]"
 	usageUndo       = "Cú pháp: /undo <run id>"
+	usageAlias      = "Cú pháp: /alias <platform:id> <tên>"
 )
 
 // InboxSettings tunes the inbound worker.
@@ -52,6 +54,7 @@ type InboxDeps struct {
 	Tracer    Tracer
 	Undoer    Undoer
 	Callbacks CallbackHandler
+	People    people.Directory
 }
 
 // InboxWorker processes stored Telegram updates: built-in commands,
@@ -285,6 +288,40 @@ func (w *InboxWorker) command(ctx context.Context, u InboundUpdate, to ChatRef, 
 			return w.reply(ctx, to, usageUndo, "usage")
 		}
 		reply, err = w.d.Undoer.Undo(hctx, UndoRequest{WorkspaceID: u.WorkspaceID, RunID: id, Actor: actor, CorrelationID: corr})
+	case "/contacts":
+		if w.d.People == nil {
+			err = ErrNotAvailable
+			break
+		}
+		contacts, listErr := w.d.People.List(hctx, u.WorkspaceID, "", args, 10)
+		if listErr != nil {
+			err = listErr
+			break
+		}
+		if len(contacts) == 0 {
+			reply = msgNotFound
+			break
+		}
+		var lines []string
+		for _, contact := range contacts {
+			lines = append(lines, contact.Name+" · "+contact.ID)
+		}
+		reply = strings.Join(lines, "\n")
+	case "/alias":
+		if w.d.People == nil {
+			err = ErrNotAvailable
+			break
+		}
+		ref, name, ok := strings.Cut(args, " ")
+		if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(name) == "" {
+			return w.reply(ctx, to, usageAlias, "usage")
+		}
+		contact, aliasErr := w.d.People.SetAlias(hctx, u.WorkspaceID, ref, name)
+		if aliasErr != nil {
+			err = aliasErr
+		} else {
+			reply = "Đã đặt tên: " + contact.Name
+		}
 	default:
 		reply, err = w.d.Commands.TriggerCommand(hctx, CommandRequest{
 			WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, UpdateID: u.UpdateID,
@@ -302,6 +339,7 @@ func (w *InboxWorker) helpText(ctx context.Context, workspaceID string) string {
 	b.WriteString("/help: danh sách lệnh\n")
 	b.WriteString("/trace <run id hoặc task> [item]: xem một lần chạy\n")
 	b.WriteString("/undo <run id>: hoàn tác một lần chạy")
+	b.WriteString("\n/contacts [tìm kiếm]: danh bạ\n/alias <platform:id> <tên>: đặt tên")
 	if w.d.Defs == nil {
 		return b.String()
 	}

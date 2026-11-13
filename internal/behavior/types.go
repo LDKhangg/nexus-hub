@@ -99,6 +99,8 @@ const (
 	// ApprovalFeedbackReason waits for the owner's optional free-text reason
 	// for a 👎.
 	ApprovalFeedbackReason ApprovalKind = "feedback_reason"
+	// ApprovalContactAlias waits for the owner's free-text name for an account.
+	ApprovalContactAlias ApprovalKind = "contact_alias"
 )
 
 // Decision is an approval's outcome.

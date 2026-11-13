@@ -264,8 +264,10 @@ func (e *Engine) flushBatch(ctx context.Context, b *DigestBatch) (bool, error) {
 		sb.WriteString("\n" + head + " (" + t.runRef(sec.rc.Doc.Name, sec.rc.Run.ID) + ")\n")
 		sb.WriteString(summaryLines(t, sec.items, sec.withStatus, per))
 	}
+	first := sections[0].rc
 	text, err := e.d.Reports.Render(ctx, reporting.Report{
 		Kind: reporting.KindDigest, UserID: reporting.DefaultOwnerUserID, WorkspaceID: ws, Language: p.Language,
+		Platform: "clickup", ExternalID: first.Trigger.SenderID,
 		Values: reporting.Values{Outcome: t.batchHead(total), AISummary: strings.TrimSpace(sb.String()), RunID: fmt.Sprint(b.ID)},
 	})
 	if err != nil {
@@ -285,6 +287,7 @@ func (e *Engine) flushBatch(ctx context.Context, b *DigestBatch) (bool, error) {
 		}
 		msg.Buttons = [][]Button{e.feedbackRow(t, fb.Nonce)}
 	}
+	msg = e.withAliasButton(ctx, first, msg)
 	sctx, cancel := context.WithTimeout(ctx, e.s.RequestTimeout)
 	id, err := e.d.Messenger.SendMessage(sctx, b.Chat, msg)
 	cancel()

@@ -57,6 +57,15 @@ GROUP BY c.id
 ORDER BY COALESCE(c.display_name, min(a.platform_name), min(a.username), c.id::text), c.id
 LIMIT sqlc.arg(max_rows)::int OFFSET sqlc.arg(row_offset)::int;
 
+-- name: GetContact :one
+SELECT * FROM public.contacts
+WHERE workspace_id = sqlc.arg(workspace_id)::uuid AND id = sqlc.arg(contact_id)::uuid;
+
+-- name: ListContactAccounts :many
+SELECT * FROM public.contact_accounts
+WHERE workspace_id = sqlc.arg(workspace_id)::uuid AND contact_id = sqlc.arg(contact_id)::uuid
+ORDER BY platform, external_id;
+
 -- name: SetContactAlias :one
 UPDATE public.contacts
 SET display_name = sqlc.narg(display_name)::text, updated_at = now()

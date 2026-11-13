@@ -112,6 +112,7 @@ func run() error {
 		Inbox: behaviors, Approvals: behaviors, Defs: behaviors, Messenger: messenger,
 		Commands: commands, Undoer: engine, Callbacks: engine,
 		Tracer: &behavior.TraceService{Store: behaviors, Profiles: behaviors},
+		People: ag.people,
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
 	workspaces, err := storage.NewWorkspaceRepository(pool)
 	if err != nil {
