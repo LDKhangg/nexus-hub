@@ -27,14 +27,43 @@ type p4Messenger struct {
 	removed []int64
 	toasts  []string
 	nextID  int64
+	// sentCh, when set, receives every sent message (buffered by the test).
+	sentCh chan OutMessage
+	// sendErr, when set, fails every SendMessage.
+	sendErr error
 }
 
 func (m *p4Messenger) SendMessage(_ context.Context, _ ChatRef, msg OutMessage) (int64, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	if m.sendErr != nil {
+		err := m.sendErr
+		m.mu.Unlock()
+		return 0, err
+	}
 	m.nextID++
 	m.sent = append(m.sent, msg)
-	return 1000 + m.nextID, nil
+	id, ch := 1000+m.nextID, m.sentCh
+	m.mu.Unlock()
+	if ch != nil {
+		ch <- msg
+	}
+	return id, nil
+}
+
+func (m *p4Messenger) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.sent)
+}
+
+func (m *p4Messenger) texts() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.sent))
+	for _, s := range m.sent {
+		out = append(out, s.Text)
+	}
+	return out
 }
 
 func (m *p4Messenger) RemoveButtons(_ context.Context, _ ChatRef, id int64) error {
@@ -176,6 +205,7 @@ type p4Directory struct {
 	listCalls []string
 	aliases   []string // "<workspace>|<ref>|<name>"
 	hasAlias  bool
+	aliasErr  error
 }
 
 func (d *p4Directory) DisplayName(context.Context, string, string, string) (string, bool) {
@@ -195,6 +225,9 @@ func (d *p4Directory) SetAlias(_ context.Context, ws, ref, name string) (people.
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.aliases = append(d.aliases, ws+"|"+ref+"|"+name)
+	if d.aliasErr != nil {
+		return people.Contact{}, d.aliasErr
+	}
 	return people.Contact{ID: "c-1", Name: people.CleanDisplayName(name), Alias: people.CleanDisplayName(name)}, nil
 }
 func (d *p4Directory) Merge(context.Context, string, string, string) (people.Contact, error) {
@@ -274,21 +307,41 @@ type p4LLM struct {
 	replies []string
 	err     error
 	reqs    []domain.LLMRequest
+	// entered, when set, gets one signal per call (buffered by the test).
+	entered chan struct{}
+	// release, when set, holds every call until it is closed or the call
+	// context ends; ctxErr (or ctx.Err()) is then returned.
+	release chan struct{}
+	ctxErr  error
 }
 
-func (l *p4LLM) Generate(_ context.Context, req *domain.LLMRequest) (*domain.LLMResponse, error) {
+func (l *p4LLM) Generate(ctx context.Context, req *domain.LLMRequest) (*domain.LLMResponse, error) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	cp := *req
 	cp.Messages = append([]domain.Message(nil), req.Messages...)
 	l.reqs = append(l.reqs, cp)
-	if l.err != nil {
-		return nil, l.err
+	i := len(l.reqs) - 1
+	err, entered, release, ctxErr := l.err, l.entered, l.release, l.ctxErr
+	l.mu.Unlock()
+	if entered != nil {
+		entered <- struct{}{}
+	}
+	if release != nil {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			if ctxErr != nil {
+				return nil, ctxErr
+			}
+			return nil, ctx.Err()
+		}
+	}
+	if err != nil {
+		return nil, err
 	}
 	if len(l.replies) == 0 {
 		return &domain.LLMResponse{Text: ""}, nil
 	}
-	i := len(l.reqs) - 1
 	if i >= len(l.replies) {
 		i = len(l.replies) - 1
 	}
@@ -346,6 +399,9 @@ func newP4Env(replies ...string) *p4Env {
 	e.assistant = &Assistant{Models: models, Model: "triage-model", Runs: e.runs, Inbox: e.inbox}
 	e.w = NewInboxWorker(InboxDeps{Approvals: e.ap, Messenger: e.msg, Tracer: e.tracer, People: e.dir, Reports: e.rep, Assistant: e.assistant}, InboxSettings{})
 	e.w.now = func() time.Time { return e.clock }
+	// The "working" notice is tested on its own (TC-R5d); elsewhere it
+	// would only add a message.
+	e.w.assistantNoticeAfter = time.Hour
 	return e
 }
 
@@ -354,14 +410,36 @@ func (e *p4Env) update(chat int64, kind UpdateKind, command, args string) Inboun
 }
 
 // sayIn stages owner text like the webhook does and lets the worker
-// handle the resulting update.
+// handle the resulting update. When the inbox step queues an assistant job,
+// it checks that the step sent nothing and did not call the model, then runs
+// the job like the assistant goroutine does and returns the job's outcome.
 func (e *p4Env) sayIn(t *testing.T, chat int64, text string) outcome {
 	t.Helper()
 	key, err := e.inbox.StageAssistantText(p4WS, text, e.clock)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return e.w.dispatch(context.Background(), e.update(chat, UpdateText, "", AssistantTextPrefix+key), "corr")
+	sent, calls := e.msg.count(), e.llm.calls()
+	out := e.w.dispatch(context.Background(), e.update(chat, UpdateText, "", AssistantTextPrefix+key), "corr")
+	if out.code != "assistant_queued" {
+		return out
+	}
+	if e.msg.count() != sent || e.llm.calls() != calls {
+		t.Fatalf("inbox step sent %d messages and made %d model calls; want none", e.msg.count()-sent, e.llm.calls()-calls)
+	}
+	return e.runQueued(t)
+}
+
+// runQueued takes the next queued assistant job and runs it.
+func (e *p4Env) runQueued(t *testing.T) outcome {
+	t.Helper()
+	select {
+	case job := <-e.w.assistantJobs:
+		return e.w.assistantJob(context.Background(), job)
+	default:
+		t.Fatal("no assistant job queued")
+		return outcome{}
+	}
 }
 
 func (e *p4Env) say(t *testing.T, text string) outcome { return e.sayIn(t, 77, text) }
@@ -409,13 +487,27 @@ func TestPhase4TelegramAssistant(t *testing.T) {
 		}
 		store := &p4InboxStore{u: &u}
 		e.w.d.Inbox = store
-		var logs bytes.Buffer
+		logs := &p4LogBuffer{jobLogged: make(chan struct{})}
 		prev := log.Writer()
-		log.SetOutput(&logs)
+		log.SetOutput(logs)
 		defer log.SetOutput(prev)
 		if worked, err := e.w.processNext(context.Background()); !worked || err != nil {
 			t.Fatalf("processNext worked=%v err=%v", worked, err)
 		}
+		// The inbox step only queues: it finished the update and sent nothing.
+		if store.code != "assistant_queued" || e.llm.calls() != 0 || e.msg.count() != 0 {
+			t.Fatalf("inbox step: code=%q calls=%d sent=%d", store.code, e.llm.calls(), e.msg.count())
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		stopped := make(chan struct{})
+		go func() { defer close(stopped); e.w.runAssistant(ctx) }()
+		select {
+		case <-logs.jobLogged:
+		case <-time.After(10 * time.Second):
+			t.Fatal("assistant job did not finish")
+		}
+		cancel()
+		<-stopped
 		log.SetOutput(prev)
 		if e.llm.calls() != 1 || !strings.Contains(e.llm.reqs[0].Messages[0].Text, marker) {
 			t.Fatal("model did not receive the owner's text")
@@ -433,13 +525,13 @@ func TestPhase4TelegramAssistant(t *testing.T) {
 				t.Fatalf("payload keeps extra field %q: %s", k, row.Payload)
 			}
 		}
+		if !strings.Contains(logs.String(), "code=assistant_alias") {
+			t.Fatalf("job log line missing: %q", logs.String())
+		}
 		for _, stored := range []string{string(row.Payload), row.Resource, row.Action, store.code, logs.String()} {
 			if strings.Contains(stored, marker) || strings.Contains(stored, "đặt tên clickup") {
 				t.Fatalf("owner text stored or logged: %q", stored)
 			}
-		}
-		if store.code != "assistant_alias" {
-			t.Fatalf("finish code=%q", store.code)
 		}
 		if _, ok := e.inbox.take(p4WS, key, e.clock); ok {
 			t.Fatal("staged text was not removed after it was read")
@@ -451,7 +543,12 @@ func TestPhase4TelegramAssistant(t *testing.T) {
 		e := newP4Env(decisionJSON(t, "answer", nil, "Chào bạn!", 0.9))
 		key, _ := e.inbox.StageAssistantText(p4WS, "chào", e.clock)
 		u := e.update(77, UpdateText, "", AssistantTextPrefix+key)
-		e.w.dispatch(context.Background(), u, "corr")
+		if out := e.w.dispatch(context.Background(), u, "corr"); out.code != "assistant_queued" {
+			t.Fatalf("first read=%+v", out)
+		}
+		if out := e.runQueued(t); out.code != "assistant_answer" {
+			t.Fatalf("job=%+v", out)
+		}
 		if out := e.w.dispatch(context.Background(), u, "corr"); out.code != "assistant_text_gone" || e.msg.last(t).Text != msgAssistantGone {
 			t.Fatalf("second read=%+v text=%q", out, e.msg.last(t).Text)
 		}
@@ -497,17 +594,17 @@ func TestPhase4TelegramAssistant(t *testing.T) {
 		e = newP4Env()
 		e.llm.err = errors.New("provider down: secret-token-123")
 		out = e.say(t, "chào")
-		if e.llm.calls() != 1 || e.msg.last(t).Text != msgAssistantNotUnderstood || out.code != "assistant_fallback" || strings.Contains(e.msg.last(t).Text, "secret") {
+		if e.llm.calls() != 1 || e.msg.last(t).Text != msgFailed || out.code != "assistant_model_error" || strings.Contains(e.msg.last(t).Text, "secret") {
 			t.Fatalf("model error: calls=%d out=%+v text=%q", e.llm.calls(), out, e.msg.last(t).Text)
 		}
 
 		e = newP4Env()
 		e.assistant.Models = func(context.Context, string) (domain.LLMProvider, error) { return nil, nil }
-		if out := e.say(t, "chào"); out.code != "assistant_fallback" || e.msg.last(t).Text != msgAssistantNotUnderstood {
+		if out := e.say(t, "chào"); out.code != "assistant_model_error" || e.msg.last(t).Text != msgFailed {
 			t.Fatalf("no provider: %+v %q", out, e.msg.last(t).Text)
 		}
 		e.assistant.Models = func(context.Context, string) (domain.LLMProvider, error) { return nil, errors.New("not configured") }
-		if out := e.say(t, "chào"); out.code != "assistant_fallback" {
+		if out := e.say(t, "chào"); out.code != "assistant_model_error" || e.msg.last(t).Text != msgFailed {
 			t.Fatalf("provider error: %+v", out)
 		}
 	})
@@ -780,6 +877,32 @@ func TestPhase4TelegramAssistant(t *testing.T) {
 			t.Fatalf("assistant without models: %+v text=%q", out, e.msg.last(t).Text)
 		}
 	})
+}
+
+// p4LogBuffer captures log output and signals once the assistant job
+// log line is written.
+type p4LogBuffer struct {
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	jobLogged chan struct{}
+	signalled bool
+}
+
+func (b *p4LogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n, err := b.buf.Write(p)
+	if !b.signalled && strings.Contains(b.buf.String(), "telegram assistant:") {
+		b.signalled = true
+		close(b.jobLogged)
+	}
+	return n, err
+}
+
+func (b *p4LogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 type p4InboxStore struct {
