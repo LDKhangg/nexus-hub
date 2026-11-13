@@ -53,10 +53,18 @@ type Event struct {
 	// Mentioned is true when the comment or chat message tags the owner,
 	// as read by the source parser or chat poller from trusted tag data.
 	Mentioned bool
+	// TaggedUserIDs are the ClickUp user IDs a comment tags, read by the
+	// source parser from the comment's tag parts (at most
+	// MaxTaggedUserIDs). MatchEvent sets Mentioned when the owner is
+	// among them.
+	TaggedUserIDs []string
 	// ChannelName is the chat channel's name (channel messages), for
 	// reports; never message text.
 	ChannelName string
 }
+
+// MaxTaggedUserIDs caps Event.TaggedUserIDs.
+const MaxTaggedUserIDs = 50
 
 // EventFromNormalized maps a normalized ClickUp event to a trigger event.
 // ok is false for an event no trigger type takes.
@@ -87,6 +95,14 @@ func EventFromNormalized(e domain.NormalizedEvent) (Event, bool) {
 		}
 	case domain.EventCommandPosted:
 		ev.Type = TriggerCommentAdded
+		for _, id := range strings.Split(e.Metadata["tagged_user_ids"], ",") {
+			if len(ev.TaggedUserIDs) == MaxTaggedUserIDs {
+				break
+			}
+			if id = strings.TrimSpace(id); id != "" {
+				ev.TaggedUserIDs = append(ev.TaggedUserIDs, id)
+			}
+		}
 	default:
 		return Event{}, false
 	}
@@ -214,6 +230,14 @@ func resolveEnabled(versions []Version) []Match {
 func MatchEvent(ev Event, versions []Version, ownerClickUpID string) []Match {
 	if ev.FromOwnBot || ev.Type == "" {
 		return nil
+	}
+	if !ev.Mentioned && ownerClickUpID != "" {
+		for _, id := range ev.TaggedUserIDs {
+			if id == ownerClickUpID {
+				ev.Mentioned = true
+				break
+			}
+		}
 	}
 	var out []Match
 	for _, m := range resolveEnabled(versions) {

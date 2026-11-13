@@ -47,6 +47,73 @@ func (f *flexID) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// maxTaggedUsers caps the tagged user IDs read from one comment.
+const maxTaggedUsers = 50
+
+// commentPart is one part of a ClickUp comment body. Parts of type "tag"
+// (and the rarer "user_mention") name a tagged user in user.id.
+type commentPart struct {
+	Type string `json:"type"`
+	User struct {
+		ID flexID `json:"id"`
+	} `json:"user"`
+}
+
+// commentParts reads a comment body's parts and never fails: a body that
+// is not an array of parts reads as no parts, so an unexpected shape
+// cannot reject an otherwise valid callback.
+type commentParts []commentPart
+
+func (c *commentParts) UnmarshalJSON(b []byte) error {
+	*c = nil
+	var raw []json.RawMessage
+	if json.Unmarshal(b, &raw) != nil {
+		return nil
+	}
+	for _, r := range raw {
+		var part commentPart
+		if json.Unmarshal(r, &part) == nil {
+			*c = append(*c, part)
+		}
+	}
+	return nil
+}
+
+// taggedUserIDs returns the distinct user IDs tagged by the parts, in
+// order, at most maxTaggedUsers. IDs that are not plain identifiers are
+// dropped. The comment text is never read here.
+func (c commentParts) taggedUserIDs() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range c {
+		if part.Type != "tag" && part.Type != "user_mention" {
+			continue
+		}
+		id := string(part.User.ID)
+		if !validUserID(id) || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+		if len(out) == maxTaggedUsers {
+			break
+		}
+	}
+	return out
+}
+
+func validUserID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for _, r := range id {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
 // historyValue is a history item's before/after value: a status object for
 // status changes, a user object for assignee changes.
 type historyValue struct {
@@ -73,9 +140,10 @@ type ClickUpWebhookPayload struct {
 		Before   *historyValue `json:"before"`
 		After    *historyValue `json:"after"`
 		Comment  struct {
-			ID          string      `json:"id"`
-			TextContent string      `json:"text_content"`
-			User        webhookUser `json:"user"`
+			ID          string       `json:"id"`
+			TextContent string       `json:"text_content"`
+			Parts       commentParts `json:"comment"`
+			User        webhookUser  `json:"user"`
 		} `json:"comment"`
 	} `json:"history_items"`
 }
@@ -152,6 +220,9 @@ func (p *ClickUpParser) Parser(raw []byte) ([]domain.NormalizedEvent, error) {
 				return nil, errors.New("clickup: missing comment identity")
 			}
 			actor, content, messageID = item.Comment.User, item.Comment.TextContent, "comment:"+item.Comment.ID
+			if tagged := item.Comment.Parts.taggedUserIDs(); len(tagged) > 0 {
+				extra["tagged_user_ids"] = strings.Join(tagged, ",")
+			}
 		default:
 			if item.After == nil || item.After.Status == "" {
 				return nil, errors.New("clickup: missing new status")
