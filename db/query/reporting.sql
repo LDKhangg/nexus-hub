@@ -60,3 +60,31 @@ WHERE user_id = sqlc.arg(user_id)::uuid
   AND workspace_id = sqlc.arg(workspace_id)::uuid
   AND behavior_name IS NOT DISTINCT FROM sqlc.narg(behavior_name)::text
   AND kind = sqlc.arg(kind);
+
+-- name: CreateReportTemplatePrompt :exec
+INSERT INTO public.report_template_prompts(
+  user_id, workspace_id, message_id, behavior_name, kind, expires_at
+) VALUES (
+  sqlc.arg(user_id)::uuid, sqlc.arg(workspace_id)::uuid, sqlc.arg(message_id)::bigint,
+  sqlc.narg(behavior_name)::text, sqlc.arg(kind), sqlc.arg(expires_at)::timestamptz
+)
+ON CONFLICT (workspace_id, message_id) DO UPDATE SET
+  user_id = EXCLUDED.user_id, behavior_name = EXCLUDED.behavior_name,
+  kind = EXCLUDED.kind, pending_body = NULL, expires_at = EXCLUDED.expires_at,
+  created_at = now();
+
+-- name: StageReportTemplateReply :one
+UPDATE public.report_template_prompts
+SET pending_body = sqlc.arg(body)
+WHERE workspace_id = sqlc.arg(workspace_id)::uuid
+  AND message_id = sqlc.arg(message_id)::bigint
+  AND (pending_body IS NULL OR pending_body = sqlc.arg(body))
+  AND expires_at > sqlc.arg(at_time)::timestamptz
+RETURNING id;
+
+-- name: ConsumeReportTemplateReply :one
+DELETE FROM public.report_template_prompts
+WHERE workspace_id = sqlc.arg(workspace_id)::uuid
+  AND id = sqlc.arg(id)::uuid
+  AND pending_body IS NOT NULL
+RETURNING user_id, behavior_name, kind, pending_body;

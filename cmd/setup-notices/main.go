@@ -51,7 +51,7 @@ func commandFlags(name string) *flag.FlagSet {
 
 func runCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.Writer, lookup func(string) (string, bool)) error {
 	if len(args) == 0 {
-		return errors.New("usage: setup-notices init|bind-webhook|inspect|retry-failed|master-key|secret|migrate-secrets|settings|enable-agent|disable-agent|github-account|github-repo|github-check|behavior|telegram|trace|runs|profile|memory|llm|source|contact")
+		return errors.New("usage: setup-notices init|bind-webhook|inspect|retry-failed|master-key|secret|migrate-secrets|settings|enable-agent|disable-agent|github-account|github-repo|github-check|behavior|telegram|trace|runs|profile|memory|llm|source|contact|report-prefs|report-template")
 	}
 	switch args[0] {
 	case "init":
@@ -90,6 +90,8 @@ func runCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.W
 		return sourceCommand(ctx, pool, args[1:], out)
 	case "contact":
 		return contactCommand(ctx, pool, args[1:], out)
+	case "report-prefs", "report-template":
+		return reportCommand(ctx, pool, args[0], args[1:], out)
 	case "github-check":
 		return githubCheck(ctx, pool, args[1:], out, lookup)
 	case "bind-webhook":
