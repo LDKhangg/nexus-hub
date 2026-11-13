@@ -7,6 +7,7 @@ import (
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/sources/clickupchat"
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
+	"github.com/LDKhangg/nexus-hub/internal/people"
 )
 
 // Channel member directory defaults.
@@ -46,6 +47,7 @@ type ChannelMembersAPI interface {
 type ChannelMemberDirectory struct {
 	API     ChannelMembersAPI
 	Secrets Secrets
+	People  people.Resolver
 	// TTL is how long names are kept; 0 means DefaultMemberTTL.
 	TTL time.Duration
 	// Pages caps the pages one lookup reads; 0 means
@@ -117,6 +119,9 @@ func (d *ChannelMemberDirectory) ChannelMemberName(ctx context.Context, workspac
 		for _, m := range p.Items {
 			if m.ID == "" {
 				continue
+			}
+			if d.People != nil {
+				_ = d.People.Sighting(ctx, people.Sighting{WorkspaceID: workspaceID, Platform: "clickup", ExternalID: m.ID, PlatformName: m.Name, Username: m.Username, Source: "auto"})
 			}
 			name := behavior.CleanDisplayName(m.Name)
 			if name == "" {

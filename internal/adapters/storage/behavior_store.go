@@ -11,6 +11,7 @@ import (
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
+	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -21,15 +22,20 @@ import (
 // BehaviorStore persists the behavior engine's definitions, runs, items,
 // approvals, inbound updates, profile and decision memory.
 type BehaviorStore struct {
-	pool *pgxpool.Pool
-	q    *sqlc.Queries
+	pool   *pgxpool.Pool
+	q      *sqlc.Queries
+	people *PeopleRepository
 }
 
 func NewBehaviorStore(pool *pgxpool.Pool) (*BehaviorStore, error) {
 	if pool == nil {
 		return nil, errors.New("behavior store requires pool")
 	}
-	return &BehaviorStore{pool: pool, q: sqlc.New(pool)}, nil
+	directory, err := NewPeopleRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	return &BehaviorStore{pool: pool, q: sqlc.New(pool), people: directory}, nil
 }
 
 var (
@@ -39,7 +45,18 @@ var (
 	_ behavior.InboxStore      = (*BehaviorStore)(nil)
 	_ behavior.ProfileStore    = (*BehaviorStore)(nil)
 	_ behavior.MemoryStore     = (*BehaviorStore)(nil)
+	_ people.Resolver          = (*BehaviorStore)(nil)
 )
+
+// DisplayName resolves a workspace account through the shared store's people directory.
+func (s *BehaviorStore) DisplayName(ctx context.Context, workspaceID, platform, externalID string) (string, bool) {
+	return s.people.DisplayName(ctx, workspaceID, platform, externalID)
+}
+
+// Sighting records a workspace account observation.
+func (s *BehaviorStore) Sighting(ctx context.Context, sighting people.Sighting) error {
+	return s.people.Sighting(ctx, sighting)
+}
 
 // --- helpers ---
 

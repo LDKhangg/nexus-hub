@@ -13,6 +13,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/agent"
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
 	"github.com/LDKhangg/nexus-hub/internal/domain"
+	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
 
@@ -135,6 +136,9 @@ type RunWorkerDeps struct {
 	// channel for a chat-triggered run's message; nil gives none (Members
 	// is still tried).
 	ChannelMembers ChannelMemberDirectory
+	// People is the durable workspace directory consulted before platform
+	// lookups for sender names.
+	People people.Resolver
 }
 
 // ChatMessageReader reads the text of one ClickUp Chat message at run time

@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"regexp"
-	"strings"
-	"unicode"
+
+	"github.com/LDKhangg/nexus-hub/internal/people"
 )
 
 // This file adds the triggering comment of a comment-triggered run to the
@@ -17,7 +17,7 @@ const CommentTool = "clickup_comment"
 
 // MaxDisplayNameRunes caps a display name (a user or channel name) in a
 // context fragment.
-const MaxDisplayNameRunes = 100
+const MaxDisplayNameRunes = people.MaxDisplayNameRunes
 
 // commentIDRe accepts ClickUp comment IDs.
 var commentIDRe = regexp.MustCompile(`^[0-9A-Za-z_-]{1,64}$`)
@@ -65,6 +65,9 @@ type ChannelMemberDirectory interface {
 // members (the ChannelMemberDirectory), then from the workspace's member
 // directory, whose listing can be empty.
 func (w *RunWorker) chatSenderName(ctx context.Context, workspaceID, tokenRef string, t TriggerData) string {
+	if name := w.peopleName(ctx, workspaceID, "clickup", t.SenderID); name != "" {
+		return name
+	}
 	if w.d.ChannelMembers != nil && tokenRef != "" && chatTeamIDRe.MatchString(t.TeamID) && chatIDRe.MatchString(t.ChannelID) && chatTeamIDRe.MatchString(t.SenderID) {
 		if name, ok := w.d.ChannelMembers.ChannelMemberName(ctx, workspaceID, tokenRef, t.TeamID, t.ChannelID, t.SenderID); ok {
 			if name = CleanDisplayName(name); name != "" {
@@ -76,6 +79,17 @@ func (w *RunWorker) chatSenderName(ctx context.Context, workspaceID, tokenRef st
 		}
 	}
 	return w.memberName(ctx, workspaceID, tokenRef, t.TeamID, t.SenderID)
+}
+
+func (w *RunWorker) peopleName(ctx context.Context, workspaceID, platform, externalID string) string {
+	if w.d.People == nil || externalID == "" {
+		return ""
+	}
+	name, ok := w.d.People.DisplayName(ctx, workspaceID, platform, externalID)
+	if !ok {
+		return ""
+	}
+	return CleanDisplayName(name)
 }
 
 // memberName is the cleaned display name of a ClickUp user, "" when
@@ -138,7 +152,10 @@ func (w *RunWorker) readTriggerComment(ctx context.Context, col *collector, toke
 	if sender == "" && chatTeamIDRe.MatchString(c.SenderID) {
 		sender = c.SenderID
 	}
-	name := CleanDisplayName(c.SenderName)
+	name := w.peopleName(ctx, run.WorkspaceID, "clickup", sender)
+	if name == "" {
+		name = CleanDisplayName(c.SenderName)
+	}
 	if name == "" {
 		name = w.memberName(ctx, run.WorkspaceID, tokenRef, teamID, sender)
 	}
@@ -163,30 +180,5 @@ func (w *RunWorker) readTriggerComment(ctx context.Context, col *collector, toke
 // become one space, the result is trimmed and capped at
 // MaxDisplayNameRunes runes.
 func CleanDisplayName(name string) string {
-	var b strings.Builder
-	n := 0
-	space := false
-	for _, r := range name {
-		if n >= MaxDisplayNameRunes {
-			break
-		}
-		if unicode.IsSpace(r) {
-			space = b.Len() > 0
-			continue
-		}
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == unicode.ReplacementChar {
-			continue
-		}
-		if space {
-			if n+1 >= MaxDisplayNameRunes {
-				break
-			}
-			b.WriteByte(' ')
-			n++
-			space = false
-		}
-		b.WriteRune(r)
-		n++
-	}
-	return b.String()
+	return people.CleanDisplayName(name)
 }
