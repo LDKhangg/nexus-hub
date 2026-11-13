@@ -224,13 +224,18 @@ func markerScript(t *testing.T) (script, marker string) {
 }
 
 func TestHardening_FsmonitorNotExecuted(t *testing.T) {
+	// TC-2 (TD3-4, Phase 3 REQ-21): the owner decided that repository
+	// program-valued config is refused, rather than merely neutralised.
 	reposDir, root := managedRepo(t, map[string]string{"a.txt": "a"})
 	script, marker := markerScript(t)
 	sh(t, root, "config", "core.fsmonitor", script)
 	sh(t, root, "config", "core.pager", script)
 	writeFile(t, root, "a.txt", "dirty")
 	ts := NewReadTools(newTestRunner(t), reposDir)
-	mustOK(t, findTool(t, ts, "git_status"), grant(true, ""), `{"repo":"acme/app"}`)
+	_, err := run(t, findTool(t, ts, "git_status"), grant(true, ""), `{"repo":"acme/app"}`)
+	wantCode(t, err, "unsafe_repo_config")
+	// git_log does not read the worktree and hardenedArgs neutralises both
+	// fsmonitor and pager, so it remains safe and usable.
 	mustOK(t, findTool(t, ts, "git_log"), grant(true, ""), `{"repo":"acme/app"}`)
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("fsmonitor/pager executed")

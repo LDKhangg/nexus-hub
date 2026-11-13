@@ -1,21 +1,26 @@
 // Package chatpoll is the ClickUp Chat poller: a service worker that reads
-// new direct messages of every ClickUp source whose workspace has an
-// enabled clickup.chat_message behavior, turns them into behavior events
+// new direct messages (and, when a behavior asks for them, channel
+// messages that tag the owner) of every ClickUp source whose workspace has
+// an enabled clickup.chat_message behavior, turns them into behavior events
 // and starts their runs. ClickUp sends no webhook for Chat, so it polls.
 //
 // Message content is untrusted: it is used only to extract pull request
-// references (behavior.ExtractPRRefs) and never leaves the poller, never
-// reaches a log, trigger data or an error. Logs carry codes and
-// workspace/integration IDs only.
+// references (behavior.ExtractPRRefs) and the numeric IDs of the users it
+// tags (TaggedUserIDs), and never leaves the poller, never reaches a log,
+// trigger data or an error. Channel names are cleaned and capped before
+// they reach trigger data. Logs carry codes and workspace/integration IDs
+// only.
 package chatpoll
 
 import (
 	"context"
 	"errors"
 	"log"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/sources/clickupchat"
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
@@ -36,7 +41,18 @@ const (
 	// UnauthorizedNoticeStreak is how many consecutive chat_unauthorized
 	// polls send the owner one Telegram notice.
 	UnauthorizedNoticeStreak = 3
+	// MaxChannelNameRunes caps Event.ChannelName.
+	MaxChannelNameRunes = 100
 )
+
+// userMentionRe matches one user mention in a text/md chat message:
+// [@<name>](#user_mention#<numeric ClickUp user id>). Group mentions
+// (#task_user_group_mention#) do not match.
+var userMentionRe = regexp.MustCompile(`\]\(#user_mention#([0-9]{1,20})\)`)
+
+// msTimestampFloor tells a Unix-ms time from a Unix-seconds one: any
+// real ms time after 2001 is above it, any seconds time is far below it.
+const msTimestampFloor = 1_000_000_000_000
 
 // Poll error codes recorded and logged (REQ-5).
 const (
@@ -207,7 +223,8 @@ func (p *Poller) PollOnce(ctx context.Context) {
 	}
 }
 
-// channelTypes returns the ClickUp channel types ("DM", "GROUP_DM") the
+// channelTypes returns the ClickUp channel types ("DM", "GROUP_DM",
+// "CHANNEL") the
 // workspace's enabled clickup.chat_message triggers ask for, sorted; empty
 // when there is no such trigger. A version that does not resolve is
 // skipped, as the run starter skips it.
@@ -236,6 +253,11 @@ func (p *Poller) channelTypes(ctx context.Context, workspaceID string) ([]string
 					set[clickupchat.ChannelDM] = true
 				case behavior.ChannelGroupDM:
 					set[clickupchat.ChannelGroupDM] = true
+				case behavior.ChannelChannel:
+					// Validation allows channel only with mentions: me, so
+					// channels are read only for behaviors that want the
+					// owner's mentions.
+					set[clickupchat.ChannelChannel] = true
 				}
 			}
 		}
@@ -348,7 +370,59 @@ func (p *Poller) pollTarget(ctx, parent context.Context, t Target, types []strin
 // poll error code ("" when every call succeeded). Messages read before a
 // failure are returned too: their runs are deduplicated if they are read
 // again.
+//
+// Direct messages (DM, GROUP_DM) are listed first, under the strict rule:
+// a channel list cut by the page cap blocks the cursor. ClickUp Chat
+// channels (CHANNEL) are listed separately, after them, and a cut channel
+// list only logs: busy channels must never hold back the cursor of direct
+// messages (see listAndRead).
 func (p *Poller) collect(ctx context.Context, t Target, token string, types []string, cursorMS int64) ([]pending, bool, string) {
+	var dmTypes []string
+	wantChannels := false
+	for _, ty := range types {
+		if ty == clickupchat.ChannelChannel {
+			wantChannels = true
+		} else {
+			dmTypes = append(dmTypes, ty)
+		}
+	}
+	var out []pending
+	complete := true
+	seen := map[string]bool{}
+	if len(dmTypes) > 0 {
+		msgs, ok, code := p.listAndRead(ctx, t, token, dmTypes, cursorMS, true, seen)
+		out = append(out, msgs...)
+		if code != "" {
+			return out, false, code
+		}
+		complete = complete && ok
+	}
+	if wantChannels {
+		msgs, ok, code := p.listAndRead(ctx, t, token, []string{clickupchat.ChannelChannel}, cursorMS, false, seen)
+		out = append(out, msgs...)
+		if code != "" {
+			return out, false, code
+		}
+		complete = complete && ok
+	}
+	return out, complete, ""
+}
+
+// listAndRead lists the channels of the given types with messages since
+// the cursor, up to the page cap, and reads the new messages of each
+// listed channel whose Type is one of types (the list is filtered here,
+// whatever ClickUp returns). seen holds the channel IDs already read this
+// poll.
+//
+// strict says what a channel list cut by the page cap means. With strict
+// the unlisted channels may hold messages of any date after the cursor, so
+// the result is incomplete and the cursor stays. Without strict (ClickUp
+// Chat channels, read only for owner mentions) the cut is logged as
+// chat_mention_channels_truncated and the cursor may still move: holding it
+// would keep the list as long as it is, or longer, every later poll, and
+// stall direct messages too. Mentions in the unlisted channels are then
+// lost, the same liveness trade-off as chat_backlog_truncated.
+func (p *Poller) listAndRead(ctx context.Context, t Target, token string, types []string, cursorMS int64, strict bool, seen map[string]bool) ([]pending, bool, string) {
 	var out []pending
 	complete := true
 	var channels []clickupchat.Channel
@@ -370,16 +444,19 @@ func (p *Poller) collect(ctx context.Context, t Target, token string, types []st
 		pageCursor = pg.NextCursor
 	}
 	if !listed {
-		// More channels than the page cap: the unlisted ones may hold
-		// messages of any date after the cursor.
-		p.logf("chat_channels_truncated", t)
-		complete = false
+		if strict {
+			// More channels than the page cap: the unlisted ones may hold
+			// messages of any date after the cursor.
+			p.logf("chat_channels_truncated", t)
+			complete = false
+		} else {
+			p.logf("chat_mention_channels_truncated", t)
+		}
 	}
 	want := map[string]bool{}
 	for _, ty := range types {
 		want[ty] = true
 	}
-	seen := map[string]bool{}
 	for _, ch := range channels {
 		if ctx.Err() != nil {
 			return out, false, CodeUnavailable
@@ -388,6 +465,13 @@ func (p *Poller) collect(ctx context.Context, t Target, token string, types []st
 			continue
 		}
 		seen[ch.ID] = true
+		if ch.Type == clickupchat.ChannelChannel && ch.LatestCommentAt >= msTimestampFloor && ch.LatestCommentAt <= cursorMS {
+			// The channel's newest message is not newer than the cursor:
+			// nothing to read. Saves a call per idle channel if ClickUp
+			// ignores with_message_since. A missing (null) or non-ms
+			// latest_comment_at is read as usual.
+			continue
+		}
 		msgs, chComplete, code := p.readChannel(ctx, t, token, ch, cursorMS)
 		out = append(out, msgs...)
 		if code != "" {
@@ -458,13 +542,35 @@ func (p *Poller) readChannel(ctx context.Context, t Target, token string, ch cli
 
 // event builds the trigger event of one new message, or an event with an
 // empty Key when the message is dropped: the owner's own, not a plain
-// message, a thread reply, or one without an ID or sender.
+// message, a thread reply, one without an ID or sender, or a ClickUp Chat
+// channel message that does not tag the owner (channels are read only
+// for the owner's mentions; with no owner ID set every channel message is
+// dropped).
 func (p *Poller) event(t Target, ch clickupchat.Channel, m clickupchat.Message) behavior.Event {
 	if m.ID == "" || m.UserID == "" || m.Type != "message" || m.ParentMessage != "" {
 		return behavior.Event{}
 	}
-	if p.s.OwnerClickUpUserID != "" && m.UserID == p.s.OwnerClickUpUserID {
+	owner := p.s.OwnerClickUpUserID
+	if owner != "" && m.UserID == owner {
 		return behavior.Event{}
+	}
+	tagged := TaggedUserIDs(m.Content)
+	mentioned := false
+	if owner != "" {
+		for _, id := range tagged {
+			if id == owner {
+				mentioned = true
+				break
+			}
+		}
+	}
+	isChannel := ch.Type == clickupchat.ChannelChannel
+	if isChannel && !mentioned {
+		return behavior.Event{}
+	}
+	name := ""
+	if isChannel {
+		name = CleanChannelName(ch.Name)
 	}
 	return behavior.Event{
 		Type:          behavior.TriggerChatMessage,
@@ -476,7 +582,64 @@ func (p *Poller) event(t Target, ch clickupchat.Channel, m clickupchat.Message) 
 		ChannelType:   strings.ToLower(ch.Type),
 		SenderID:      m.UserID,
 		PRs:           behavior.ExtractPRRefs(m.Content),
+		Mentioned:     mentioned,
+		TaggedUserIDs: tagged,
+		ChannelName:   name,
 	}
+}
+
+// TaggedUserIDs returns the distinct ClickUp user IDs a text/md chat
+// message tags with [@name](#user_mention#<id>), in order of first
+// appearance, at most behavior.MaxTaggedUserIDs; nil when there is none.
+// Group mentions are not users and are ignored.
+func TaggedUserIDs(content string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range userMentionRe.FindAllStringSubmatch(content, -1) {
+		id := m[1]
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+		if len(out) == behavior.MaxTaggedUserIDs {
+			break
+		}
+	}
+	return out
+}
+
+// CleanChannelName makes a user-set channel name safe for trigger data and
+// reports: control and invisible format characters (bidi overrides,
+// zero-width) are dropped, runs of white space become one space, the
+// result is trimmed and capped at MaxChannelNameRunes runes.
+func CleanChannelName(name string) string {
+	var b strings.Builder
+	n := 0
+	space := false
+	for _, r := range name {
+		if n >= MaxChannelNameRunes {
+			break
+		}
+		if unicode.IsSpace(r) {
+			space = b.Len() > 0
+			continue
+		}
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == unicode.ReplacementChar {
+			continue
+		}
+		if space {
+			if n+1 >= MaxChannelNameRunes {
+				break
+			}
+			b.WriteByte(' ')
+			n++
+			space = false
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
 }
 
 // errorCode maps a ClickUp Chat error to a poll error code.

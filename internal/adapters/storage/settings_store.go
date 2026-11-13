@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
@@ -13,7 +14,10 @@ import (
 )
 
 // SettingsStore persists validated app_settings values.
-type SettingsStore struct{ queries *sqlc.Queries }
+type SettingsStore struct {
+	pool    *pgxpool.Pool
+	queries *sqlc.Queries
+}
 
 // SettingRow is one stored setting.
 type SettingRow struct {
@@ -26,7 +30,7 @@ func NewSettingsStore(pool *pgxpool.Pool) (*SettingsStore, error) {
 	if pool == nil {
 		return nil, errors.New("settings store requires pool")
 	}
-	return &SettingsStore{queries: sqlc.New(pool)}, nil
+	return &SettingsStore{pool: pool, queries: sqlc.New(pool)}, nil
 }
 
 var _ settings.Store = (*SettingsStore)(nil)
@@ -48,6 +52,31 @@ func (s *SettingsStore) Set(ctx context.Context, key string, value json.RawMessa
 		return err
 	}
 	return s.queries.SetSetting(ctx, sqlc.SetSettingParams{Key: key, Value: value})
+}
+
+// SetMany validates every value, then stores them all in one
+// transaction: either every pair is stored or none is.
+func (s *SettingsStore) SetMany(ctx context.Context, values map[string]json.RawMessage) error {
+	keys := make([]string, 0, len(values))
+	for k, v := range values {
+		if err := settings.Validate(k, v); err != nil {
+			return err
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	q := sqlc.New(tx)
+	for _, k := range keys {
+		if err := q.SetSetting(ctx, sqlc.SetSettingParams{Key: k, Value: values[k]}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *SettingsStore) List(ctx context.Context) ([]SettingRow, error) {

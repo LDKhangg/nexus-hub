@@ -112,21 +112,52 @@ var instructionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b(mark|classify|label|treat|flag)\b.{0,30}\bas\s+(auto|automatic|approved|high[- ]confidence|confident)\b`),
 	regexp.MustCompile(`(?i)\b(set|raise|increase|give)\b.{0,15}\bconfidence\b`),
 	regexp.MustCompile(`(?i)\bconfidence\s*[:=]\s*(1(\.0+)?|100\s*%?)(\s|$|[.,;])`),
-	regexp.MustCompile(`(?i)\byou\s+(must|should|need to|have to|are required to)\s+(post|publish|approve|merge|reply|answer|mark|classify)\b`),
+	youMustPattern,
 	regexp.MustCompile(`(?i)\bdo not (tell|inform|notify|ask) (the )?(user|owner|human)\b`),
 	regexp.MustCompile(`(?i)[<‹]\s*/?\s*(system|instructions?|context|source|output)\b`),
 	regexp.MustCompile(`(?i)(bỏ qua|phớt lờ).{0,30}(hướng dẫn|chỉ dẫn|chỉ thị|quy tắc)`),
 	regexp.MustCompile(`(?i)đánh dấu.{0,20}(auto|tự động)`),
 }
 
+// youMustPattern is "you must/should/need to approve, merge, reply...".
+var youMustPattern = regexp.MustCompile(`(?i)\byou\s+(must|should|need to|have to|are required to)\s+(post|publish|approve|merge|reply|answer|mark|classify)\b`)
+
+// verdictInstructionPatterns are applied to the untrusted content a
+// verdict classifies (the triggering message). They are the item patterns
+// without youMustPattern: in a message written to the owner, "you" is the
+// owner, so "you must approve this PR" is an ordinary (if pushy) human
+// request, which is exactly what a verdict classifies. They add patterns
+// that try to set the verdict itself. Item classification keeps its own
+// list unchanged.
+var verdictInstructionPatterns = func() []*regexp.Regexp {
+	var out []*regexp.Regexp
+	for _, re := range instructionPatterns {
+		if re != youMustPattern {
+			out = append(out, re)
+		}
+	}
+	return append(out,
+		regexp.MustCompile(`(?i)\b(verdict|label)\s*["']?\s*[:=]`),
+		regexp.MustCompile(`(?i)\b(set|choose|return|output)\b.{0,20}\b(verdict|label)\b`),
+	)
+}()
+
 // InstructionLike reports whether any of the texts reads like instructions
 // to the AI or the engine.
-func InstructionLike(texts ...string) bool {
+func InstructionLike(texts ...string) bool { return matchAny(instructionPatterns, texts) }
+
+// VerdictInstructionLike reports whether any of the texts tries to
+// instruct the AI or the engine, by the verdict's patterns
+// (verdictInstructionPatterns). An ordinary request from a person to the
+// owner ("approve giúp em PR này") does not match.
+func VerdictInstructionLike(texts ...string) bool { return matchAny(verdictInstructionPatterns, texts) }
+
+func matchAny(patterns []*regexp.Regexp, texts []string) bool {
 	for _, t := range texts {
 		if t == "" {
 			continue
 		}
-		for _, re := range instructionPatterns {
+		for _, re := range patterns {
 			if re.MatchString(t) {
 				return true
 			}

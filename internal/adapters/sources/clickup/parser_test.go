@@ -160,3 +160,52 @@ func TestDuplicateSourceKeysStable(t *testing.T) {
 		t.Fatalf("unstable duplicate keys: %+v", events)
 	}
 }
+
+func TestPhase3ECommentMentions_AcceptsBothPartsAndFlexibleIDs(t *testing.T) {
+	// TC-70, TC-71 (REQ-E7): this uses the expected taskCommentPosted
+	// history_items[].comment.comment[] shape because no recorded webhook
+	// payload is available. Malformed parts must not reject the webhook.
+	body := `{"webhook_id":"w1","event":"taskCommentPosted","task_id":"t1","history_items":[{"id":"h1","field":"comment","comment":{"id":"c1","text_content":"PRIVATE COMMENT","user":{"id":9},"comment":[{"type":"tag","user":{"id":7}},{"type":"user_mention","user":{"id":"8"}},{"type":"tag","user":{"id":"7"}},{"type":"tag","user":{"id":{"bad":true}}},{"bad":true}]}}]}`
+	events, err := NewClickUpParser("", "").Parser([]byte(body))
+	if err != nil || len(events) != 1 {
+		t.Fatalf("parse: %+v %v", events, err)
+	}
+	e := events[0]
+	if got := e.Metadata["tagged_user_ids"]; got != "7,8" {
+		t.Fatalf("tagged ids=%q", got)
+	}
+	if e.ExternalMessageID != "comment:c1" {
+		t.Fatalf("comment identity=%q", e.ExternalMessageID)
+	}
+	if strings.Contains(fmt.Sprint(e.Metadata), "PRIVATE COMMENT") {
+		t.Fatalf("comment leaked to trusted metadata: %v", e.Metadata)
+	}
+}
+
+func TestPhase3ECommentMentions_BoundedAndTextDoesNotForgeTag(t *testing.T) {
+	// TC-71 (REQ-E7).
+	var parts strings.Builder
+	for i := 0; i < maxTaggedUsers+10; i++ {
+		if i > 0 {
+			parts.WriteByte(',')
+		}
+		fmt.Fprintf(&parts, `{"type":"tag","user":{"id":"u%d"}}`, i)
+	}
+	body := fmt.Sprintf(`{"webhook_id":"w","event":"taskCommentPosted","task_id":"t","history_items":[{"id":"h","field":"comment","comment":{"id":"c","text_content":"@owner only text","user":{"id":2},"comment":[%s]}}]}`, parts.String())
+	events, err := NewClickUpParser("", "").Parser([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Split(events[0].Metadata["tagged_user_ids"], ","); len(got) != maxTaggedUsers {
+		t.Fatalf("tag cap=%d", len(got))
+	}
+
+	withoutParts := strings.Replace(body, `"comment":[`+parts.String()+`]`, `"comment":"malformed"`, 1)
+	events, err = NewClickUpParser("", "").Parser([]byte(withoutParts))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if events[0].Metadata["tagged_user_ids"] != "" {
+		t.Fatalf("text forged mention: %v", events[0].Metadata)
+	}
+}

@@ -346,8 +346,18 @@ type Profile struct {
 
 var (
 	languageRe = regexp.MustCompile(`^[a-z]{2}(-[A-Z]{2})?$`)
-	modelRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,99}$`)
+	// claudeModelRe and opencodeModelRe are the two model id shapes (the
+	// same as the settings package's): a Claude id, or an opencode
+	// provider/model[#variant] id. Import accepts both; the run checks the
+	// shape against the configured provider.
+	claudeModelRe   = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,99}$`)
+	opencodeModelRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*/[A-Za-z0-9._-]+(#[A-Za-z0-9._-]+)?$`)
 )
+
+// validModelID reports whether m has either accepted model id shape.
+func validModelID(m string) bool {
+	return claudeModelRe.MatchString(m) || (len(m) <= 200 && opencodeModelRe.MatchString(m))
+}
 
 // DefaultProfile is the profile used before the owner sets one.
 func DefaultProfile() Profile {
@@ -382,7 +392,7 @@ func (p Profile) Validate() error {
 	default:
 		return bad("digest_mode")
 	}
-	if p.DefaultModel != "" && !modelRe.MatchString(p.DefaultModel) {
+	if p.DefaultModel != "" && !validModelID(p.DefaultModel) {
 		return bad("default_model")
 	}
 	if len(p.Budgets) > 0 {

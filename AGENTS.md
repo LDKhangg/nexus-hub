@@ -17,11 +17,50 @@ writes a Phase Completion Report (PCC §10.4) in `docs/product/reports/`.
 
 | Role | Who | Does | Never does |
 |---|---|---|---|
-| **Lead** | the main Claude session | writes the plan with numbered requirements, dispatches implementers, writes Phase and Fix Briefs, judges reports, fixes production code | writes or edits tests; runs `go test`; reviews its own branch; pushes or merges without the owner's OK |
-| **Implementer** | a subagent dispatched by the Lead, one task at a time | writes the production code for one plan task, commits locally | writes or edits tests; runs `go test`; changes other tasks' scope; pushes |
-| **Tester** | a separate agent that the owner runs (`TESTER.md`) | designs test cases from the requirements (requirement, human-behaviour and abuse cases), writes and commits test files, reads the CI run, returns a Test Report | edits production code; weakens tests to pass; pushes |
-| **Reviewer** | a separate agent that the owner runs (`REVIEWER.md`) | judges the branch against the requirements, real user journeys and the constraints; returns a Review Report with proven findings | edits files; runs `go test`; commits |
-| **Owner** | the human | approves plans and the Tester's Test Plans, carries briefs and reports between agents, pushes branches so CI runs, approves merge | n/a |
+| **Lead** | Claude Opus, the main Claude Code session | writes the plan with numbered requirements, writes one brief per task (context, what to change, what to test), hands briefs to the opencode agents, reads diffs and reports, judges them, writes Phase and Fix Briefs | writes production code or tests; runs `go test`; reviews its own plan's code as the Reviewer; pushes or merges without the owner's OK |
+| **Implementer** | opencode agent `implementer` (`.opencode/agents/implementer.md`, model `openai/gpt-5.6-sol#medium`) | writes the production code for one brief, runs the compile checks, commits locally, returns an Implementer Report | writes or edits tests; runs `go test`; changes other tasks' scope; pushes |
+| **Tester** | opencode agent `tester` (`.opencode/agents/tester.md`, model `openai/gpt-5.6-sol#medium`); full guide `TESTER.md` | designs test cases from the requirements (requirement, human-behaviour and abuse cases), writes and commits test files, reads the CI run, returns a Test Report | edits production code; weakens tests to pass; pushes |
+| **Reviewer** | opencode agent `reviewer` (`.opencode/agents/reviewer.md`, model `openai/gpt-6-sol#medium`, read-only); full guide `REVIEWER.md` | judges the branch against the requirements, real user journeys and the constraints; returns a Review Report with proven findings | edits files; runs `go test`; commits |
+| **Owner** | the human | approves plans and Test Plans, watches or steers any agent session in the opencode window, pushes branches so CI runs, approves merge | n/a |
+
+If you are an opencode agent, your role is your agent name; your agent file
+and this file are your rules. The tool permissions in `.opencode/agents/`
+enforce the "Never does" column (deny by default, then an allow list).
+
+## Handoff between Claude and opencode
+
+The Lead hands work to an opencode agent with
+
+```sh
+scripts/agent-handoff.sh <implementer|tester|reviewer> "<title>" <brief.md> [session-id]
+```
+
+- It runs `opencode run --agent <role>` through opencode's shared background
+  server, so the session also shows in the owner's opencode window, live.
+- It prints the session id and writes the agent's final report to
+  `.superpowers/handoff/<stamp>-<role>.md` (raw events next to it).
+- Fix rounds, Test Plan approval and CI run ids go to the **same session**
+  (pass its id), so the agent keeps its context.
+- One handoff runs at a time per branch: agents share the working tree.
+- Briefs live under `.superpowers/sdd/<plan>/` (task briefs `task-<id>.md`,
+  Phase and Fix Briefs as below). A brief names the commit message, the
+  attribution line, the files to read, the REQ ids, and what is out of scope.
+- The Lead never forwards a secret, token or `.env` content in a brief.
+
+Token budget (the owner's OpenAI quota is a 5-hour window):
+- Every step of an agent re-sends its whole session context, so long
+  sessions are the main cost. Continue a session only for a short follow-up
+  while it is warm (within about 10 minutes) and its context is under about
+  100k tokens; `agent-handoff.sh` prints both. Otherwise start a new session
+  with a short carry-over note (head, what is done, what is next, file
+  pointers; under 40 lines).
+- Keep each handoff small: one task, or one package/area for tests and
+  review (for example 3c and 3e in separate sessions).
+- Briefs point to files and line ranges instead of pasting code; under 80
+  lines.
+- Reports start with a KEY block (result, head, commits, item ids, next) and
+  stay under 60 lines, with details only for failures, findings and Rulings.
+  The Lead reads the KEY block and opens only the items it must judge.
 
 Lead and Implementer may only run these to prove the code compiles:
 `go build ./...`, `go vet ./...`, `gofmt -l cmd internal`, `make generate`
@@ -52,23 +91,29 @@ the short SHA (and `latest` on main). Deploying to the VPS is a later phase.
    numbered requirement list (`REQ-1`, …, each an observable behaviour), the
    tasks, interfaces, global constraints and review focus. The owner approves
    it.
-2. **Implement.** The Lead dispatches one Implementer per task, in order. Each
-   Implementer writes the production code, runs only the compile checks,
-   commits with a message ending in `Tests not run.` and the attribution line,
-   and returns a short summary: files, and any decision it made with its
-   reason ("Ruling"). The Lead reads the diff and records Rulings in the ledger
-   (`.superpowers/sdd/<plan>/progress.md`).
+2. **Implement.** For each task, in order, the Lead writes a task brief and
+   hands it to `implementer`. The Implementer writes the production code,
+   runs only the compile checks, commits with a message ending in
+   `Tests not run.` and the attribution line, and returns an Implementer
+   Report (files, checks, Rulings). The Lead reads the diff, re-runs the
+   compile checks, and records Rulings in the ledger
+   (`.superpowers/sdd/<plan>/progress.md`). Corrections go back to the same
+   session.
 3. **Phase Brief.** When the phase (or a batch the owner chooses) is
-   implemented, the Lead writes one Phase Brief (format below). The owner gives
-   the same brief to the Tester and the Reviewer; they can work in parallel.
-4. **Test.** The Tester sends a Test Plan; the owner approves or edits it. The
-   Tester writes and commits the tests, the owner pushes, CI runs the suite,
-   and the Tester returns a Test Report from the CI run.
+   implemented, the Lead writes one Phase Brief (format below) with a
+   "What to test" list, and hands it to `tester` and `reviewer` (one after
+   the other: they share the working tree).
+4. **Test.** The Tester's first reply is a Test Plan; the Lead relays it to
+   the owner, who approves or edits it; the Lead sends the decision to the
+   same session. The Tester writes and commits the tests, the owner pushes,
+   CI runs the suite, the Lead sends the run id, and the Tester returns a
+   Test Report from the CI run.
 5. **Review.** The Reviewer returns a Review Report.
 6. **Verdict.** The Lead checks every defect (`D…`) and finding (`R…`)
    against the code, then:
-   - fixes production code for every real Critical/Important finding and every
-     test defect, and Minor findings it agrees with;
+   - has the Implementer fix production code (through a task brief) for every
+     real Critical/Important finding and every test defect, and Minor
+     findings it agrees with;
    - answers each finding it rejects, with evidence, in the ledger and in the
      Fix Brief;
    - if it believes a test is wrong, it raises a **test dispute** in the Fix
@@ -99,6 +144,7 @@ the short SHA (and `latest` on main). Deploying to the VPS is a later phase.
 - Constraints: <the plan's Global Constraints, or a pointer to them>
 - Environment: Go >= go.mod version; DB `. ./.superpowers/testdb.env` (loopback, `nexus_storage_test`) or "not needed"; git yes/no; external services: fakes only
 - Existing tests: <where they are; written by implementers, not proof>
+- What to test: <the Lead's list of behaviours, risks and unconfirmed facts that need proof; the Tester still designs the cases>
 - Out of scope: <what not to test or report>
 ```
 

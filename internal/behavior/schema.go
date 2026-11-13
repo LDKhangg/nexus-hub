@@ -65,9 +65,15 @@ const (
 	FromAny        = "any"
 	FromOthers     = "others"
 	CommandArgTask = "task" // a ClickUp task ID or URL
-	// ChannelDM and ChannelGroupDM are the chat channel filter values.
+	// ChannelDM, ChannelGroupDM and ChannelChannel are the chat channel
+	// filter values. A trigger on ChannelChannel (ClickUp Chat channels)
+	// must also have the filter mentions: me.
 	ChannelDM      = "dm"
 	ChannelGroupDM = "group_dm"
+	ChannelChannel = "channel"
+	// MentionsMe is the only value of the mentions filter: the comment or
+	// message tags the owner.
+	MentionsMe = "me"
 )
 
 // Doc is a behavior document as the owner writes it (YAML or JSON).
@@ -87,6 +93,16 @@ type Doc struct {
 	Model          string                 `json:"model,omitempty" yaml:"model,omitempty"`
 	Profile        *ProfileDoc            `json:"profile,omitempty" yaml:"profile,omitempty"`
 	Vars           map[string]VarDoc      `json:"vars,omitempty" yaml:"vars,omitempty"`
+	// Verdict asks the model step for one structured verdict per run, which
+	// run-level actions may require with "when".
+	Verdict *VerdictDoc `json:"verdict,omitempty" yaml:"verdict,omitempty"`
+}
+
+// VerdictDoc declares the closed list of verdict labels the model may
+// return and the confidence a verdict needs to pass a "when" gate.
+type VerdictDoc struct {
+	Labels        []string `json:"labels" yaml:"labels"`
+	MinConfidence *float64 `json:"min_confidence,omitempty" yaml:"min_confidence,omitempty"`
 }
 
 // TriggerDoc is one trigger. Which filter fields apply depends on Type.
@@ -103,14 +119,17 @@ type FilterDoc struct {
 	Assignee string   `json:"assignee,omitempty" yaml:"assignee,omitempty"`
 	List     []string `json:"list,omitempty" yaml:"list,omitempty"`
 	From     string   `json:"from,omitempty" yaml:"from,omitempty"`
-	// Channel lists the chat channel types (dm, group_dm); one value may be
-	// written as a plain string.
+	// Channel lists the chat channel types (dm, group_dm, channel); one
+	// value may be written as a plain string.
 	Channel StringList `json:"channel,omitempty" yaml:"channel,omitempty"`
 	// HasPRLink true matches only messages with a GitHub pull request link.
 	HasPRLink *bool `json:"has_pr_link,omitempty" yaml:"has_pr_link,omitempty"`
 	// Senders lists the ClickUp user IDs a chat message may come from;
 	// empty means anyone.
 	Senders []string `json:"senders,omitempty" yaml:"senders,omitempty"`
+	// Mentions "me" matches only a comment or chat message that tags the
+	// owner.
+	Mentions string `json:"mentions,omitempty" yaml:"mentions,omitempty"`
 }
 
 // StringList is a list of strings that may be written as a single string.
@@ -147,12 +166,20 @@ type AutonomyDoc struct {
 	NotifyWhenInformational *bool    `json:"notify_when_informational,omitempty" yaml:"notify_when_informational,omitempty"`
 }
 
-// ActionDoc is one allowed action and its parameters. On is set only on a
-// run-level action (actions.run): OnSuccessOfPrevious.
+// ActionDoc is one allowed action and its parameters. On and When are set
+// only on a run-level action (actions.run): On is OnSuccessOfPrevious, When
+// gates the action on the run's verdict.
 type ActionDoc struct {
 	Type   string            `json:"type" yaml:"type"`
 	Params map[string]string `json:"params,omitempty" yaml:"params,omitempty"`
 	On     string            `json:"on,omitempty" yaml:"on,omitempty"`
+	When   *WhenDoc          `json:"when,omitempty" yaml:"when,omitempty"`
+}
+
+// WhenDoc is the condition of a run-level action: the run's verdict must
+// have the label Verdict (one of verdict.labels) with enough confidence.
+type WhenDoc struct {
+	Verdict string `json:"verdict" yaml:"verdict"`
 }
 
 // BudgetsDoc caps one run.

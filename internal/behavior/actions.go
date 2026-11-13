@@ -1068,8 +1068,17 @@ func (e *Engine) summary(ctx context.Context, rc RunContext, chat ChatRef, key, 
 	t := textsFor(rc.Doc.Language)
 	var b strings.Builder
 	b.WriteString(head + " (" + t.runRef(rc.Doc.Name, rc.Run.ID) + ")\n")
-	b.WriteString(summaryLines(t, items, withStatus, max(maxTelegramRunes/len(items)-40, 60)))
-	msg := OutMessage{Text: capRunes(strings.TrimSpace(b.String()), maxTelegramRunes)}
+	link := RunLink(rc)
+	budget := maxTelegramRunes
+	if link != "" {
+		budget -= len(link) + 1
+	}
+	b.WriteString(summaryLines(t, items, withStatus, max(budget/len(items)-40, 60)))
+	text := capRunes(strings.TrimSpace(b.String()), budget)
+	if link != "" {
+		text += "\n" + link
+	}
+	msg := OutMessage{Text: text}
 	if len(items) == 1 {
 		fb, err := e.ensureApproval(ctx, rc.Run.WorkspaceID, NewApproval{
 			Kind: ApprovalFeedback, RunID: rc.Run.ID, ItemID: items[0].ID, Action: key, Resource: rc.Run.Subject,
@@ -1082,6 +1091,32 @@ func (e *Engine) summary(ctx context.Context, rc RunContext, chat ChatRef, key, 
 	}
 	_, err := e.sendOnce(ctx, rc.Run, key, chat, msg)
 	return err
+}
+
+// clickUpAppURL is the ClickUp web app.
+const clickUpAppURL = "https://app.clickup.com"
+
+// RunLink is the ClickUp web link of what a run is about, built only from
+// the run's subject and trusted trigger data: the task
+// (https://app.clickup.com/t/<task_id>) for a task subject, the chat
+// channel (https://app.clickup.com/<team_id>/chat/r/<channel_id>) for a
+// chat subject. "" when the run has neither or an identifier does not
+// validate.
+func RunLink(rc RunContext) string {
+	if id, ok := strings.CutPrefix(rc.Run.Subject, SubjectTaskPrefix); ok {
+		if !taskIDRe.MatchString(id) {
+			return ""
+		}
+		return clickUpAppURL + "/t/" + id
+	}
+	if id, ok := strings.CutPrefix(rc.Run.Subject, SubjectChatPrefix); ok {
+		t := rc.Trigger
+		if id != t.MessageID || !chatIDRe.MatchString(id) || !chatTeamIDRe.MatchString(t.TeamID) || !chatIDRe.MatchString(t.ChannelID) {
+			return ""
+		}
+		return clickUpAppURL + "/" + t.TeamID + "/chat/r/" + t.ChannelID
+	}
+	return ""
 }
 
 // --- Dispatcher ---

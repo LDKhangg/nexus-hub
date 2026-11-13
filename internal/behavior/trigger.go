@@ -41,15 +41,34 @@ type Event struct {
 	// trusted identifiers only. Key is ChatSubject(MessageID).
 	MessageID string
 	ChannelID string
-	// ChannelType is the chat channel type ("dm"/"group_dm", or ClickUp's
-	// "DM"/"GROUP_DM"); it is matched case-insensitively.
+	// ChannelType is the chat channel type ("dm"/"group_dm"/"channel", or
+	// ClickUp's "DM"/"GROUP_DM"/"CHANNEL"); it is matched
+	// case-insensitively.
 	ChannelType string
 	// PRs are the pull requests linked from the message (ExtractPRRefs).
 	PRs []PRRef
 	// TeamID is the ClickUp workspace (team) ID of the source integration
 	// the message was read from.
 	TeamID string
+	// Mentioned is true when the comment or chat message tags the owner,
+	// as read by the source parser or chat poller from trusted tag data.
+	Mentioned bool
+	// TaggedUserIDs are the ClickUp user IDs a comment or chat message
+	// tags, read by the source parser from the comment's tag parts or by
+	// the chat poller from the message's user mention markup (at most
+	// MaxTaggedUserIDs). MatchEvent sets Mentioned when the owner is
+	// among them.
+	TaggedUserIDs []string
+	// ChannelName is the chat channel's name (channel messages), for
+	// reports; never message text.
+	ChannelName string
+	// CommentID is the ClickUp ID of the comment (TriggerCommentAdded),
+	// from the source's trusted comment identity; never comment text.
+	CommentID string
 }
+
+// MaxTaggedUserIDs caps Event.TaggedUserIDs.
+const MaxTaggedUserIDs = 50
 
 // EventFromNormalized maps a normalized ClickUp event to a trigger event.
 // ok is false for an event no trigger type takes.
@@ -80,6 +99,17 @@ func EventFromNormalized(e domain.NormalizedEvent) (Event, bool) {
 		}
 	case domain.EventCommandPosted:
 		ev.Type = TriggerCommentAdded
+		if id, ok := strings.CutPrefix(e.ExternalMessageID, "comment:"); ok && commentIDRe.MatchString(id) {
+			ev.CommentID = id
+		}
+		for _, id := range strings.Split(e.Metadata["tagged_user_ids"], ",") {
+			if len(ev.TaggedUserIDs) == MaxTaggedUserIDs {
+				break
+			}
+			if id = strings.TrimSpace(id); id != "" {
+				ev.TaggedUserIDs = append(ev.TaggedUserIDs, id)
+			}
+		}
 	default:
 		return Event{}, false
 	}
@@ -116,12 +146,21 @@ type TriggerData struct {
 	// message's ClickUp user. The message text is never stored here.
 	MessageID   string  `json:"message_id,omitempty"`
 	ChannelID   string  `json:"channel_id,omitempty"`
-	ChannelType string  `json:"channel_type,omitempty"` // "dm" or "group_dm"
+	ChannelType string  `json:"channel_type,omitempty"` // "dm", "group_dm" or "channel"
 	PRs         []PRRef `json:"prs,omitempty"`
 	// TeamID is the ClickUp workspace (team) ID of the source integration
 	// the chat poller read the message from: the target workspace of
 	// run-level ClickUp Chat actions.
 	TeamID string `json:"team_id,omitempty"`
+	// Mentioned is true when the triggering comment or chat message tags
+	// the owner.
+	Mentioned bool `json:"mentioned,omitempty"`
+	// ChannelName is the chat channel's name (channel messages).
+	ChannelName string `json:"channel_name,omitempty"`
+	// CommentID is the ClickUp ID of the triggering comment
+	// (TriggerCommentAdded): the executor reads the comment's text at run
+	// time. The text is never stored here.
+	CommentID string `json:"comment_id,omitempty"`
 }
 
 // DecodeTriggerData reads a run's stored trigger data.
@@ -203,6 +242,14 @@ func MatchEvent(ev Event, versions []Version, ownerClickUpID string) []Match {
 	if ev.FromOwnBot || ev.Type == "" {
 		return nil
 	}
+	if !ev.Mentioned && ownerClickUpID != "" {
+		for _, id := range ev.TaggedUserIDs {
+			if id == ownerClickUpID {
+				ev.Mentioned = true
+				break
+			}
+		}
+	}
 	var out []Match
 	for _, m := range resolveEnabled(versions) {
 		for _, t := range m.Doc.Triggers {
@@ -279,6 +326,17 @@ func matchTrigger(t ResolvedTrigger, ev Event, owner string) (TriggerData, bool)
 				return TriggerData{}, false
 			}
 		}
+		if t.Mentions == MentionsMe {
+			// Only a comment by someone else that tags the owner; the
+			// owner's own comments never match, whatever "from" says.
+			if owner == "" || ev.SenderID == owner || !ev.Mentioned {
+				return TriggerData{}, false
+			}
+		}
+		data.Mentioned = ev.Mentioned
+		if commentIDRe.MatchString(ev.CommentID) {
+			data.CommentID = ev.CommentID
+		}
 	case TriggerChatMessage:
 		if !matchChat(t, ev, owner) {
 			return TriggerData{}, false
@@ -288,6 +346,8 @@ func matchTrigger(t ResolvedTrigger, ev Event, owner string) (TriggerData, bool)
 		data.ChannelType = strings.ToLower(ev.ChannelType)
 		data.PRs = append([]PRRef(nil), ev.PRs...)
 		data.TeamID = ev.TeamID
+		data.Mentioned = ev.Mentioned
+		data.ChannelName = ev.ChannelName
 	default:
 		return TriggerData{}, false
 	}

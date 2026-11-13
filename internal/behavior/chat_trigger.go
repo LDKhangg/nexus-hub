@@ -113,5 +113,14 @@ func matchChat(t ResolvedTrigger, ev Event, owner string) bool {
 	if len(t.Senders) > 0 && !containsFold(t.Senders, ev.SenderID, false) {
 		return false
 	}
+	if t.Mentions == MentionsMe && !ev.Mentioned {
+		return false
+	}
+	// A channel message never matches without mentions: me (validation
+	// requires it); this keeps the hub from acting on every channel
+	// message even if a stored document skipped validation.
+	if strings.EqualFold(ev.ChannelType, ChannelChannel) && t.Mentions != MentionsMe {
+		return false
+	}
 	return true
 }

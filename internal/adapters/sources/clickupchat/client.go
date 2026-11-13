@@ -1,6 +1,8 @@
 // Package clickupchat is a small stdlib client for the ClickUp Chat API v3:
 // it lists channels with new messages, reads their messages, and lists and
-// adds message reactions. The caller passes the ClickUp token on every
+// adds message reactions. For behavior run context it also reads a task's
+// comments and the token's workspace members through the API v2 (v2.go).
+// The caller passes the ClickUp token on every
 // call; the client never stores it. Tokens, headers, request and response
 // bodies and message content never appear in errors or logs: an error
 // carries only a safe code.
@@ -106,6 +108,9 @@ type Channel struct {
 	ID string
 	// Type is "CHANNEL", "DM" or "GROUP_DM".
 	Type string
+	// Name is the channel's name as ClickUp lists it. It is set by users:
+	// callers clean and cap it before showing it.
+	Name string
 	// LatestCommentAt is the newest message time in Unix ms, 0 if absent.
 	LatestCommentAt int64
 	Archived        bool
@@ -140,7 +145,9 @@ type Client interface {
 	// DMChannelsSince lists channels of the given types (default DM) that
 	// have messages since sinceMS (Unix ms; 0 means no filter), one page
 	// at a time, starting at cursor ("" for the first page). Closed
-	// channels are included.
+	// channels are included. When types holds ChannelChannel no type
+	// filter is sent to ClickUp and every type comes back: callers always
+	// filter the items by Type.
 	DMChannelsSince(ctx context.Context, ws, token string, types []string, sinceMS int64, cursor string) (Page[Channel], error)
 	// Messages returns one page of a channel's messages in the order
 	// ClickUp sends them, which is not documented: callers sort.
@@ -239,8 +246,14 @@ func (c *HTTPClient) DMChannelsSince(ctx context.Context, ws, token string, type
 		}
 	}
 	q := url.Values{}
-	for _, t := range list {
-		q.Add("channel_types", t)
+	if !seen[ChannelChannel] {
+		// A probe of channel_types=CHANNEL did not return the documented
+		// shape, while a listing without the filter returns every type.
+		// So the filter is sent only for DM types, where it is known to
+		// work; the caller filters by Type in every case.
+		for _, t := range list {
+			q.Add("channel_types", t)
+		}
 	}
 	if sinceMS > 0 {
 		q.Set("with_message_since", strconv.FormatInt(sinceMS, 10))
@@ -255,6 +268,7 @@ func (c *HTTPClient) DMChannelsSince(ctx context.Context, ws, token string, type
 		Data       []struct {
 			ID              flexString `json:"id"`
 			Type            string     `json:"type"`
+			Name            string     `json:"name"`
 			LatestCommentAt flexInt    `json:"latest_comment_at"`
 			Archived        bool       `json:"archived"`
 		} `json:"data"`
@@ -264,7 +278,7 @@ func (c *HTTPClient) DMChannelsSince(ctx context.Context, ws, token string, type
 	}
 	p := Page[Channel]{NextCursor: resp.NextCursor, Items: make([]Channel, 0, len(resp.Data))}
 	for _, d := range resp.Data {
-		p.Items = append(p.Items, Channel{ID: string(d.ID), Type: d.Type, LatestCommentAt: int64(d.LatestCommentAt), Archived: d.Archived})
+		p.Items = append(p.Items, Channel{ID: string(d.ID), Type: d.Type, Name: d.Name, LatestCommentAt: int64(d.LatestCommentAt), Archived: d.Archived})
 	}
 	return p, nil
 }
@@ -367,6 +381,54 @@ func (c *HTTPClient) Reactions(ctx context.Context, ws, token, messageID, cursor
 	p := Page[Reaction]{NextCursor: resp.NextCursor, Items: make([]Reaction, 0, len(resp.Data))}
 	for _, d := range resp.Data {
 		p.Items = append(p.Items, Reaction{Reaction: d.Reaction, UserID: string(d.UserID), DateMS: int64(d.Date)})
+	}
+	return p, nil
+}
+
+// ChannelMember is one member of a chat channel. Name and Username are
+// set by the user: callers clean and cap them before showing them, and
+// never log them.
+type ChannelMember struct {
+	ID       string
+	Name     string
+	Username string
+}
+
+// MaxChannelMembersLimit is the largest page size ChannelMembers accepts.
+const MaxChannelMembersLimit = 100
+
+// ChannelMembers returns one page of a chat channel's members (GET
+// /api/v3/workspaces/{ws}/chat/channels/{channel_id}/members), limit
+// (1..MaxChannelMembersLimit) per page, starting at cursor ("" for the
+// first page). It is not part of Client: only the run executor's name
+// lookup uses it.
+func (c *HTTPClient) ChannelMembers(ctx context.Context, ws, token, channelID, cursor string, limit int) (Page[ChannelMember], error) {
+	if err := checkCommon(ws, token, cursor); err != nil {
+		return Page[ChannelMember]{}, err
+	}
+	if !idRe.MatchString(channelID) || limit < 1 || limit > MaxChannelMembersLimit {
+		return Page[ChannelMember]{}, invalid()
+	}
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(limit))
+	if cursor != "" {
+		q.Set("cursor", cursor)
+	}
+	var resp struct {
+		NextCursor string `json:"next_cursor"`
+		Data       []struct {
+			ID       flexString `json:"id"`
+			Name     string     `json:"name"`
+			Username string     `json:"username"`
+		} `json:"data"`
+	}
+	path := wsPath(ws) + "/channels/" + url.PathEscape(channelID) + "/members?" + q.Encode()
+	if err := c.do(ctx, token, http.MethodGet, path, nil, &resp, CodeNotFound, false); err != nil {
+		return Page[ChannelMember]{}, err
+	}
+	p := Page[ChannelMember]{NextCursor: resp.NextCursor, Items: make([]ChannelMember, 0, len(resp.Data))}
+	for _, d := range resp.Data {
+		p.Items = append(p.Items, ChannelMember{ID: string(d.ID), Name: d.Name, Username: d.Username})
 	}
 	return p, nil
 }

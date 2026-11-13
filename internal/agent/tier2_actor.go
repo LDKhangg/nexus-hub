@@ -105,6 +105,9 @@ func (a *Tier2Actor) Investigate(ctx context.Context, packet memory.ContextPacke
 			if ctx.Err() != nil {
 				return report, ctx.Err()
 			}
+			if le, ok := domain.AsLLMError(err); ok {
+				return report, &TriageError{Code: le.Code, Retryable: le.Retryable}
+			}
 			return report, &TriageError{Code: CodeLLMError, Retryable: true}
 		}
 		report.Steps = step

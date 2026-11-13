@@ -17,10 +17,11 @@ import (
 
 // This file builds the trace of one run (REQ-18) for /trace and the CLI,
 // and the recent-run listing. A trace holds identifiers, codes, counts and
-// the items as stored. Item text, proposals, quotes and answers are the
-// owner's own data and are shown only to him (his private chat or the
-// CLI); every text field still passes through secret redaction. The
-// context the run read is never part of a trace.
+// the items as stored. Item text, proposals, non-trigger quotes and answers
+// are the owner's own data and are shown only to him (his private chat or
+// the CLI); every text field still passes through secret redaction. Quotes
+// from triggering message/comment text are omitted. The context the run read
+// is never part of a trace.
 
 // MaxRunListLimit caps the run listing.
 const MaxRunListLimit = 200
@@ -104,7 +105,11 @@ type Trace struct {
 	// RunActions are the outcomes of the run's run-level actions
 	// (actions.run), identifiers and codes only.
 	RunActions []RunActionOutcome `json:"run_actions,omitempty"`
-	ToolCalls  []ToolCallRecord   `json:"tool_calls"`
+	// Verdict is the run's model verdict (behaviors with a verdict block):
+	// label, confidence, the model's summary (redacted) and the injection
+	// flags, or the code of why there is none.
+	Verdict   *RunVerdict      `json:"verdict,omitempty"`
+	ToolCalls []ToolCallRecord `json:"tool_calls"`
 }
 
 // TraceRun is the run part of a trace.
@@ -234,7 +239,13 @@ func BuildTrace(ctx context.Context, store TraceStore, workspaceID, ref, itemKey
 	if err != nil {
 		return Trace{}, err
 	}
-	t := Trace{Run: traceRun(run), Items: []TraceItem{}, RunActions: DecodeRunActions(run.RunActions).Actions, ToolCalls: calls}
+	res := DecodeRunActions(run.RunActions)
+	t := Trace{Run: traceRun(run), Items: []TraceItem{}, RunActions: res.Actions, ToolCalls: calls}
+	if v := res.Verdict; v != nil {
+		tv := *v
+		tv.Summary = redactText(tv.Summary)
+		t.Verdict = &tv
+	}
 	if t.ToolCalls == nil {
 		t.ToolCalls = []ToolCallRecord{}
 	}
@@ -286,7 +297,12 @@ func traceItem(it Item, approvals []Approval) TraceItem {
 		Citations: make([]Citation, 0, len(it.Citations)), Actions: []TraceAction{},
 	}
 	for _, c := range it.Citations {
-		ti.Citations = append(ti.Citations, Citation{Locator: redactText(c.Locator), Quote: redactText(c.Quote)})
+		locator := redactText(c.Locator)
+		quote := redactText(c.Quote)
+		if triggerTextCitation(locator) {
+			quote = ""
+		}
+		ti.Citations = append(ti.Citations, Citation{Locator: locator, Quote: quote})
 	}
 	for _, o := range decodeResult(it.ActionResult).Actions {
 		ti.Actions = append(ti.Actions, TraceAction{Index: o.Index, Type: o.Type, Status: o.Status, Code: o.Code, Block: o.Block})
@@ -299,6 +315,23 @@ func traceItem(it Item, approvals []Approval) TraceItem {
 		ti.Decisions = append(ti.Decisions, d)
 	}
 	return ti
+}
+
+// triggerTextCitation reports whether a locator names the untrusted text of
+// the message or comment that triggered a run. Its locator remains useful in
+// traces, but its quote must not repeat that triggering text.
+func triggerTextCitation(locator string) bool {
+	base, ok := strings.CutSuffix(locator, "#text")
+	if !ok {
+		return false
+	}
+	if id, ok := strings.CutPrefix(base, "clickup:chat/"); ok {
+		return chatIDRe.MatchString(id)
+	}
+	if id, ok := strings.CutPrefix(base, "clickup:comment/"); ok {
+		return commentIDRe.MatchString(id)
+	}
+	return false
 }
 
 // --- text rendering ---
@@ -393,6 +426,7 @@ func renderTrace(t Trace, loc *time.Location, item, calls bool) string {
 	}
 	w := &traceText{loc: loc}
 	w.runHeader(t.Run)
+	w.verdict(t.Verdict)
 	if !item {
 		w.runActions(t.RunActions)
 		w.line("Items (%d):", len(t.Items))
@@ -441,7 +475,11 @@ func renderTrace(t Trace, loc *time.Location, item, calls bool) string {
 		if len(it.Citations) > 0 {
 			w.line("Trích dẫn:")
 			for i, c := range it.Citations {
-				w.line("%d. %s: \"%s\"", i+1, c.Locator, c.Quote)
+				if triggerTextCitation(c.Locator) {
+					w.line("%d. %s", i+1, c.Locator)
+				} else {
+					w.line("%d. %s: \"%s\"", i+1, c.Locator, c.Quote)
+				}
 			}
 		}
 		if len(it.Actions) > 0 {
@@ -480,12 +518,19 @@ func renderTrace(t Trace, loc *time.Location, item, calls bool) string {
 }
 
 // chatTrigger renders the trusted identifiers of a chat-triggered run:
-// channel type, sender and message IDs and the pull requests. The message
+// channel type, sender and message IDs, the channel name (channel
+// messages), whether the owner is tagged, and the pull requests. The message
 // text is never stored, so it cannot be shown.
 func (w *traceText) chatTrigger(r TraceRun) {
 	td, err := DecodeTriggerData(r.Trigger)
 	if err == nil {
 		w.line("Chat: %s · người gửi %s · tin nhắn %s", orDash(td.ChannelType), orDash(td.SenderID), orDash(td.MessageID))
+		if td.ChannelName != "" {
+			w.line("Kênh: %s", td.ChannelName)
+		}
+		if td.Mentioned {
+			w.line("Nhắc tới: owner")
+		}
 	}
 	if len(r.PRs) > 0 {
 		w.line("PR: %s", strings.Join(r.PRs, ", "))
@@ -520,6 +565,9 @@ func (w *traceText) runActions(as []RunActionOutcome) {
 		if a.TelegramMessageID != 0 {
 			s += fmt.Sprintf(" · tin %d", a.TelegramMessageID)
 		}
+		if a.VerdictConfidence != nil {
+			s += fmt.Sprintf(" · AI %s %.2f", a.VerdictLabel, *a.VerdictConfidence)
+		}
 		w.line("%s", s)
 		for _, p := range a.PRs {
 			ps := fmt.Sprintf("  • %s: %s", PRRef{Repo: p.Repo, Number: p.Number}.String(), p.Status)
@@ -534,6 +582,26 @@ func (w *traceText) runActions(as []RunActionOutcome) {
 			}
 			w.line("%s", ps)
 		}
+	}
+}
+
+// verdict renders the run's model verdict: label, confidence, flags and
+// summary, or why there is none.
+func (w *traceText) verdict(v *RunVerdict) {
+	if v == nil {
+		return
+	}
+	if !v.Available() {
+		w.line("AI: không có đánh giá (%s)", verdictCode(v))
+		return
+	}
+	s := fmt.Sprintf("AI: %s (%.2f)", v.Label, v.Confidence)
+	if len(v.Flags) > 0 {
+		s += " · cờ: " + strings.Join(v.Flags, ", ")
+	}
+	w.line("%s", s)
+	if v.Summary != "" {
+		w.line("Tóm tắt: %s", v.Summary)
 	}
 }
 

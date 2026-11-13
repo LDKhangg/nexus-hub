@@ -120,9 +120,18 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		return agentServices{}, errors.New("action store startup failed")
 	}
 	llmHTTP := netguard.Client(0, netguard.DefaultHosts) // the SDK applies its own request timeouts
-	client := func(ctx context.Context, ws string) (*llm.Client, error) {
-		return llm.NewClientFromSecret(ctx, resolver, ws, s, llmHTTP)
+	// The provider comes from llm_provider: the Anthropic API (key from the
+	// workspace credential) or a CLI signed in on the host. Only the
+	// provider name is logged, never a credential or a path.
+	factory, err := llm.NewFactory(s, resolver, llmHTTP, s.TmpDir)
+	if err != nil {
+		return agentServices{}, errors.New("llm provider startup failed")
 	}
+	log.Printf("llm provider: %s", factory.Provider())
+	if !factory.Ready() {
+		log.Printf("llm provider %s: binary not usable; LLM work falls back to notices (llm_unconfigured)", factory.Provider())
+	}
+	client := factory.Client
 	models := func(ctx context.Context, ws string) (agent.Triager, agent.Investigator, error) {
 		c, err := client(ctx, ws)
 		if err != nil {
@@ -179,17 +188,23 @@ func buildBehaviorEngine(pool *pgxpool.Pool, s settings.Settings, store *storage
 	if err != nil {
 		return nil, nil, errors.New("behavior action engine startup failed")
 	}
+	clickUpAPI := clickupchat.New(netguard.Client(s.ToolTimeout, netguard.DefaultHosts))
 	runs := behavior.NewRunWorker(behavior.RunWorkerDeps{
 		Runs: store, Defs: store, Profiles: store,
-		Policies:   policies,
-		Models:     ag.provider,
-		Callers:    behavior.ExecutorFactory(ag.reg, audit, redactor, ag.limits),
-		Dispatcher: engine,
-		Notifier:   engine,
-		Redactor:   redactor,
+		Policies:       policies,
+		Models:         ag.provider,
+		Callers:        behavior.ExecutorFactory(ag.reg, audit, redactor, ag.limits),
+		Dispatcher:     engine,
+		Notifier:       engine,
+		Redactor:       redactor,
+		ChatMessages:   &chatpoll.MessageReader{Chat: clickUpAPI, Secrets: resolver},
+		Comments:       &chatpoll.CommentReader{API: clickUpAPI, Secrets: resolver},
+		Members:        &chatpoll.MemberDirectory{API: clickUpAPI, Secrets: resolver},
+		ChannelMembers: &chatpoll.ChannelMemberDirectory{API: clickUpAPI, Secrets: resolver},
 	}, behavior.RunWorkerSettings{
 		Workers: int(s.BehaviorWorkers), PollInterval: s.BehaviorPollInterval,
 		DefaultModel: s.ActorModel, DefaultMaxTokens: int(s.BehaviorMaxTokens), MaxOutputTokens: int(s.MaxOutputTokens),
+		ModelFits: func(m string) bool { return settings.ModelFitsProvider(s.LLMProvider, m) },
 	})
 	return runs, engine, nil
 }

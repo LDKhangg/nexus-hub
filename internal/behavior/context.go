@@ -31,6 +31,11 @@ import (
 //
 //   memory:decision/<id>              a past decision (memory_search)
 //
+//   clickup:chat/<id>#meta            the triggering chat message's ids and names
+//   clickup:chat/<id>#text            the triggering chat message's text
+//   clickup:comment/<id>#meta         the triggering comment's ids and sender
+//   clickup:comment/<id>#text         the triggering comment's text
+//
 // The engine knows, per read tool, how to derive the tool's input from
 // the run's subject or the context already collected (readRules). Tools
 // without a rule are noted as not read.

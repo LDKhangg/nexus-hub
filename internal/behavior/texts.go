@@ -181,6 +181,8 @@ func (t texts) outcomeWord(status, code string) string {
 		return t.pick("policy đang ở chế độ chạy thử, không ghi", "the policy is in dry-run mode; not written")
 	case OutcomeSkippedPrevious:
 		return t.pick("bỏ qua vì bước trước chưa thành công", "skipped: the previous step did not succeed")
+	case OutcomeSkippedVerdict:
+		return t.pick("bỏ qua theo đánh giá của AI", "skipped by the AI verdict")
 	case OutcomeUnknown:
 		return t.pick("không rõ kết quả, hãy kiểm tra tay", "outcome unknown; check by hand")
 	}
@@ -203,6 +205,35 @@ func (t texts) reactionLine(o RunActionOutcome) string {
 	}
 	return t.pick(fmt.Sprintf("Không thả reaction %s: %s", name, t.outcomeWord(o.Status, o.Code)),
 		fmt.Sprintf("Reaction %s not added: %s", name, t.outcomeWord(o.Status, o.Code)))
+}
+
+// verdictLine reports the run's model verdict. summary is model output,
+// already cleaned (secrets redacted, mentions neutralised).
+func (t texts) verdictLine(label string, confidence float64, summary string) string {
+	line := fmt.Sprintf("AI: %s (%.2f)", label, confidence)
+	if summary != "" {
+		line += " – " + summary
+	}
+	return line
+}
+
+// verdictUnavailableLine reports a run whose model step gave no verdict.
+func (t texts) verdictUnavailableLine(code string) string {
+	return t.pick(fmt.Sprintf("AI: không đưa ra được đánh giá (%s)", code), fmt.Sprintf("AI: no verdict (%s)", code))
+}
+
+// gateSkippedLine reports a run-level action skipped by its "when"
+// condition: the verdict's label and confidence, and the label it needed.
+func (t texts) gateSkippedLine(action, label string, confidence float64, want string) string {
+	return t.pick(fmt.Sprintf("Không chạy %s: AI đánh giá %s (%.2f), cần %s", action, label, confidence, want),
+		fmt.Sprintf("%s not run: AI judged %s (%.2f), needs %s", action, label, confidence, want))
+}
+
+// gateUnavailableLine reports a run-level action skipped because the run
+// has no verdict.
+func (t texts) gateUnavailableLine(action, code string) string {
+	return t.pick(fmt.Sprintf("Không chạy %s: AI không đưa ra được đánh giá (%s)", action, code),
+		fmt.Sprintf("%s not run: AI gave no verdict (%s)", action, code))
 }
 
 // capRunes clips s to n runes with an ellipsis.
