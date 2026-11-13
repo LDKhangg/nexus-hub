@@ -1,6 +1,6 @@
 # Phase 3e: AI intent gate for run actions, and "someone tagged me" reports
 
-- Date: 2026-11-13. Status: **draft, waiting for the owner's approval**.
+- Date: 2026-11-13. Status: approved by the owner in chat ("ok", 2026-11-13).
 - Depends on: Phase 3c (an LLM provider the owner can use without an API key:
   Claude Code CLI or opencode with OpenAI models).
 - Branch (when approved): `feature/phase3e` from the Phase 3c head.

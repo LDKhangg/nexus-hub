@@ -4,7 +4,7 @@
 - Branch: `feature/phase3c`, rebased on `main` 987d08e (Phase 3d merged).
 - Amended 2026-11-13 (v2): the owner wants **opencode with OpenAI models** as
   well ("dùng claude cli hoặc opencode nhưng mà model của openAI"). Added
-  REQ-C8..C11 and task C2. Status of v2: waiting for the owner's approval.
+  REQ-C8..C11 and task C2. v2 approved by the owner in chat ("ok", 2026-11-13); default opencode model for the owner: `openai/gpt-6-luna`.
 
 ## Goal
 
