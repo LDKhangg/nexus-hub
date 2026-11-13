@@ -90,8 +90,13 @@ func TestNoticeAcceptAtomic(t *testing.T) {
 	}
 	var content, sender string
 	var when time.Time
-	if err := pool.QueryRow(ctx, `SELECT content,sender_name,occurred_at FROM message_logs ORDER BY id LIMIT 1`).Scan(&content, &sender, &when); err != nil || content != e.Content || sender != e.SenderName || !when.Equal(e.OccurredAt) {
+	if err := pool.QueryRow(ctx, `SELECT content,sender_name,occurred_at FROM message_logs ORDER BY id LIMIT 1`).Scan(&content, &sender, &when); err != nil || content != e.Content || !when.Equal(e.OccurredAt) {
 		t.Fatalf("original lost %v", err)
+	}
+	// REQ-5 (Phase 4): notices store ids only; the platform display name is
+	// never persisted in message_logs.
+	if e.SenderName == "" || sender != "" {
+		t.Fatalf("notice stored sender_name %q, want blank (input name %q)", sender, e.SenderName)
 	}
 	other := missingID
 	mustExec(t, ctx, pool, `INSERT INTO integrations(id,workspace_id,platform,role,config) SELECT $1,workspace_id,platform,role,config FROM integrations WHERE id=$2`, other, integrationA)

@@ -1,14 +1,17 @@
 package storage
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
 	dbsqlc "github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const ownerUserID = "00000000-0000-0000-0000-000000000001"
@@ -31,6 +34,66 @@ func ownerMigrationParts(t *testing.T) (up, down, bootstrap string) {
 	return up, down, up[start:]
 }
 
+type migrationParts struct{ name, up, down string }
+
+// laterThanOwnerMigrations returns the migrations after 00012 in version
+// order. They depend on 00012's tables, so they must be reverted (in reverse
+// order) before 00012's Down runs, and re-applied after its Up.
+func laterThanOwnerMigrations(t *testing.T) []migrationParts {
+	t.Helper()
+	_, file, _, _ := runtime.Caller(0)
+	files, err := filepath.Glob(filepath.Join(filepath.Dir(file), "../../../db/migrations/*.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(files)
+	var later []migrationParts
+	for _, path := range files {
+		name := filepath.Base(path)
+		if name <= "00012_people_reporting_owner.sql" {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		up, down, ok := strings.Cut(string(data), "-- +goose Down")
+		if !ok {
+			t.Fatalf("migration %s has no down section", name)
+		}
+		later = append(later, migrationParts{name: name, up: up, down: down})
+	}
+	return later
+}
+
+// revertOwnerMigration reverts every later migration in reverse order and then
+// 00012, leaving the schema at version 00011.
+func revertOwnerMigration(t *testing.T, ctx context.Context, pool *pgxpool.Pool, down string, later []migrationParts) {
+	t.Helper()
+	for i := len(later) - 1; i >= 0; i-- {
+		if _, err := pool.Exec(ctx, later[i].down); err != nil {
+			t.Fatalf("revert %s: %v", later[i].name, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, down); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// reapplyOwnerMigration applies 00012 and then every later migration in order,
+// leaving the schema at the latest version.
+func reapplyOwnerMigration(t *testing.T, ctx context.Context, pool *pgxpool.Pool, up string, later []migrationParts) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, up); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range later {
+		if _, err := pool.Exec(ctx, m.up); err != nil {
+			t.Fatalf("reapply %s: %v", m.name, err)
+		}
+	}
+}
+
 func TestOwnerBootstrap(t *testing.T) {
 	t.Run("TC-25 empty database remains valid", func(t *testing.T) {
 		ctx, pool := testDB(t)
@@ -50,15 +113,12 @@ func TestOwnerBootstrap(t *testing.T) {
 	t.Run("TC-25 populated bootstrap is idempotent", func(t *testing.T) {
 		ctx, pool := testDB(t)
 		up, down, bootstrap := ownerMigrationParts(t)
-		if _, err := pool.Exec(ctx, down); err != nil {
-			t.Fatal(err)
-		}
+		later := laterThanOwnerMigrations(t)
+		revertOwnerMigration(t, ctx, pool, down, later)
 		mustExec(t, ctx, pool, `INSERT INTO workspaces(id,display_name) VALUES($1,'A'),($2,'B')`, workspaceA, workspaceB)
 		mustExec(t, ctx, pool, `INSERT INTO app_settings(key,value) VALUES ('owner_telegram_user_id','"4242"'),('owner_clickup_user_id','"77"')`)
 		mustExec(t, ctx, pool, `INSERT INTO integrations(id,workspace_id,platform,config) VALUES($1,$2,'github','{"agent":{"tools":{"github":{"accounts":{"main":{"login":"owner-gh"}}}}}}')`, integrationA, workspaceA)
-		if _, err := pool.Exec(ctx, up); err != nil {
-			t.Fatal(err)
-		}
+		reapplyOwnerMigration(t, ctx, pool, up, later)
 		if _, err := pool.Exec(ctx, bootstrap); err != nil {
 			t.Fatalf("bootstrap rerun failed: %v", err)
 		}
@@ -74,14 +134,11 @@ func TestOwnerBootstrap(t *testing.T) {
 	t.Run("TC-26 owner identity requires persisted membership and self account", func(t *testing.T) {
 		ctx, pool := testDB(t)
 		up, down, _ := ownerMigrationParts(t)
-		if _, err := pool.Exec(ctx, down); err != nil {
-			t.Fatal(err)
-		}
+		later := laterThanOwnerMigrations(t)
+		revertOwnerMigration(t, ctx, pool, down, later)
 		mustExec(t, ctx, pool, `INSERT INTO workspaces(id,display_name) VALUES($1,'A')`, workspaceA)
 		mustExec(t, ctx, pool, `INSERT INTO app_settings(key,value) VALUES ('owner_telegram_user_id','"4242"')`)
-		if _, err := pool.Exec(ctx, up); err != nil {
-			t.Fatal(err)
-		}
+		reapplyOwnerMigration(t, ctx, pool, up, later)
 		q := dbsqlc.New(pool)
 		owner, err := q.GetOwnerUser(ctx)
 		if err != nil || owner.ID != testUUID(t, ownerUserID) {
