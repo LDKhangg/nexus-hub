@@ -16,6 +16,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
 	"github.com/LDKhangg/nexus-hub/internal/descblock"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
+	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
 
@@ -169,6 +170,9 @@ type ActionDeps struct {
 	// mode; nil sends them at once.
 	Digests  DigestStore
 	Redactor *agent.Redactor
+	// Reports is the single preference-aware renderer for every owner report.
+	// Nil uses owner defaults and platform/id contact fallbacks.
+	Reports *reporting.Renderer
 }
 
 // ActionSettings tune the action library.
@@ -205,6 +209,9 @@ func NewEngine(d ActionDeps, s ActionSettings) (*Engine, error) {
 	}
 	if d.Redactor == nil {
 		d.Redactor = agent.NewRedactor(nil)
+	}
+	if d.Reports == nil {
+		d.Reports = reporting.NewRenderer(nil, nil)
 	}
 	if s.SweepInterval <= 0 {
 		s.SweepInterval = time.Minute
@@ -1066,18 +1073,25 @@ func (e *Engine) summary(ctx context.Context, rc RunContext, chat ChatRef, key, 
 		return nil
 	}
 	t := textsFor(rc.Doc.Language)
-	var b strings.Builder
-	b.WriteString(head + " (" + t.runRef(rc.Doc.Name, rc.Run.ID) + ")\n")
-	link := RunLink(rc)
-	budget := maxTelegramRunes
-	if link != "" {
-		budget -= len(link) + 1
+	kind := reporting.KindNotify
+	if key == DigestKeyFYI {
+		kind = reporting.KindFYI
 	}
-	b.WriteString(summaryLines(t, items, withStatus, max(budget/len(items)-40, 60)))
-	text := capRunes(strings.TrimSpace(b.String()), budget)
-	if link != "" {
-		text += "\n" + link
+	if rc.Trigger.Mentioned {
+		kind = reporting.KindMention
 	}
+	text, err := e.d.Reports.Render(ctx, reporting.Report{
+		Kind: kind, UserID: reporting.DefaultOwnerUserID, WorkspaceID: rc.Run.WorkspaceID,
+		Behavior: rc.Run.BehaviorName, Language: rc.Doc.Language, Platform: "clickup", ExternalID: rc.Trigger.SenderID,
+		Values: reporting.Values{
+			AISummary: head + "\n" + strings.TrimSpace(summaryLines(t, items, withStatus, max(maxTelegramRunes/len(items)-40, 60))),
+			Link:      RunLink(rc), Behavior: rc.Doc.Name, RunID: fmt.Sprint(rc.Run.ID), Channel: rc.Trigger.ChannelName,
+		}, TraceHint: fmt.Sprintf("/trace %d", rc.Run.ID),
+	})
+	if err != nil {
+		return err
+	}
+	text = capRunes(text, maxTelegramRunes)
 	msg := OutMessage{Text: text}
 	if len(items) == 1 {
 		fb, err := e.ensureApproval(ctx, rc.Run.WorkspaceID, NewApproval{
@@ -1089,7 +1103,7 @@ func (e *Engine) summary(ctx context.Context, rc RunContext, chat ChatRef, key, 
 		}
 		msg.Buttons = [][]Button{e.feedbackRow(t, fb.Nonce)}
 	}
-	_, err := e.sendOnce(ctx, rc.Run, key, chat, msg)
+	_, err = e.sendOnce(ctx, rc.Run, key, chat, msg)
 	return err
 }
 
@@ -1225,7 +1239,15 @@ func (e *Engine) RunFailed(ctx context.Context, rc RunContext, code string) erro
 	if !codeRe.MatchString(code) {
 		code = "failed"
 	}
-	t := textsFor(rc.Doc.Language)
-	_, err = e.sendOnce(ctx, rc.Run, "failed", chat, OutMessage{Text: t.runFailed(name, rc.Run.ID, code)})
+	text, renderErr := e.d.Reports.Render(ctx, reporting.Report{
+		Kind: reporting.KindFailure, UserID: reporting.DefaultOwnerUserID, WorkspaceID: rc.Run.WorkspaceID,
+		Behavior: rc.Run.BehaviorName, Language: rc.Doc.Language, Platform: "clickup", ExternalID: rc.Trigger.SenderID,
+		Values:    reporting.Values{Reason: code, Behavior: name, RunID: fmt.Sprint(rc.Run.ID)},
+		TraceHint: fmt.Sprintf("/trace %d", rc.Run.ID),
+	})
+	if renderErr != nil {
+		return renderErr
+	}
+	_, err = e.sendOnce(ctx, rc.Run, "failed", chat, OutMessage{Text: text})
 	return err
 }
