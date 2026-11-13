@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** When a ClickUp comment arrives, Nexus-Hub runs the `ARCHITECTURE.md` request flow durably: filter → durable debounce → sanitized context packet → Tier-1 triage. When needed, a Tier-2 ReAct actor coordinates many tools under a strict, tiered permission policy:
+**Goal:** When a ClickUp comment arrives, Nexus-Hub runs the `docs/architecture.md` request flow durably: filter → durable debounce → sanitized context packet → Tier-1 triage. When needed, a Tier-2 ReAct actor coordinates many tools under a strict, tiered permission policy:
 - GitHub REST with the right account or a GitHub App;
 - `git` read and workspace operations (clone, fetch, pull, checkout, commit, push…) on Nexus-managed clones;
 - the ClickUp API.
@@ -21,7 +21,7 @@ The result is reported one-way to Telegram. All configuration and secrets come f
 
 **Tech Stack:** Go (existing module; stdlib `net/http`, `crypto/aes`, `crypto/cipher`, `crypto/rsa`, `go/parser`, `syscall` rlimits), Echo v4, pgx/v5, sqlc, goose, PostgreSQL, `anthropic-sdk-go/v2` tool use and prompt caching, the `git` CLI, GitHub REST v3 (`X-GitHub-Api-Version: 2022-11-28`), ClickUp API v2, Telegram Bot API `sendMessage`, systemd (unit file only).
 
-**Spec:** The embedded design below is the Phase 2 specification. It is derived from `ARCHITECTURE.md` §1–§2 and §5 ("Credential Decryptor"), and from the user's decisions of 2026-11-10:
+**Spec:** The embedded design below is the Phase 2 specification. It is derived from `docs/architecture.md` §1–§2 and §5 ("Credential Decryptor"), and from the user's decisions of 2026-11-10:
 - **Scope.** Code-first. The core comes before any reply feature, and replies/approvals move to a later phase.
 - **Tools.** The AI may call tools, including write and merge/close tools, under strict, configurable permissions.
 - **GitHub.** No `gh` CLI: plain `git` plus the GitHub API with the correct account. Both PATs and a GitHub App are supported.

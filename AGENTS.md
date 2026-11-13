@@ -22,14 +22,14 @@ exist, look here and tell the Lead; never guess or read an older copy.
 | What | Path |
 |---|---|
 | Workflow and roles (this file) | `AGENTS.md` (`CLAUDE.md` only includes it) |
-| Tester guide | `TESTER.md` |
-| Reviewer guide | `REVIEWER.md` |
+| Tester guide | `docs/agents/tester.md` |
+| Reviewer guide | `docs/agents/reviewer.md` |
 | Agent rules and permissions | `.opencode/agents/` (implementer, tester, reviewer) |
 | Product contract (never edit) | `docs/product/PCC-001.md` |
 | Phases and decisions | `docs/product/ROADMAP.md` |
 | PCC status per ID | `docs/product/TRACEABILITY.md` |
 | Open test debt | `docs/product/test-debt/` |
-| Phase plans (REQ lists) | `docs/superpowers/plans/` |
+| Phase plans (REQ lists) | `docs/plans/` |
 | How to run and operate | `docs/runbooks/self-host-home.md` |
 | Behavior examples | `examples/behaviors/` |
 | Overview for humans | `README.md` |
@@ -41,8 +41,8 @@ exist, look here and tell the Lead; never guess or read an older copy.
 |---|---|---|---|
 | **Lead** | Claude Opus, the main Claude Code session | writes the plan with numbered requirements, writes one brief per task (context, what to change, what to test), hands briefs to the opencode agents, reads diffs and reports, judges them, writes Phase and Fix Briefs | writes production code or tests; runs `go test`; reviews its own plan's code as the Reviewer; pushes or merges without the owner's OK |
 | **Implementer** | opencode agent `implementer` (`.opencode/agents/implementer.md`, model `openai/gpt-5.6-sol#medium`) | writes the production code for one brief, runs the compile checks, commits locally, returns an Implementer Report | writes or edits tests; runs `go test`; changes other tasks' scope; pushes |
-| **Tester** | opencode agent `tester` (`.opencode/agents/tester.md`, model `openai/gpt-5.6-sol#medium`); full guide `TESTER.md` | designs test cases from the requirements (requirement, human-behaviour and abuse cases), writes and commits test files, reads the CI run, returns a Test Report | edits production code; weakens tests to pass; pushes |
-| **Reviewer** | opencode agent `reviewer` (`.opencode/agents/reviewer.md`, model `openai/gpt-6-sol#medium`, read-only); full guide `REVIEWER.md` | judges the branch against the requirements, real user journeys and the constraints; returns a Review Report with proven findings | edits files; runs `go test`; commits |
+| **Tester** | opencode agent `tester` (`.opencode/agents/tester.md`, model `openai/gpt-5.6-sol#medium`); full guide `docs/agents/tester.md` | designs test cases from the requirements (requirement, human-behaviour and abuse cases), writes and commits test files, reads the CI run, returns a Test Report | edits production code; weakens tests to pass; pushes |
+| **Reviewer** | opencode agent `reviewer` (`.opencode/agents/reviewer.md`, model `openai/gpt-6-sol#medium`, read-only); full guide `docs/agents/reviewer.md` | judges the branch against the requirements, real user journeys and the constraints; returns a Review Report with proven findings | edits files; runs `go test`; commits |
 | **Owner** | the human | approves plans and Test Plans, watches or steers any agent session in the opencode window, pushes branches so CI runs, approves merge | n/a |
 
 If you are an opencode agent, your role is your agent name; your agent file
@@ -101,7 +101,7 @@ summary. On `develop` and `v*` tags it publishes `ghcr.io/<repo>` tagged with
 the short SHA (and `latest` on develop). Deploying to the VPS is a later phase.
 
 - CI is where the suite runs. The Tester writes tests and reports the CI
-  run; nobody runs the full suite locally (see `TESTER.md`).
+  run; nobody runs the full suite locally (see `docs/agents/tester.md`).
 - The Lead may read CI results (`gh run view`, `gh run download`) to judge a
   report; reading CI is not running tests. A red `check` job on a Lead or
   Implementer commit is fixed before the Phase Brief.
@@ -109,7 +109,7 @@ the short SHA (and `latest` on develop). Deploying to the VPS is a later phase.
 
 ## Loop
 
-1. **Plan.** The Lead writes `docs/superpowers/plans/<date>-<topic>.md`: a
+1. **Plan.** The Lead writes `docs/plans/<date>-<topic>.md`: a
    numbered requirement list (`REQ-1`, …, each an observable behaviour), the
    tasks, interfaces, global constraints and review focus. The owner approves
    it.

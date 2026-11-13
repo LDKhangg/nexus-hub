@@ -1,6 +1,6 @@
 # Báo cáo Phase 2 — Agent core, multi-tool, GitHub/Git, secret trong DB (chốt ngày 2026-11-10)
 
-> Plan chi tiết (nguồn chính, tiếng Anh): `docs/superpowers/plans/2026-11-10-phase2-agent-core-tools.md`
+> Plan chi tiết (nguồn chính, tiếng Anh): `docs/plans/2026-11-10-phase2-agent-core-tools.md`
 > Nhánh: `feature/phase2` (tách từ `master` = `54aa048`, Phase 1 đã merge vào `main` + `master` và đã push).
 > Trạng thái: **plan đã viết xong, chưa triển khai**. Bắt đầu triển khai vào ngày 2026-11-11.
 

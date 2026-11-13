@@ -249,7 +249,7 @@ nexus-hub/
 │   ├── embed.go                            # //go:embed migrations/*.sql (Auto-migrate BYOI)
 │   ├── migrations/
 │   └── query/hub_queries.sql
-└── ARCHITECTURE.md
+└── docs/architecture.md
 ```
 
 ---

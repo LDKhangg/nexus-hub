@@ -3,8 +3,8 @@
 - Merged to `main` by the owner's decision on 2026-11-12, before final
   verification (the Tester ran out of budget).
 - Merged head: 079acef3efa52ec147402212d711369bcaee1f5d (plus this docs commit).
-- Plans: docs/superpowers/plans/2026-11-10-phase2-agent-core-tools.md,
-  docs/superpowers/plans/2026-11-12-phase2-review-fixes.md
+- Plans: docs/plans/2026-11-10-phase2-agent-core-tools.md,
+  docs/plans/2026-11-12-phase2-review-fixes.md
 - Ledger: .superpowers/sdd/2026-11-10-phase2-agent-core-tools/progress.md
 - PCC IDs touched: see TRACEABILITY.md rows marked IN_PROGRESS with phase 2.
 

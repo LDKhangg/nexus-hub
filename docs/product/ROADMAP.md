@@ -6,7 +6,7 @@ destination. This roadmap is the route. `docs/product/TRACEABILITY.md` holds
 the status of every PCC requirement.
 
 When documents conflict, the PCC wins over this roadmap, and this roadmap
-wins over `ARCHITECTURE.md`. That file predates the PCC: it mentions Gemini
+wins over `docs/architecture.md`. That file predates the PCC: it mentions Gemini
 Flash, an Oracle micro VM and 5 milestones, and is superseded on those
 points.
 
@@ -16,7 +16,7 @@ points.
   tested. A phase starts only after the phases it depends on have finished
   (PCC §10.1.5).
 - **Phase plan.** For each phase, the Lead writes
-  `docs/superpowers/plans/<date>-phase<N>-<topic>.md`, following `AGENTS.md`.
+  `docs/plans/<date>-phase<N>-<topic>.md`, following `AGENTS.md`.
   The plan:
   - lists the PCC IDs it covers (`FR-…`, `UI-…`, `NFR-…`, `DEP-…`, `E2E-…`);
   - turns them into numbered, observable `REQ-n` items, each tagged with its
@@ -126,7 +126,7 @@ exit criteria, and the decisions it needs.
 - **First behavior:** the owner's tech-spec review (company AI's spec PR + US +
   OQ, answers into the task description, dry-run first) as a YAML file, not
   code.
-- **Plan:** `docs/superpowers/plans/2026-11-12-phase3-behavior-engine.md`.
+- **Plan:** `docs/plans/2026-11-12-phase3-behavior-engine.md`.
 - **PCC:** FR-073–078, 081, 082, 084–086 (partial), FR-003, 012, 017, 018,
   029, FR-037, 053, 055, 056, FR-009, 113, 115, 116, 121–127, 129, 130, FR-026,
   NFR-021–023, 025, 026; E2E-004 partial.
@@ -164,7 +164,7 @@ hosted. CI and correlation IDs are already done or built into each phase.
 - **Re-scoped by the owner:** identify the other people on connected
   platforms (contacts with aliases across ClickUp, GitHub, Telegram), and let
   the owner set report style, toggles and templates. Plan:
-  `docs/superpowers/plans/2026-11-13-phase4-people-directory-report-prefs.md`.
+  `docs/plans/2026-11-13-phase4-people-directory-report-prefs.md`.
 - The original Phase 4 scope below becomes **Phase 4b: Identity and event
   gateway** (inbox, event contract, adapter registry, `/link` for other hub
   users).
@@ -431,7 +431,7 @@ hosted. CI and correlation IDs are already done or built into each phase.
     rebuilt).
 - **Telegram-specific outputs:** Phase 2 reports are one-way. P6 adds replies,
   and P9 adds approvals.
-- **Ownership:** `ARCHITECTURE.md` stays as background. When a phase changes
+- **Ownership:** `docs/architecture.md` stays as background. When a phase changes
   the architecture, that phase updates the doc (NFR-034).
 
 ## 7. Owner's primary use cases (2026-11-12)
