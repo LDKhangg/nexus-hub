@@ -8,6 +8,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -102,6 +103,26 @@ func (s *PostgresStore) Template(ctx context.Context, userID, workspaceID, behav
 
 var _ Store = (*PostgresStore)(nil)
 
+// ensureMember gives a workspace without any owner the stable bootstrap owner
+// before an owner-scoped write, so a workspace created without a membership
+// row can still save settings. Other users must already be members.
+func (s *PostgresStore) ensureMember(ctx context.Context, user, workspace pgtype.UUID) error {
+	if uuidText(user) != DefaultOwnerUserID {
+		return nil
+	}
+	_, err := s.q.EnsureWorkspaceOwner(ctx, workspace)
+	return err
+}
+
+// memberError maps the membership foreign-key violation to a clear error.
+func memberError(err error) error {
+	var pg *pgconn.PgError
+	if errors.As(err, &pg) && pg.Code == "23503" {
+		return ErrNotWorkspaceMember
+	}
+	return err
+}
+
 // OwnerUserID resolves the workspace's P1 owner. The stable bootstrap ID is a
 // safe fallback for databases created before the membership row was repaired.
 func (s *PostgresStore) OwnerUserID(ctx context.Context, workspaceID string) (string, error) {
@@ -136,13 +157,16 @@ func (s *PostgresStore) SetPrefs(ctx context.Context, userID, workspaceID, behav
 	if err != nil {
 		return Prefs{}, err
 	}
+	if err := s.ensureMember(ctx, user, workspace); err != nil {
+		return Prefs{}, err
+	}
 	row, err := s.q.SetReportPreferences(ctx, sqlc.SetReportPreferencesParams{
 		UserID: user, WorkspaceID: workspace, BehaviorName: optionalText(behavior), Style: string(p.Style),
 		ShowReaction: p.ShowReaction, ShowAiSummary: p.ShowAISummary, ShowLinks: p.ShowLinks,
 		ShowPrTitles: p.ShowPRTitles, ShowTraceHint: p.ShowTraceHint, Language: optionalText(p.Language),
 	})
 	if err != nil {
-		return Prefs{}, err
+		return Prefs{}, memberError(err)
 	}
 	return prefsFromRow(row), nil
 }
@@ -163,8 +187,14 @@ func (s *PostgresStore) SetTemplate(ctx context.Context, userID, workspaceID, be
 	if err != nil {
 		return err
 	}
+	if s == nil || s.q == nil {
+		return errors.New("report settings store is not configured")
+	}
+	if err := s.ensureMember(ctx, user, workspace); err != nil {
+		return err
+	}
 	_, err = s.q.SetReportTemplate(ctx, sqlc.SetReportTemplateParams{UserID: user, WorkspaceID: workspace, BehaviorName: optionalText(behavior), Kind: string(kind), Body: body})
-	return err
+	return memberError(err)
 }
 
 // DeleteTemplate resets one exact template scope.
@@ -191,10 +221,16 @@ func (s *PostgresStore) RememberTemplatePrompt(ctx context.Context, userID, work
 	if err != nil {
 		return err
 	}
-	return s.q.CreateReportTemplatePrompt(ctx, sqlc.CreateReportTemplatePromptParams{
+	if s == nil || s.q == nil {
+		return errors.New("report settings store is not configured")
+	}
+	if err := s.ensureMember(ctx, user, workspace); err != nil {
+		return err
+	}
+	return memberError(s.q.CreateReportTemplatePrompt(ctx, sqlc.CreateReportTemplatePromptParams{
 		UserID: user, WorkspaceID: workspace, MessageID: messageID, BehaviorName: optionalText(behavior),
 		Kind: string(kind), ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true},
-	})
+	}))
 }
 
 // StageTemplateReply keeps template text out of the generic update queue.

@@ -102,6 +102,9 @@ func reportPrefsCommand(ctx context.Context, pool *pgxpool.Pool, args []string, 
 			return err
 		}
 		prefs, err = store.SetPrefs(ctx, owner, o.workspace, o.behavior, prefs)
+		if errors.Is(err, reporting.ErrNotWorkspaceMember) {
+			return err
+		}
 		if err != nil {
 			return errors.New("database operation failed")
 		}
@@ -180,6 +183,9 @@ func reportTemplateCommand(ctx context.Context, pool *pgxpool.Pool, args []strin
 			return err
 		}
 		if err := store.SetTemplate(ctx, owner, o.workspace, o.behavior, kind, body); err != nil {
+			if errors.Is(err, reporting.ErrNotWorkspaceMember) {
+				return err
+			}
 			return errors.New("database operation failed")
 		}
 		return json.NewEncoder(out).Encode(map[string]any{"kind": kind, "behavior": o.behavior, "saved": true})

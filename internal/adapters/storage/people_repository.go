@@ -31,6 +31,7 @@ type peopleCacheValue struct {
 
 // PeopleRepository is the PostgreSQL-backed workspace people directory.
 type PeopleRepository struct {
+	pool    *pgxpool.Pool
 	queries *sqlc.Queries
 	now     func() time.Time
 
@@ -43,7 +44,7 @@ func NewPeopleRepository(pool *pgxpool.Pool) (*PeopleRepository, error) {
 	if pool == nil {
 		return nil, errors.New("people repository requires pool")
 	}
-	return &PeopleRepository{queries: sqlc.New(pool), now: time.Now, cache: make(map[string]map[peopleCacheKey]peopleCacheValue)}, nil
+	return &PeopleRepository{pool: pool, queries: sqlc.New(pool), now: time.Now, cache: make(map[string]map[peopleCacheKey]peopleCacheValue)}, nil
 }
 
 var _ people.Resolver = (*PeopleRepository)(nil)
@@ -97,7 +98,20 @@ func (r *PeopleRepository) Sighting(ctx context.Context, s people.Sighting) erro
 	}
 	platformName := people.CleanDisplayName(s.PlatformName)
 	username := people.CleanDisplayName(s.Username)
-	existing, getErr := r.queries.GetContactByAccount(ctx, sqlc.GetContactByAccountParams{WorkspaceID: ws, Platform: s.Platform, ExternalID: s.ExternalID})
+	// The workspace lock is its own statement: under READ COMMITTED each later
+	// statement takes a new snapshot, so a concurrent first sighting of the
+	// same account sees the account the previous lock holder committed and
+	// joins its contact instead of creating an orphan one.
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("record people sighting: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	q := r.queries.WithTx(tx)
+	if _, err := q.LockPeopleWorkspace(ctx, ws); err != nil {
+		return fmt.Errorf("record people sighting: %w", err)
+	}
+	existing, getErr := q.GetContactByAccount(ctx, sqlc.GetContactByAccountParams{WorkspaceID: ws, Platform: s.Platform, ExternalID: s.ExternalID})
 	if getErr == nil {
 		stale := existing.LastSeen.Valid && seenAt.Before(existing.LastSeen.Time)
 		if platformName == "" || stale {
@@ -113,12 +127,15 @@ func (r *PeopleRepository) Sighting(ctx context.Context, s people.Sighting) erro
 	if err != nil {
 		return err
 	}
-	_, err = r.queries.UpsertContactAccount(ctx, sqlc.UpsertContactAccountParams{
+	_, err = q.UpsertContactAccount(ctx, sqlc.UpsertContactAccountParams{
 		AccountID: accountID, WorkspaceID: ws, Platform: s.Platform, ExternalID: s.ExternalID,
 		PlatformName: textOrNull(platformName), Username: textOrNull(username), Source: s.Source,
 		IsSelf: s.IsSelf, SeenAt: pgtype.Timestamptz{Time: seenAt, Valid: true}, ContactID: contactID,
 	})
 	if err != nil {
+		return fmt.Errorf("record people sighting: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("record people sighting: %w", err)
 	}
 	r.mu.Lock()

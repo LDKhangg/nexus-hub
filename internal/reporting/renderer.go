@@ -13,7 +13,7 @@ import (
 // Report is the safe, structured input shared by every report path.
 type Report struct {
 	Kind        Kind
-	UserID      string
+	UserID      string // recipient; empty means the workspace owner
 	WorkspaceID string
 	Behavior    string
 	Language    string
@@ -49,12 +49,38 @@ func (r *Renderer) contact(ctx context.Context, report Report) string {
 	return ""
 }
 
+// OwnerResolver is implemented by stores that know a workspace's owner.
+type OwnerResolver interface {
+	OwnerUserID(ctx context.Context, workspaceID string) (string, error)
+}
+
+// recipient resolves an empty report user to the workspace owner, with the
+// stable bootstrap owner only as the last fallback.
+func (r *Renderer) recipient(ctx context.Context, report Report) (string, error) {
+	if report.UserID != "" {
+		return report.UserID, nil
+	}
+	if owners, ok := r.store.(OwnerResolver); ok && report.WorkspaceID != "" {
+		id, err := owners.OwnerUserID(ctx, report.WorkspaceID)
+		if err != nil {
+			return "", err
+		}
+		if id != "" {
+			return id, nil
+		}
+	}
+	return DefaultOwnerUserID, nil
+}
+
 // Render applies an owner template when present, otherwise the selected
 // built-in style. It is the sole report text renderer used by behavior.
 func (r *Renderer) Render(ctx context.Context, report Report) (string, error) {
 	prefs := DefaultOwnerPrefs()
 	if r != nil && r.store != nil {
 		var err error
+		if report.UserID, err = r.recipient(ctx, report); err != nil {
+			return "", err
+		}
 		prefs, err = r.store.Prefs(ctx, report.UserID, report.WorkspaceID, report.Behavior)
 		if err != nil {
 			return "", err

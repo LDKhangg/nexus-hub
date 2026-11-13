@@ -266,7 +266,7 @@ func (e *Engine) flushBatch(ctx context.Context, b *DigestBatch) (bool, error) {
 	}
 	first := sections[0].rc
 	text, err := e.d.Reports.Render(ctx, reporting.Report{
-		Kind: reporting.KindDigest, UserID: reporting.DefaultOwnerUserID, WorkspaceID: ws, Language: p.Language,
+		Kind: reporting.KindDigest, WorkspaceID: ws, Language: p.Language,
 		Platform: "clickup", ExternalID: first.Trigger.SenderID,
 		Values: reporting.Values{Outcome: t.batchHead(total), Items: strings.TrimSpace(sb.String()), RunID: fmt.Sprint(b.ID)},
 	})

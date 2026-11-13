@@ -10,6 +10,10 @@ import (
 // report-template prompt.
 var ErrTemplatePromptNotFound = errors.New("report template prompt not found")
 
+// ErrNotWorkspaceMember means report settings were saved for a user who is
+// not a member of the workspace.
+var ErrNotWorkspaceMember = errors.New("report owner is not a member of this workspace")
+
 // Style controls the amount of detail in a report.
 type Style string
 

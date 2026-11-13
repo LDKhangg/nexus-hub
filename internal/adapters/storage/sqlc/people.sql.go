@@ -11,6 +11,34 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const ensureWorkspaceOwner = `-- name: EnsureWorkspaceOwner :execrows
+WITH owner_user AS (
+  INSERT INTO public.users(id, display_name, status)
+  VALUES ('00000000-0000-0000-0000-000000000001', 'Owner', 'active')
+  ON CONFLICT (id) DO NOTHING
+  RETURNING id
+)
+INSERT INTO public.workspace_members(user_id, workspace_id, role)
+SELECT '00000000-0000-0000-0000-000000000001'::uuid, w.id, 'owner'
+FROM public.workspaces w
+WHERE w.id = $1::uuid
+  AND NOT EXISTS (
+    SELECT 1 FROM public.workspace_members m
+    WHERE m.workspace_id = w.id AND m.role = 'owner'
+  )
+ON CONFLICT (user_id, workspace_id) DO NOTHING
+`
+
+// Gives a workspace without any owner the stable bootstrap owner (the same
+// user 00012 creates). Idempotent; never changes an existing membership.
+func (q *Queries) EnsureWorkspaceOwner(ctx context.Context, workspaceID pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, ensureWorkspaceOwner, workspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const forgetContact = `-- name: ForgetContact :one
 DELETE FROM public.contacts
 WHERE workspace_id = $1::uuid AND id = $2::uuid
@@ -271,6 +299,22 @@ func (q *Queries) ListUserMemberships(ctx context.Context, userID pgtype.UUID) (
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockPeopleWorkspace = `-- name: LockPeopleWorkspace :one
+SELECT id FROM public.workspaces
+WHERE id = $1::uuid
+FOR UPDATE
+`
+
+// A separate statement takes the per-workspace people lock, so statements that
+// follow in the same READ COMMITTED transaction see accounts committed by the
+// previous lock holder.
+func (q *Queries) LockPeopleWorkspace(ctx context.Context, workspaceID pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, lockPeopleWorkspace, workspaceID)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const mergeContacts = `-- name: MergeContacts :one

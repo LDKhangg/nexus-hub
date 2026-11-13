@@ -1083,7 +1083,7 @@ func (e *Engine) summary(ctx context.Context, rc RunContext, chat ChatRef, key, 
 		kind = reporting.KindMention
 	}
 	text, err := e.d.Reports.Render(ctx, reporting.Report{
-		Kind: kind, UserID: reporting.DefaultOwnerUserID, WorkspaceID: rc.Run.WorkspaceID,
+		Kind: kind, WorkspaceID: rc.Run.WorkspaceID,
 		Behavior: rc.Run.BehaviorName, Language: rc.Doc.Language, Platform: "clickup", ExternalID: rc.Trigger.SenderID,
 		Values: reporting.Values{
 			Items: head + "\n" + strings.TrimSpace(summaryLines(t, items, withStatus, max(maxTelegramRunes/len(items)-40, 60))),
@@ -1243,7 +1243,7 @@ func (e *Engine) RunFailed(ctx context.Context, rc RunContext, code string) erro
 		code = "failed"
 	}
 	text, renderErr := e.d.Reports.Render(ctx, reporting.Report{
-		Kind: reporting.KindFailure, UserID: reporting.DefaultOwnerUserID, WorkspaceID: rc.Run.WorkspaceID,
+		Kind: reporting.KindFailure, WorkspaceID: rc.Run.WorkspaceID,
 		Behavior: rc.Run.BehaviorName, Language: rc.Doc.Language, Platform: "clickup", ExternalID: rc.Trigger.SenderID,
 		Values:    reporting.Values{Reason: code, Behavior: name, RunID: fmt.Sprint(rc.Run.ID)},
 		TraceHint: fmt.Sprintf("/trace %d", rc.Run.ID),

@@ -10,7 +10,10 @@ import (
 )
 
 // WorkspaceRepository exposes trusted administrative workspace operations.
-type WorkspaceRepository struct{ queries *sqlc.Queries }
+type WorkspaceRepository struct {
+	pool    *pgxpool.Pool
+	queries *sqlc.Queries
+}
 type CreateWorkspaceInput struct{ ID, DisplayName string }
 type UpdateWorkspaceInput struct{ ID, DisplayName string }
 
@@ -18,15 +21,35 @@ func NewWorkspaceRepository(pool *pgxpool.Pool) (*WorkspaceRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("workspace repository: pool is required")
 	}
-	return &WorkspaceRepository{queries: sqlc.New(pool)}, nil
+	return &WorkspaceRepository{pool: pool, queries: sqlc.New(pool)}, nil
 }
 func (r *WorkspaceRepository) Create(ctx context.Context, in CreateWorkspaceInput) (tenant.Workspace, error) {
 	id, err := parseDBID(in.ID)
 	if err != nil {
 		return tenant.Workspace{}, fmt.Errorf("create workspace: %w", err)
 	}
-	row, err := r.queries.CreateWorkspace(ctx, sqlc.CreateWorkspaceParams{ID: id, DisplayName: in.DisplayName})
-	return workspaceFromRow(row), repositoryError("create workspace", err, tenant.ErrWorkspaceNotFound)
+	if r.pool == nil {
+		return tenant.Workspace{}, fmt.Errorf("create workspace: pool is required")
+	}
+	// A new workspace gets its owner membership in the same transaction, so
+	// owner-scoped settings (report preferences, templates) can be saved.
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return tenant.Workspace{}, fmt.Errorf("create workspace: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	q := r.queries.WithTx(tx)
+	row, err := q.CreateWorkspace(ctx, sqlc.CreateWorkspaceParams{ID: id, DisplayName: in.DisplayName})
+	if err != nil {
+		return tenant.Workspace{}, repositoryError("create workspace", err, tenant.ErrWorkspaceNotFound)
+	}
+	if _, err := q.EnsureWorkspaceOwner(ctx, id); err != nil {
+		return tenant.Workspace{}, fmt.Errorf("create workspace owner: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return tenant.Workspace{}, fmt.Errorf("create workspace: %w", err)
+	}
+	return workspaceFromRow(row), nil
 }
 func (r *WorkspaceRepository) Get(ctx context.Context, id string) (tenant.Workspace, error) {
 	key, err := parseDBID(id)

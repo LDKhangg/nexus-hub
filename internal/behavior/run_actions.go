@@ -581,7 +581,7 @@ func (e *Engine) runActionsReport(ctx context.Context, rc RunContext, res RunAct
 		}
 	}
 	return e.d.Reports.Render(ctx, reporting.Report{
-		Kind: kind, UserID: reporting.DefaultOwnerUserID, WorkspaceID: rc.Run.WorkspaceID,
+		Kind: kind, WorkspaceID: rc.Run.WorkspaceID,
 		Behavior: rc.Run.BehaviorName, Language: rc.Doc.Language, Platform: "clickup", ExternalID: rc.Trigger.SenderID,
 		Values: values, Reaction: reaction, TraceHint: fmt.Sprintf("/trace %d", rc.Run.ID),
 	})
