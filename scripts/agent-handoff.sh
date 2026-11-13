@@ -36,7 +36,7 @@ root=$(command git rev-parse --show-toplevel)
 cd "$root"
 outdir="$root/.superpowers/handoff"
 mkdir -p "$outdir"
-stamp=$(date +%Y%m%d-%H%M%S)
+stamp=$(date +%Y%m%d-%H%M%S)-$$
 events="$outdir/$stamp-$agent.ndjson"
 report="$outdir/$stamp-$agent.md"
 
