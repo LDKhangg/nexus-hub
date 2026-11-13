@@ -1,7 +1,7 @@
 ---
 description: Nexus-Hub Implementer. Writes production code for one Lead brief, runs compile checks, commits locally.
 mode: primary
-model: openai/gpt-5.6-sol
+model: openai/gpt-5.6-sol#medium
 permissions:
   - { action: "*", resource: "*", effect: deny }
   - { action: read, resource: "*", effect: allow }

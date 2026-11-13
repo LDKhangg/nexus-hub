@@ -1,7 +1,7 @@
 ---
 description: Nexus-Hub Reviewer. Reviews a branch against a Lead brief and returns a Review Report. Read-only.
 mode: primary
-model: openai/gpt-6-sol
+model: openai/gpt-6-sol#medium
 permissions:
   - { action: "*", resource: "*", effect: deny }
   - { action: read, resource: "*", effect: allow }

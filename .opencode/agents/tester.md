@@ -1,7 +1,7 @@
 ---
 description: Nexus-Hub Tester. Designs test cases from a Lead brief, writes and commits tests, reports from CI.
 mode: primary
-model: openai/gpt-5.6-sol
+model: openai/gpt-5.6-sol#medium
 permissions:
   - { action: "*", resource: "*", effect: deny }
   - { action: read, resource: "*", effect: allow }
