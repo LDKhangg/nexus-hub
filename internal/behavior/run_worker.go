@@ -119,7 +119,36 @@ type RunWorkerDeps struct {
 	RunActions RunActionRunner
 	Notifier   Notifier // nil: LogNotifier
 	Redactor   *agent.Redactor
+	// ChatMessages reads the triggering message of a chat-triggered run
+	// for its model step; nil reads none.
+	ChatMessages ChatMessageReader
 }
+
+// ChatMessageReader reads the text of one ClickUp Chat message at run time
+// with the run's source credential (tokenRef), in ClickUp workspace teamID
+// and channel channelID. The text is untrusted: the run executor puts it
+// only into the run's context snapshot, as quoted context for the model,
+// never into trigger data, run-level outcomes, logs or errors. A failure is
+// a *ChatReadError.
+type ChatMessageReader interface {
+	ChatMessageText(ctx context.Context, workspaceID, tokenRef, teamID, channelID, messageID string) (string, error)
+}
+
+// ChatReadError is a safe ChatMessageReader failure: a code and whether a
+// later attempt may succeed.
+type ChatReadError struct {
+	Code      string
+	Transient bool
+}
+
+func (e *ChatReadError) Error() string { return "behavior: chat message read failed: " + e.Code }
+
+// ChatMessageTool names the triggering chat message read in context notes.
+const ChatMessageTool = "clickup_chat_message"
+
+// chatSource is the locator base of a chat message's fragments: "#meta"
+// (trusted identifiers) and "#text" (the untrusted message text).
+func chatSource(messageID string) string { return "clickup:chat/" + messageID }
 
 // RunWorkerSettings tune the executor.
 type RunWorkerSettings struct {
@@ -355,6 +384,14 @@ func (w *RunWorker) attempt(ctx context.Context, rc *RunContext) (*runOutcome, e
 	if len(items) > 0 {
 		return w.dispatch(ctx, *rc, items)
 	}
+	// A verdict run whose model step already ended without a verdict, or
+	// whose run-level actions started, never asks the model again: the
+	// actions keep the verdict they ran with.
+	if rc.Doc.Verdict != nil {
+		if res := DecodeRunActions(run.RunActions); res.Verdict != nil && (!res.Verdict.Available() || len(res.Actions) > 0) {
+			return w.dispatch(ctx, *rc, nil)
+		}
+	}
 
 	cfg, err := w.d.Policies.RunPolicy(ctx, run.WorkspaceID, trig.IntegrationID)
 	if err != nil {
@@ -365,10 +402,16 @@ func (w *RunWorker) attempt(ctx context.Context, rc *RunContext) (*runOutcome, e
 	if out := w.precheck(ctx, col, rc.Doc, trig); out != nil {
 		return out, ctx.Err()
 	}
+	if out := w.readTriggerMessage(ctx, col, cfg.ClickUpTokenRef, run, trig); out != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return w.noVerdict(ctx, rc, out)
+	}
 	snap, err := col.collect(ctx, rc.Doc.Reads)
 	var re *readError
 	if errors.As(err, &re) {
-		return runRetry(CodeReadTransient), nil
+		return w.noVerdict(ctx, rc, runRetry(CodeReadTransient))
 	}
 	if err != nil {
 		return nil, err
@@ -389,15 +432,154 @@ func (w *RunWorker) attempt(ctx context.Context, rc *RunContext) (*runOutcome, e
 		return nil, err
 	}
 
-	modelItems, out, err := w.askModel(ctx, rc)
-	if err != nil || out != nil {
-		return out, err
+	modelItems, verdict, out, err := w.askModel(ctx, rc)
+	if err != nil {
+		return nil, err
+	}
+	if out != nil {
+		return w.noVerdict(ctx, rc, out)
+	}
+	if rc.Doc.Verdict != nil {
+		// Stored before the items, so every later attempt and every
+		// run-level action sees the same verdict.
+		if err := w.saveVerdict(ctx, rc, w.runVerdict(rc, verdict)); err != nil {
+			return nil, err
+		}
 	}
 	stored, err := w.d.Runs.AddRunItems(ctx, run.WorkspaceID, run.ID, run.ClaimToken, w.classify(rc, modelItems))
 	if err != nil {
 		return nil, err
 	}
 	return w.dispatch(ctx, *rc, stored)
+}
+
+// readTriggerMessage adds the triggering message of a chat-triggered run
+// to the context, before the behavior's reads: a "#meta" fragment with
+// trusted identifiers and a "#text" fragment with the untrusted message
+// text (sanitized like every fetched text, redacted with the snapshot). A
+// transient failure retries the run; any other failure is noted. nil
+// means go on.
+func (w *RunWorker) readTriggerMessage(ctx context.Context, col *collector, tokenRef string, run Run, t TriggerData) *runOutcome {
+	if w.d.ChatMessages == nil || run.TriggerKind != TriggerChatMessage || t.MessageID == "" {
+		return nil
+	}
+	if !chatIDRe.MatchString(t.MessageID) || !chatIDRe.MatchString(t.ChannelID) || !chatTeamIDRe.MatchString(t.TeamID) {
+		col.note(ChatMessageTool, "", CodeBadTarget)
+		return nil
+	}
+	text, err := w.d.ChatMessages.ChatMessageText(ctx, run.WorkspaceID, tokenRef, t.TeamID, t.ChannelID, t.MessageID)
+	if ctx.Err() != nil {
+		return runRetry(CodeRunTimeout)
+	}
+	if err != nil {
+		var ce *ChatReadError
+		if errors.As(err, &ce) && ce.Transient {
+			return runRetry(CodeReadTransient)
+		}
+		code := "tool_error"
+		if ce != nil && codeRe.MatchString(ce.Code) {
+			code = ce.Code
+		}
+		col.note(ChatMessageTool, t.MessageID, code)
+		return nil
+	}
+	text, cut := capBytes(text, DefaultReadBytes)
+	if cut {
+		col.note(ChatMessageTool, t.MessageID, NoteTruncated)
+	}
+	base := chatSource(t.MessageID)
+	meta := []string{"message_id: " + t.MessageID, "sender_id: " + t.SenderID, "channel_type: " + t.ChannelType}
+	frags := []Fragment{
+		{Source: base + "#meta", Tool: ChatMessageTool, Lines: meta},
+		{Source: base + "#text", Tool: ChatMessageTool, Lines: lines(text)},
+	}
+	col.add(frags, ChatMessageTool, t.MessageID)
+	return nil
+}
+
+// noVerdict ends a model step that gave no verdict. A behavior with a
+// verdict and run-level actions still runs its actions: every action with
+// a "when" condition is skipped (verdict_unavailable), the others and the
+// owner report run. A transient failure is tried again while attempts
+// remain, as before; on the last attempt, and on any definitive failure,
+// the run records the verdict as unavailable (with the failure code) and
+// runs its actions, so it never retries forever and never runs a gated
+// action without a verdict. Other behaviors keep the outcome as it is.
+func (w *RunWorker) noVerdict(ctx context.Context, rc *RunContext, out *runOutcome) (*runOutcome, error) {
+	if rc.Doc.Verdict == nil || len(rc.Doc.RunActions) == 0 || out.status == RunSkipped {
+		return out, nil
+	}
+	if out.retry && rc.Run.Attempts < MaxRunAttempts {
+		return out, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	log.Printf("behavior run %d corr=%s: no verdict (%s); gated run actions are skipped", rc.Run.ID, rc.Run.CorrelationID, out.code)
+	if err := w.saveVerdict(ctx, rc, &RunVerdict{Code: out.code}); err != nil {
+		return nil, err
+	}
+	end, err := w.dispatch(ctx, *rc, nil)
+	if err != nil || end == nil {
+		return end, err
+	}
+	if end.status == RunDone && !end.retry && end.code == "" {
+		end.code = out.code
+	}
+	return end, nil
+}
+
+// saveVerdict stores the run's verdict with its run-level outcomes and
+// keeps rc in step.
+func (w *RunWorker) saveVerdict(ctx context.Context, rc *RunContext, v *RunVerdict) error {
+	res := DecodeRunActions(rc.Run.RunActions)
+	res.Verdict = v
+	raw := res.encode()
+	if err := w.d.Runs.SetRunActions(ctx, rc.Run.ID, rc.Run.ClaimToken, raw); err != nil {
+		return err
+	}
+	rc.Run.RunActions = raw
+	return nil
+}
+
+// verdictSource is the context fragment that holds the triggering content
+// of the run (the chat message text), "" when there is none.
+func verdictSource(rc *RunContext) string {
+	if rc.Trigger.MessageID == "" {
+		return ""
+	}
+	src := chatSource(rc.Trigger.MessageID) + "#text"
+	if rc.Context.Fragment(src) == nil {
+		return ""
+	}
+	return src
+}
+
+// runVerdict turns the model's verdict into the stored one: the summary
+// cleaned and redacted, the injection flags of the untrusted triggering
+// content (the chat message, or the whole context when the run has no
+// message), and the confidence capped at VerdictFlagCap when flagged.
+func (w *RunWorker) runVerdict(rc *RunContext, mv *ModelVerdict) *RunVerdict {
+	if mv == nil {
+		return &RunVerdict{Code: CodeVerdictUnavailable}
+	}
+	v := &RunVerdict{
+		Label: mv.Label, Confidence: mv.Confidence,
+		Summary: capRunes(w.d.Redactor.RedactSecrets(agent.CleanInput(mv.Summary)), MaxVerdictSummaryChars),
+	}
+	var texts []string
+	if src := verdictSource(rc); src != "" {
+		texts = rc.Context.Fragment(src).Lines
+	} else {
+		for _, f := range rc.Context.Fragments {
+			texts = append(texts, f.Lines...)
+		}
+	}
+	if VerdictInstructionLike(texts...) {
+		v.Flags = []string{FlagInstructionLike}
+		v.Confidence = min(v.Confidence, VerdictFlagCap)
+	}
+	return v
 }
 
 // dispatch hands the items to the Dispatcher, then runs the run-level
@@ -623,22 +805,25 @@ func totalTokens(u Usage) int {
 
 // askModel gets valid items: one call, and one more with the validation
 // errors when the first output is invalid. Usage is recorded per call.
-func (w *RunWorker) askModel(ctx context.Context, rc *RunContext) ([]ModelItem, *runOutcome, error) {
+//
+// A behavior with a verdict block also gets one verdict from the same
+// call; the output is valid only with it.
+func (w *RunWorker) askModel(ctx context.Context, rc *RunContext) ([]ModelItem, *ModelVerdict, *runOutcome, error) {
 	run := rc.Run
 	doc := rc.Doc
 	if w.s.ModelFits != nil && !w.s.ModelFits(doc.Model) {
-		return nil, runFail(CodeLLMUnconfigured), nil
+		return nil, nil, runFail(CodeLLMUnconfigured), nil
 	}
 	provider, err := w.d.Models(ctx, run.WorkspaceID)
 	if err != nil || provider == nil {
-		return nil, runFail(CodeLLMUnconfigured), nil
+		return nil, nil, runFail(CodeLLMUnconfigured), nil
 	}
-	system := systemPrompt(doc)
+	system := systemPrompt(doc) + verdictPrompt(doc, verdictSource(rc))
 	msgs := []domain.Message{{Role: domain.UserRole, Text: userPrompt(doc.Instructions, rc.Context)}}
 	used := run.Usage
 	for try := 0; try < 2; try++ {
 		if used.Steps >= doc.Budgets.MaxSteps {
-			return nil, runFail(CodeStepBudget), nil
+			return nil, nil, runFail(CodeStepBudget), nil
 		}
 		parts := []string{system}
 		for _, m := range msgs {
@@ -648,34 +833,34 @@ func (w *RunWorker) askModel(ctx context.Context, rc *RunContext) ([]ModelItem, 
 		est := estimateTokens(parts...)
 		outMax := min(w.s.MaxOutputTokens, remaining-est)
 		if outMax < 256 {
-			return nil, runFail(CodeTokenBudget), nil
+			return nil, nil, runFail(CodeTokenBudget), nil
 		}
 		resp, err := w.generate(ctx, provider, &domain.LLMRequest{
 			Model: doc.Model, System: system, MaxTokens: int64(outMax), Messages: msgs,
 		})
 		if err != nil {
 			if errors.Is(err, domain.ErrLLMRefused) {
-				return nil, runFail(CodeLLMRefused), nil
+				return nil, nil, runFail(CodeLLMRefused), nil
 			}
 			if ctx.Err() != nil {
-				return nil, nil, ctx.Err()
+				return nil, nil, nil, ctx.Err()
 			}
 			if le, ok := domain.AsLLMError(err); ok {
 				// A CLI provider's safe code: a missing sign-in fails the
 				// run, a rate limit or timeout is tried again.
 				if !le.Retryable {
-					return nil, runFail(le.Code), nil
+					return nil, nil, runFail(le.Code), nil
 				}
-				return nil, runRetry(le.Code), nil
+				return nil, nil, runRetry(le.Code), nil
 			}
-			return nil, runRetry(CodeLLMError), nil
+			return nil, nil, runRetry(CodeLLMError), nil
 		}
 		u := Usage{
 			InputTokens: int(resp.Usage.Input), OutputTokens: int(resp.Usage.Output),
 			CacheReadTokens: int(resp.Usage.CacheRead), CacheWriteTokens: int(resp.Usage.CacheWrite), Steps: 1,
 		}
 		if err := w.d.Runs.AddUsage(ctx, run.ID, run.ClaimToken, u); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		used.InputTokens += u.InputTokens
 		used.OutputTokens += u.OutputTokens
@@ -683,15 +868,15 @@ func (w *RunWorker) askModel(ctx context.Context, rc *RunContext) ([]ModelItem, 
 		used.CacheWriteTokens += u.CacheWriteTokens
 		used.Steps++
 		rc.Run.Usage = used
-		items, errs := ParseItems(resp.Text, doc.Budgets.MaxItems)
+		items, verdict, errs := ParseOutput(resp.Text, doc.Budgets.MaxItems, doc.Verdict)
 		if errs == nil {
-			return items, nil, nil
+			return items, verdict, nil, nil
 		}
 		log.Printf("behavior run %d corr=%s: model output invalid (%d problems, try %d)", run.ID, run.CorrelationID, len(errs), try+1)
 		prev, _ := capBytes(resp.Text, maxRetainedOutputBytes)
 		msgs = append(msgs, domain.Message{Role: domain.AIRole, Text: prev}, domain.Message{Role: domain.UserRole, Text: retryPrompt(errs)})
 	}
-	return nil, runFail(CodeInvalidOutput), nil
+	return nil, nil, runFail(CodeInvalidOutput), nil
 }
 
 // generate calls the provider, trying again once after a short wait on a

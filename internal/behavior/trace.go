@@ -104,7 +104,11 @@ type Trace struct {
 	// RunActions are the outcomes of the run's run-level actions
 	// (actions.run), identifiers and codes only.
 	RunActions []RunActionOutcome `json:"run_actions,omitempty"`
-	ToolCalls  []ToolCallRecord   `json:"tool_calls"`
+	// Verdict is the run's model verdict (behaviors with a verdict block):
+	// label, confidence, the model's summary (redacted) and the injection
+	// flags, or the code of why there is none.
+	Verdict   *RunVerdict      `json:"verdict,omitempty"`
+	ToolCalls []ToolCallRecord `json:"tool_calls"`
 }
 
 // TraceRun is the run part of a trace.
@@ -234,7 +238,13 @@ func BuildTrace(ctx context.Context, store TraceStore, workspaceID, ref, itemKey
 	if err != nil {
 		return Trace{}, err
 	}
-	t := Trace{Run: traceRun(run), Items: []TraceItem{}, RunActions: DecodeRunActions(run.RunActions).Actions, ToolCalls: calls}
+	res := DecodeRunActions(run.RunActions)
+	t := Trace{Run: traceRun(run), Items: []TraceItem{}, RunActions: res.Actions, ToolCalls: calls}
+	if v := res.Verdict; v != nil {
+		tv := *v
+		tv.Summary = redactText(tv.Summary)
+		t.Verdict = &tv
+	}
 	if t.ToolCalls == nil {
 		t.ToolCalls = []ToolCallRecord{}
 	}
@@ -393,6 +403,7 @@ func renderTrace(t Trace, loc *time.Location, item, calls bool) string {
 	}
 	w := &traceText{loc: loc}
 	w.runHeader(t.Run)
+	w.verdict(t.Verdict)
 	if !item {
 		w.runActions(t.RunActions)
 		w.line("Items (%d):", len(t.Items))
@@ -520,6 +531,9 @@ func (w *traceText) runActions(as []RunActionOutcome) {
 		if a.TelegramMessageID != 0 {
 			s += fmt.Sprintf(" · tin %d", a.TelegramMessageID)
 		}
+		if a.VerdictConfidence != nil {
+			s += fmt.Sprintf(" · AI %s %.2f", a.VerdictLabel, *a.VerdictConfidence)
+		}
 		w.line("%s", s)
 		for _, p := range a.PRs {
 			ps := fmt.Sprintf("  • %s: %s", PRRef{Repo: p.Repo, Number: p.Number}.String(), p.Status)
@@ -534,6 +548,26 @@ func (w *traceText) runActions(as []RunActionOutcome) {
 			}
 			w.line("%s", ps)
 		}
+	}
+}
+
+// verdict renders the run's model verdict: label, confidence, flags and
+// summary, or why there is none.
+func (w *traceText) verdict(v *RunVerdict) {
+	if v == nil {
+		return
+	}
+	if !v.Available() {
+		w.line("AI: không có đánh giá (%s)", verdictCode(v))
+		return
+	}
+	s := fmt.Sprintf("AI: %s (%.2f)", v.Label, v.Confidence)
+	if len(v.Flags) > 0 {
+		s += " · cờ: " + strings.Join(v.Flags, ", ")
+	}
+	w.line("%s", s)
+	if v.Summary != "" {
+		w.line("Tóm tắt: %s", v.Summary)
 	}
 }
 

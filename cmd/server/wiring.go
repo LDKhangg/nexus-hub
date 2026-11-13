@@ -196,6 +196,9 @@ func buildBehaviorEngine(pool *pgxpool.Pool, s settings.Settings, store *storage
 		Dispatcher: engine,
 		Notifier:   engine,
 		Redactor:   redactor,
+		ChatMessages: &chatpoll.MessageReader{
+			Chat: clickupchat.New(netguard.Client(s.ToolTimeout, netguard.DefaultHosts)), Secrets: resolver,
+		},
 	}, behavior.RunWorkerSettings{
 		Workers: int(s.BehaviorWorkers), PollInterval: s.BehaviorPollInterval,
 		DefaultModel: s.ActorModel, DefaultMaxTokens: int(s.BehaviorMaxTokens), MaxOutputTokens: int(s.MaxOutputTokens),

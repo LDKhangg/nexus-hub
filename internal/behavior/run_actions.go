@@ -34,6 +34,22 @@ const (
 	// OutcomePending: the action has started and is resumed by a retry
 	// (some of its targets have no final outcome yet).
 	OutcomePending = "pending"
+	// OutcomeSkippedVerdict: the action has a "when" condition the run's
+	// verdict did not meet, or the run has no verdict.
+	OutcomeSkippedVerdict = "skipped_verdict"
+)
+
+// Codes of OutcomeSkippedVerdict.
+const (
+	// CodeVerdictUnavailable: the model step gave no verdict (a model
+	// failure, a timeout, invalid output or an exhausted budget).
+	CodeVerdictUnavailable = "verdict_unavailable"
+	// CodeVerdictMismatch: the verdict has another label than the
+	// condition's.
+	CodeVerdictMismatch = "verdict_mismatch"
+	// CodeVerdictLowConfidence: the verdict has the condition's label but
+	// less than the behavior's min_confidence.
+	CodeVerdictLowConfidence = "verdict_low_confidence"
 )
 
 // Engine codes of run-level action outcomes.
@@ -47,9 +63,48 @@ const (
 )
 
 // RunActionsResult is a run's run-level action outcomes, stored as JSON in
-// behavior_runs.run_actions. It holds identifiers and codes only.
+// behavior_runs.run_actions. It holds identifiers and codes only, and the
+// run's verdict, whose summary is model output (cleaned and redacted),
+// never the triggering message text.
 type RunActionsResult struct {
 	Actions []RunActionOutcome `json:"actions"`
+	// Verdict is the run's model verdict (behaviors with a verdict block),
+	// recorded by the model step before any run-level action runs.
+	Verdict *RunVerdict `json:"verdict,omitempty"`
+}
+
+// RunVerdict is a run's model verdict as stored. Summary is model output,
+// cleaned and redacted, never the triggering text itself. Flags are the
+// injection flags the engine found in the untrusted triggering content;
+// a flagged verdict's confidence is capped (VerdictFlagCap). When the model
+// step gave no verdict, Label is empty and Code names why.
+type RunVerdict struct {
+	Label      string   `json:"label,omitempty"`
+	Confidence float64  `json:"confidence"`
+	Summary    string   `json:"summary,omitempty"`
+	Flags      []string `json:"flags,omitempty"`
+	Code       string   `json:"code,omitempty"`
+}
+
+// Available reports whether the model step gave a verdict.
+func (v *RunVerdict) Available() bool { return v != nil && v.Label != "" }
+
+// VerdictFlagCap is the highest confidence a verdict keeps when its
+// triggering content is flagged as instruction-like.
+const VerdictFlagCap = 0.5
+
+// gate decides a "when" condition against the run's verdict: ok, or the
+// skip code.
+func gate(w *ActionWhen, spec *VerdictSpec, v *RunVerdict) (bool, string) {
+	switch {
+	case spec == nil || !v.Available():
+		return false, CodeVerdictUnavailable
+	case v.Label != w.Verdict:
+		return false, CodeVerdictMismatch
+	case !(v.Confidence >= spec.MinConfidence):
+		return false, CodeVerdictLowConfidence
+	}
+	return true, ""
 }
 
 // RunActionOutcome is the outcome of one run-level action (actions.run[i]).
@@ -75,6 +130,11 @@ type RunActionOutcome struct {
 	// TelegramMessageID is the owner message of telegram.message (0 when
 	// the send's outcome is unknown).
 	TelegramMessageID int64 `json:"telegram_message_id,omitempty"`
+	// VerdictLabel and VerdictConfidence are the run's verdict when the
+	// action was skipped by its "when" condition (OutcomeSkippedVerdict);
+	// both are empty when the run had no verdict.
+	VerdictLabel      string   `json:"verdict_label,omitempty"`
+	VerdictConfidence *float64 `json:"verdict_confidence,omitempty"`
 }
 
 // RunPROutcome is the outcome of approving one pull request.
@@ -240,6 +300,15 @@ func (e *Engine) RunActions(ctx context.Context, rc RunContext, save RunActionSa
 		var o RunActionOutcome
 		transient := false
 		switch {
+		case a.When != nil && !whenPasses(a.When, rc.Doc.Verdict, res.Verdict):
+			// The verdict only narrows: a condition that is not met, or a
+			// run without a verdict, skips the action.
+			o = RunActionOutcome{Index: i, Type: a.Type, Status: OutcomeSkippedVerdict}
+			_, o.Code = gate(a.When, rc.Doc.Verdict, res.Verdict)
+			if res.Verdict.Available() {
+				c := res.Verdict.Confidence
+				o.VerdictLabel, o.VerdictConfidence = res.Verdict.Label, &c
+			}
 		case a.On == OnSuccessOfPrevious && !prevPassed:
 			o = RunActionOutcome{Index: i, Type: a.Type, Status: OutcomeSkippedPrevious}
 		case a.Type == ActionPRApprove:
@@ -277,6 +346,11 @@ func (e *Engine) RunActions(ctx context.Context, rc RunContext, save RunActionSa
 		return RunActionsEnd{Failed: true, Code: CodeRunActionFailed}, nil
 	}
 	return RunActionsEnd{}, nil
+}
+
+func whenPasses(w *ActionWhen, spec *VerdictSpec, v *RunVerdict) bool {
+	ok, _ := gate(w, spec, v)
+	return ok
 }
 
 func hasRunWrite(actions []ActionSpec) bool {
@@ -429,7 +503,8 @@ func (e *Engine) runTelegram(ctx context.Context, rc RunContext, env runActionEn
 		}
 		return RunActionOutcome{}, true, nil
 	}
-	text := runActionsText(textsFor(rc.Doc.Language), rc, res)
+	clean := func(s string) string { return e.d.Redactor.CleanOutbound(s, true) }
+	text := runActionsText(textsFor(rc.Doc.Language), rc, res, clean)
 	id, err := e.sendOnce(ctx, rc.Run, fmt.Sprintf("run_action:%d", i), chat, OutMessage{Text: text})
 	switch {
 	case err != nil && id == 0:
@@ -449,9 +524,11 @@ func (e *Engine) runTelegram(ctx context.Context, rc RunContext, env runActionEn
 }
 
 // runActionsText is the owner's report of a run's run-level actions: the
-// run, the message sender (a ClickUp user ID), each pull request with its
-// outcome and the reaction. It never quotes the message text.
-func runActionsText(t texts, rc RunContext, res RunActionsResult) string {
+// run, the message sender (a ClickUp user ID), the model verdict (label,
+// confidence and the model's summary, passed through clean), each pull
+// request with its outcome and the reaction. It never quotes the message
+// text.
+func runActionsText(t texts, rc RunContext, res RunActionsResult, clean func(string) string) string {
 	var b strings.Builder
 	head := t.runActionsHead()
 	if rc.Doc.DryRun {
@@ -461,12 +538,32 @@ func runActionsText(t texts, rc RunContext, res RunActionsResult) string {
 	if rc.Trigger.SenderID != "" {
 		b.WriteString(t.chatFrom(capRunes(rc.Trigger.SenderID, 64)) + "\n")
 	}
+	if v := res.Verdict; v != nil {
+		if v.Available() {
+			summary := capRunes(strings.Join(strings.Fields(clean(v.Summary)), " "), MaxVerdictSummaryChars)
+			b.WriteString(t.verdictLine(v.Label, v.Confidence, summary) + "\n")
+		} else {
+			b.WriteString(t.verdictUnavailableLine(verdictCode(v)) + "\n")
+		}
+	}
 	for i, a := range rc.Doc.RunActions {
 		if a.Type == ActionTelegramMessage {
 			continue
 		}
 		o, ok := res.Get(i)
 		if !ok {
+			continue
+		}
+		if o.Status == OutcomeSkippedVerdict {
+			want := ""
+			if a.When != nil {
+				want = a.When.Verdict
+			}
+			if o.Code == CodeVerdictUnavailable || o.VerdictConfidence == nil {
+				b.WriteString(t.gateUnavailableLine(a.Type, verdictCode(res.Verdict)) + "\n")
+			} else {
+				b.WriteString(t.gateSkippedLine(a.Type, o.VerdictLabel, *o.VerdictConfidence, want) + "\n")
+			}
 			continue
 		}
 		switch a.Type {
@@ -484,6 +581,14 @@ func runActionsText(t texts, rc RunContext, res RunActionsResult) string {
 		}
 	}
 	return capRunes(strings.TrimSpace(b.String()), maxTelegramRunes)
+}
+
+// verdictCode is the code a report names for a run without a verdict.
+func verdictCode(v *RunVerdict) string {
+	if v != nil && codeRe.MatchString(v.Code) {
+		return v.Code
+	}
+	return CodeVerdictUnavailable
 }
 
 // --- undo ---
