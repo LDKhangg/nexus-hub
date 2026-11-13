@@ -311,6 +311,12 @@ func TestS23ApprovalDecisionRaceExpiryAndActorAudit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Decide's at_time checks expiry; SQL records decided_at using DB now().
+	// Bound that audit instant with the same database's real clock instead.
+	var decisionStart, decisionEnd time.Time
+	if err := s.pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&decisionStart); err != nil {
+		t.Fatal("cannot read database clock before approval decisions")
+	}
 	var winners atomic.Int32
 	var wg sync.WaitGroup
 	errs := make(chan error, 10)
@@ -327,6 +333,9 @@ func TestS23ApprovalDecisionRaceExpiryAndActorAudit(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+	if err := s.pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&decisionEnd); err != nil {
+		t.Fatal("cannot read database clock after approval decisions")
+	}
 	close(errs)
 	for err := range errs {
 		t.Fatal(err)
@@ -335,8 +344,17 @@ func TestS23ApprovalDecisionRaceExpiryAndActorAudit(t *testing.T) {
 		t.Fatalf("decision winners=%d", winners.Load())
 	}
 	got, err := s.GetApproval(ctx, workspaceA, a.ID)
-	if err != nil || got.Decision != behavior.DecisionAnswered || got.DecidedAt == nil || !got.DecidedAt.Equal(now) || got.RunID != r.ID || got.ItemID != it.ID || got.Resource != r.Subject || got.Action != a.Action {
-		t.Fatalf("audit binding lost: %v", err)
+	if err != nil {
+		t.Fatal("cannot read stored approval audit")
+	}
+	if got.Decision != behavior.DecisionAnswered || got.RunID != r.ID || got.ItemID != it.ID || got.Resource != r.Subject || got.Action != a.Action {
+		t.Fatalf("audit binding lost: approval_id=%d decision=%q run_id=%d want_run_id=%d item_id=%d want_item_id=%d resource_matches=%t action_matches=%t", got.ID, got.Decision, got.RunID, r.ID, got.ItemID, it.ID, got.Resource == r.Subject, got.Action == a.Action)
+	}
+	if got.DecidedAt == nil {
+		t.Fatalf("audit timestamp missing: approval_id=%d", got.ID)
+	}
+	if got.DecidedAt.Before(decisionStart) || got.DecidedAt.After(decisionEnd) {
+		t.Fatalf("audit timestamp outside DB decision window: approval_id=%d decided_at=%s start=%s end=%s", got.ID, got.DecidedAt.UTC().Format(time.RFC3339Nano), decisionStart.UTC().Format(time.RFC3339Nano), decisionEnd.UTC().Format(time.RFC3339Nano))
 	}
 	var actor int
 	if _, err := fmt.Sscanf(got.DecidedBy, "telegram:%d", &actor); err != nil || got.Answer != fmt.Sprintf("answer-%d", actor) {
