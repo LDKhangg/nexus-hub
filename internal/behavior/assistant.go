@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,7 +27,10 @@ import (
 // once through the slash-command handlers; writes are proposed with
 // "Làm"/"Huỷ" buttons and run only on "Làm", through the same handlers.
 // The owner's text is never stored in the database or logged: the webhook
-// hands it to the worker through AssistantInbox, in memory.
+// hands it to the worker through AssistantInbox, in memory. The inbox
+// worker only takes the text and queues an assistant job; one assistant
+// goroutine waits for the model, so a slow or busy model never holds up
+// other Telegram updates.
 
 // AssistantTextPrefix marks an UpdateText whose Args is an AssistantInbox
 // key (never the text itself).
@@ -43,6 +47,9 @@ const (
 	assistantInboxTTL        = 5 * time.Minute
 	assistantInboxMax        = 64
 	assistantMaxArgRunes     = 200
+	assistantQueueSize       = 8
+	assistantNoticeAfter     = 3 * time.Second
+	assistantJobTimeout      = 3 * time.Minute
 )
 
 const (
@@ -51,6 +58,18 @@ const (
 	msgAssistantBusy          = "Bạn gửi hơi nhanh. " + msgHint
 	msgAssistantCancelled     = "Đã huỷ."
 	msgAssistantDone          = "Đã làm."
+	msgAssistantNotDone       = "Chưa làm được."
+	msgAssistantOverloaded    = "Mình đang bận, thử lại sau nhé."
+	msgAssistantWorking       = "Đang xử lý…"
+)
+
+// decide failures: busy (a slot or the call timed out, or the provider is
+// rate limited or overloaded), model (any other provider failure) and
+// invalid (two answers off the schema).
+var (
+	errAssistantBusy    = errors.New("assistant: model busy")
+	errAssistantModel   = errors.New("assistant: model error")
+	errAssistantInvalid = errors.New("assistant: invalid answer")
 )
 
 // Assistant intents. Reads run at once; writes need "Làm".
@@ -275,15 +294,19 @@ func parseAssistantDecision(s string) (assistantDecision, error) {
 func (a *Assistant) decide(ctx context.Context, workspaceID, text string) (assistantDecision, error) {
 	p, err := a.Models(ctx, workspaceID)
 	if err != nil || p == nil {
-		return assistantDecision{}, errors.New("no provider")
+		return assistantDecision{}, errAssistantModel
 	}
 	msgs := []domain.Message{{Role: domain.UserRole, Text: assistantUserMessage(text)}}
 	for try := 0; try < 2; try++ {
 		cctx, cancel := context.WithTimeout(ctx, assistantCallTimeout)
 		resp, err := p.Generate(cctx, &domain.LLMRequest{Model: a.Model, System: assistantSystem, MaxTokens: assistantMaxTokens, Messages: msgs})
+		timedOut := cctx.Err() != nil
 		cancel()
 		if err != nil || resp == nil {
-			return assistantDecision{}, errors.New("model error")
+			if timedOut || assistantBusyErr(err) {
+				return assistantDecision{}, errAssistantBusy
+			}
+			return assistantDecision{}, errAssistantModel
 		}
 		d, perr := parseAssistantDecision(resp.Text)
 		if perr == nil {
@@ -296,7 +319,18 @@ func (a *Assistant) decide(ctx context.Context, workspaceID, text string) (assis
 		msgs = append(msgs, domain.Message{Role: domain.AIRole, Text: prev},
 			domain.Message{Role: domain.UserRole, Text: "Your answer was invalid: " + perr.Error() + ". Answer again with one JSON object only."})
 	}
-	return assistantDecision{}, errors.New("invalid answer")
+	return assistantDecision{}, errAssistantInvalid
+}
+
+// assistantBusyErr reports a provider failure that means "try again later":
+// a timeout (also while waiting for a shared slot), a rate limit or an
+// overload.
+func assistantBusyErr(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var le *domain.LLMError
+	return errors.As(err, &le) && (le.Code == domain.LLMCodeTimeout || le.Code == domain.LLMCodeUnavailable)
 }
 
 // cleanAssistantReply makes the model's reply safe plain text: no control
@@ -330,7 +364,21 @@ type assistantPayload struct {
 	Style string `json:"style,omitempty"`
 }
 
-// assistant handles one plain free-text message staged in the inbox.
+// assistantJob is one queued assistant request. text is the owner's
+// message, kept in memory only until the job ends.
+type assistantJob struct {
+	u      InboundUpdate
+	to     ChatRef
+	actor  string
+	corr   string
+	text   string
+	queued time.Time
+}
+
+// assistant takes the staged text of one plain free-text message, checks
+// the rate limit and queues an assistant job. It never waits for the model:
+// the update finishes at once with assistant_queued, and a full queue gets
+// "busy".
 func (w *InboxWorker) assistant(ctx context.Context, u InboundUpdate, to ChatRef, actor, corr string) outcome {
 	a := w.d.Assistant
 	if a == nil || a.Models == nil {
@@ -343,9 +391,69 @@ func (w *InboxWorker) assistant(ctx context.Context, u InboundUpdate, to ChatRef
 	if !a.allow(u.ChatID, w.now()) {
 		return w.reply(ctx, to, msgAssistantBusy, "assistant_rate_limited")
 	}
-	d, err := a.decide(ctx, u.WorkspaceID, text)
-	if err != nil {
+	select {
+	case w.assistantJobs <- assistantJob{u: u, to: to, actor: actor, corr: corr, text: text, queued: time.Now()}:
+		return outcome{code: "assistant_queued"}
+	default:
+		return w.reply(ctx, to, msgAssistantOverloaded, "assistant_queue_full")
+	}
+}
+
+// runAssistant runs queued assistant jobs one at a time until ctx ends.
+// Jobs still queued at shutdown are dropped with their text.
+func (w *InboxWorker) runAssistant(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job := <-w.assistantJobs:
+			if ctx.Err() != nil {
+				return
+			}
+			jctx, cancel := context.WithTimeout(ctx, assistantJobTimeout)
+			out := w.assistantJob(jctx, job)
+			cancel()
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("telegram assistant: update=%d code=%s corr=%s", job.u.ID, out.code, job.corr)
+		}
+	}
+}
+
+// assistantJob asks the model and acts on its decision. When the answer
+// takes longer than assistantNoticeAfter (counted from queueing), a short
+// "working" message is sent first.
+func (w *InboxWorker) assistantJob(ctx context.Context, job assistantJob) outcome {
+	a := w.d.Assistant
+	u, to, actor, corr := job.u, job.to, job.actor, job.corr
+	if a == nil || a.Models == nil {
+		return w.reply(ctx, to, msgHint, "")
+	}
+	var (
+		d    assistantDecision
+		err  error
+		done = make(chan struct{})
+	)
+	go func() {
+		defer close(done)
+		d, err = a.decide(ctx, u.WorkspaceID, job.text)
+	}()
+	notice := time.NewTimer(max(w.assistantNoticeAfter-time.Since(job.queued), 0))
+	select {
+	case <-done:
+	case <-notice.C:
+		_ = w.reply(ctx, to, msgAssistantWorking, "")
+		<-done
+	}
+	notice.Stop()
+	switch {
+	case errors.Is(err, errAssistantBusy):
+		return w.reply(ctx, to, msgAssistantOverloaded, "assistant_busy")
+	case errors.Is(err, errAssistantInvalid):
 		return w.reply(ctx, to, msgAssistantNotUnderstood, "assistant_fallback")
+	case err != nil:
+		return w.reply(ctx, to, msgFailed, "assistant_model_error")
 	}
 	if d.Confidence < assistantMinConfidence {
 		return w.reply(ctx, to, msgAssistantNotUnderstood, "assistant_low_confidence")
@@ -554,5 +662,11 @@ func (w *InboxWorker) assistantCallback(ctx context.Context, u InboundUpdate, to
 		ID: u.ID, WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, UpdateID: u.UpdateID, ChatID: u.ChatID,
 		Kind: UpdateCommand, Command: command, Args: args,
 	}, to, actor, corr)
-	return msgAssistantDone, out.code, true
+	// The handler's own reply explains a failure; the toast only says
+	// whether the write happened. reply_failed means it ran but its reply
+	// was not delivered.
+	if out.code == "" || out.code == "reply_failed" {
+		return msgAssistantDone, out.code, true
+	}
+	return msgAssistantNotDone, out.code, true
 }

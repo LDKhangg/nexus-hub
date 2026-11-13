@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/people"
@@ -69,6 +70,11 @@ type InboxWorker struct {
 	settings InboxSettings
 	now      func() time.Time
 	wait     func(context.Context, time.Duration) error
+
+	// assistantJobs is the bounded assistant queue; Run starts its single
+	// consumer. assistantNoticeAfter is when a "working" message is sent.
+	assistantJobs        chan assistantJob
+	assistantNoticeAfter time.Duration
 }
 
 func NewInboxWorker(d InboxDeps, s InboxSettings) *InboxWorker {
@@ -99,7 +105,8 @@ func NewInboxWorker(d InboxDeps, s InboxSettings) *InboxWorker {
 	if d.Callbacks == nil {
 		d.Callbacks = Unavailable{}
 	}
-	return &InboxWorker{d: d, settings: s, now: time.Now, wait: waitFor}
+	return &InboxWorker{d: d, settings: s, now: time.Now, wait: waitFor,
+		assistantJobs: make(chan assistantJob, assistantQueueSize), assistantNoticeAfter: assistantNoticeAfter}
 }
 
 func waitFor(ctx context.Context, d time.Duration) error {
@@ -113,8 +120,16 @@ func waitFor(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// Run processes updates until ctx ends.
+// Run processes updates until ctx ends. It also runs the assistant queue
+// and returns only after the assistant job in progress has stopped.
 func (w *InboxWorker) Run(ctx context.Context) error {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		w.runAssistant(ctx)
+	}()
+	defer wg.Wait()
 	for ctx.Err() == nil {
 		worked, err := w.processNext(ctx)
 		if err != nil && ctx.Err() == nil {

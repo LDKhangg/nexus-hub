@@ -135,7 +135,9 @@ func Render(body string, kind Kind, values Values) (string, error) {
 // when name is empty. Each line is scanned once and every {name} token is
 // replaced by its cleaned value; inserted values are never rescanned.
 // Failure, skipped-approval and verdict-unavailable reports cannot suppress
-// their reason: when the rendered output lacks it, a reason line is appended.
+// their reason: when no kept line substituted {reason}, a reason line is
+// appended. Another value that happens to contain the reason text does not
+// count.
 func RenderLanguage(body string, kind Kind, values Values, language string) (string, error) {
 	if err := Validate(body); err != nil {
 		return "", err
@@ -145,6 +147,7 @@ func RenderLanguage(body string, kind Kind, values Values, language string) (str
 		fields[name] = cleanValue(value)
 	}
 	lines := make([]string, 0, strings.Count(body, "\n")+1)
+	reasonShown := false
 	for _, line := range strings.Split(body, "\n") {
 		if strings.HasPrefix(line, "?{") {
 			end := strings.IndexByte(line, '}')
@@ -155,12 +158,16 @@ func RenderLanguage(body string, kind Kind, values Values, language string) (str
 			line = line[end+1:]
 		}
 		line = placeholderRE.ReplaceAllStringFunc(line, func(token string) string {
-			return fields[token[1:len(token)-1]]
+			name := token[1 : len(token)-1]
+			if name == "reason" && fields[name] != "" {
+				reasonShown = true
+			}
+			return fields[name]
 		})
 		lines = append(lines, strings.TrimRight(line, " \t"))
 	}
 	out := strings.TrimSpace(strings.Join(lines, "\n"))
-	if reason := fields["reason"]; reason != "" && needsReason(kind) && !strings.Contains(out, reason) {
+	if reason := fields["reason"]; reason != "" && needsReason(kind) && !reasonShown {
 		if out != "" {
 			out += "\n"
 		}
