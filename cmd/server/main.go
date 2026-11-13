@@ -98,7 +98,7 @@ func run() error {
 	// inbox worker does the work. Behavior commands create pending runs;
 	// buttons, replies and /undo go to the action engine; /trace answers
 	// "not available" until it is wired.
-	telegramHandler := httpdelivery.NewTelegramHandler(integrations, resolver, behaviors, behaviors, s.OwnerTelegramChatID)
+	telegramHandler := httpdelivery.NewTelegramHandler(integrations, resolver, behaviors, behaviors, s.OwnerTelegramChatID).WithOwnerUser(s.OwnerTelegramUserID)
 	commands, err := behavior.NewCommandRunner(behaviors, behaviors)
 	if err != nil {
 		return errors.New("behavior command runner startup failed")

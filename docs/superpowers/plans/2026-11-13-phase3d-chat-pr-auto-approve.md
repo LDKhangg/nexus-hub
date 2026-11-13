@@ -33,6 +33,10 @@ two action types. The owner's flow is a behavior file
 - D4: Approve the PR from **any** DM sender on **any** repo the owner's GitHub
   account can access; no per-repo registration ("approve pr của ai dm cũng
   được").
+- D5 (added 2026-11-13): the owner's Telegram control chat may be a **group**
+  that holds only the owner and the bot ("group có 2 người là tôi và con bot
+  thôi để tôi quản lý phiên tốt hơn"). Commands are still accepted only from
+  the owner's own user ID.
 - D3: Only **direct messages** to the owner (`DM`, and `GROUP_DM` only if the
   behavior asks for it). Channel messages are out of scope.
 
@@ -165,6 +169,16 @@ two action types. The owner's flow is a behavior file
   or a fine-grained PAT with Pull requests: write on the repos), set the poll
   interval, probe the
   reaction name, then switch `dry_run` off.
+
+### Telegram owner chat (added with D5)
+
+- REQ-16: New setting `owner_telegram_user_id` (default 0). With 0, the owner
+  rule is unchanged: an update counts only when chat ID == sender ID ==
+  `owner_telegram_chat_id` (private chat). When set, an update counts only
+  when chat ID == `owner_telegram_chat_id` (which may be a group's negative
+  ID) and sender ID == `owner_telegram_user_id`. Any other chat or sender is
+  ignored (200, nothing stored), including other members of that group.
+  Owner messages (reports, notices, replies) go to `owner_telegram_chat_id`.
 
 ## Tasks
 

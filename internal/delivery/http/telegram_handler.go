@@ -35,17 +35,20 @@ type AnswerStager interface {
 // update_id and answers at once; all work runs later from storage.
 //
 // Owner rule: an update has an effect only when its chat ID equals the
-// owner_telegram_chat_id setting and its sender's user ID equals it too.
-// In a private chat the chat ID is the user's ID, so this accepts only the
-// owner's private chat with the bot; a group, channel or anyone else is
-// ignored (200, no reply, nothing stored). For a button press the chat is
-// the chat of the message that carries the button.
+// owner_telegram_chat_id setting and its sender's user ID is the owner's.
+// By default the owner's user ID is the chat ID, so only the owner's
+// private chat with the bot is accepted. When owner_telegram_user_id is set
+// (WithOwnerUser), the owner chat may be a group: updates in that chat are
+// accepted only when sent by that user. Any other chat or sender is ignored
+// (200, no reply, nothing stored). For a button press the chat is the chat
+// of the message that carries the button.
 type TelegramHandler struct {
 	integrations WebhookIntegrationLookup
 	secrets      SecretResolver
 	inbox        behavior.InboxStore
 	answers      AnswerStager
 	ownerChatID  int64
+	ownerUserID  int64
 	now          func() time.Time
 	ignored      atomic.Int64
 }
@@ -171,9 +174,23 @@ func (h *TelegramHandler) Handle(c echo.Context) error {
 	return ok("queued")
 }
 
+// WithOwnerUser sets the owner's Telegram user ID for an owner chat that is
+// a group (owner_telegram_user_id). Zero or a negative ID keeps the default:
+// the owner's user ID is the chat ID (a private chat).
+func (h *TelegramHandler) WithOwnerUser(userID int64) *TelegramHandler {
+	if userID > 0 {
+		h.ownerUserID = userID
+	}
+	return h
+}
+
 // isOwner applies the owner rule (see TelegramHandler).
 func (h *TelegramHandler) isOwner(chatID, fromID int64) bool {
-	return h.ownerChatID != 0 && chatID == h.ownerChatID && fromID == h.ownerChatID
+	owner := h.ownerChatID
+	if h.ownerUserID != 0 {
+		owner = h.ownerUserID
+	}
+	return h.ownerChatID != 0 && chatID == h.ownerChatID && fromID == owner
 }
 
 // normalize keeps only the fields the worker needs. It returns false for an

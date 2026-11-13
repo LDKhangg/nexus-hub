@@ -33,6 +33,7 @@ type Settings struct {
 	AnthropicCredential                   string
 	ListenAddr                            string
 	OwnerTelegramChatID                   int64         // 0: not set
+	OwnerTelegramUserID                   int64         // 0: the owner chat is a private chat (user ID = chat ID)
 	OwnerClickUpUserID                    string        // empty: not set
 	PublicBaseURL                         string        // empty: not set
 	BehaviorWorkers                       int64         // concurrent behavior run executors
@@ -99,6 +100,7 @@ var specs = map[string]spec{
 	"anthropic_credential":       {kind: kCredRef, def: "anthropic", set: func(s *Settings, v any) { s.AnthropicCredential = v.(string) }},
 	"listen_addr":                {kind: kAddr, def: ":8080", set: func(s *Settings, v any) { s.ListenAddr = v.(string) }},
 	"owner_telegram_chat_id":     {kind: kInt, def: int64(0), min: -maxChatID, max: maxChatID, set: func(s *Settings, v any) { s.OwnerTelegramChatID = v.(int64) }},
+	"owner_telegram_user_id":     {kind: kInt, def: int64(0), min: 0, max: maxChatID, set: func(s *Settings, v any) { s.OwnerTelegramUserID = v.(int64) }},
 	"owner_clickup_user_id":      {kind: kDigits, def: "", set: func(s *Settings, v any) { s.OwnerClickUpUserID = v.(string) }},
 	"behavior_workers":           {kind: kInt, def: int64(2), min: 1, max: 8, set: func(s *Settings, v any) { s.BehaviorWorkers = v.(int64) }},
 	"behavior_poll_interval":     {kind: kDuration, def: time.Second, min: 0.1, max: 60, set: func(s *Settings, v any) { s.BehaviorPollInterval = v.(time.Duration) }},
