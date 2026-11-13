@@ -28,6 +28,8 @@ type StructuredResponse struct {
 	JSON    json.RawMessage
 	Usage   domain.Usage
 	CostUSD float64
+	// Note is an optional fixed, safe detail about a completed call.
+	Note string
 }
 
 // StructuredProvider is a provider with a native structured-output call.

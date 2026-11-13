@@ -27,6 +27,9 @@ type LLMRequest struct {
 type LLMResponse struct {
 	Text  string
 	Usage Usage
+	// Note is an optional fixed, safe detail about a completed call. It never
+	// contains model or tool content.
+	Note string
 }
 
 // Usage is token accounting for one or more LLM calls.
@@ -95,6 +98,8 @@ type ToolResponse struct {
 	Calls []ToolCall
 	Stop  StopReason
 	Usage Usage
+	// Note is an optional fixed, safe detail about a completed call.
+	Note string
 }
 
 // ErrLLMRefused is returned when the provider's safety system refuses.

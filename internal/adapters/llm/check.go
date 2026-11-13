@@ -20,6 +20,7 @@ type CheckResult struct {
 	OutputTokens int64
 	CacheTokens  int64 // cache reads and writes
 	CostUSD      float64
+	Note         string // optional fixed, safe detail about a completed call
 }
 
 const (
@@ -45,6 +46,7 @@ func Check(ctx context.Context, p domain.LLMProvider, model string) CheckResult 
 			return res
 		}
 		res.InputTokens, res.OutputTokens, res.CacheTokens, res.CostUSD = r.Usage.Input, r.Usage.Output, r.Usage.CacheRead+r.Usage.CacheWrite, r.CostUSD
+		res.Note = r.Note
 		answer = r.JSON
 	} else {
 		r, err := p.Generate(ctx, &domain.LLMRequest{Model: model, System: checkSystem, MaxTokens: 50, Messages: []domain.Message{{Role: domain.UserRole, Text: checkPrompt}}})
@@ -54,6 +56,7 @@ func Check(ctx context.Context, p domain.LLMProvider, model string) CheckResult 
 			return res
 		}
 		res.InputTokens, res.OutputTokens, res.CacheTokens = r.Usage.Input, r.Usage.Output, r.Usage.CacheRead+r.Usage.CacheWrite
+		res.Note = r.Note
 		answer = []byte(stripFence(r.Text))
 	}
 	var v struct {

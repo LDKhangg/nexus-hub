@@ -46,6 +46,9 @@ const (
 	// NoteCLIToolUse marks a call that failed because the CLI's model
 	// tried to call a tool.
 	NoteCLIToolUse = "cli_tool_use"
+	// NoteCLISessionCleanupFailed marks a successful call whose opencode
+	// session could not be deleted after two attempts.
+	NoteCLISessionCleanupFailed = "cli_session_cleanup_failed"
 	// structuredSuffix ends every structured prompt.
 	structuredSuffix = "Reply with exactly one JSON object and nothing else."
 )
@@ -169,6 +172,7 @@ type ocOutput struct {
 	errText   string // the error event's message; classification only
 	hasError  bool
 	sessionID string
+	note      string // fixed safe detail about a completed call
 }
 
 // parseOpencodeOutput reads the NDJSON events. A line that is not a JSON
@@ -330,6 +334,10 @@ func (c *OpencodeCLI) call(ctx context.Context, model, system, prompt string) (*
 	case out.steps == 0 || out.reason != "stop":
 		return nil, &domain.LLMError{Code: domain.LLMCodeError, Retryable: true}
 	}
+	if res.FollowUpError != nil {
+		out.note = NoteCLISessionCleanupFailed
+		log.Printf("opencode_cli: warning (%s)", NoteCLISessionCleanupFailed)
+	}
 	return out, nil
 }
 
@@ -347,7 +355,7 @@ func (c *OpencodeCLI) Generate(ctx context.Context, req *domain.LLMRequest) (*do
 	if err != nil {
 		return nil, err
 	}
-	return &domain.LLMResponse{Text: out.text, Usage: out.usage}, nil
+	return &domain.LLMResponse{Text: out.text, Usage: out.usage, Note: out.note}, nil
 }
 
 // structuredPrompt appends the schema and the one-object instruction.
@@ -391,6 +399,7 @@ func (c *OpencodeCLI) GenerateStructured(ctx context.Context, req *StructuredReq
 	prompt := base
 	var usage domain.Usage
 	var cost float64
+	var note string
 	for try := 0; try < 2; try++ {
 		out, err := c.call(ctx, req.Model, req.System, prompt)
 		if err != nil {
@@ -398,12 +407,15 @@ func (c *OpencodeCLI) GenerateStructured(ctx context.Context, req *StructuredReq
 		}
 		usage.Add(out.usage)
 		cost += out.cost
+		if out.note != "" {
+			note = out.note
+		}
 		obj, verr := extractJSONObject(out.text)
 		if verr == nil {
 			verr = ValidateJSONSchema(schema, obj)
 		}
 		if verr == nil {
-			return &StructuredResponse{JSON: obj, Usage: usage, CostUSD: cost}, nil
+			return &StructuredResponse{JSON: obj, Usage: usage, CostUSD: cost, Note: note}, nil
 		}
 		// The validation error names only schema paths and rules.
 		prompt = base + "\nA previous reply to this request was rejected: " + verr.Error() +
@@ -432,6 +444,7 @@ func (c *OpencodeCLI) GenerateWithTools(ctx context.Context, req *domain.ToolReq
 		log.Printf("opencode_cli: dropped %d tool call(s) that were not offered or malformed", dropped)
 	}
 	resp.Usage = sr.Usage
+	resp.Note = sr.Note
 	return resp, nil
 }
 

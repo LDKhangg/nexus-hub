@@ -63,9 +63,9 @@ func llmCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.W
 	case settings.LLMProviderClaudeCLI:
 		timeout = s.ClaudeCLITimeout + llmCheckSlack
 	case settings.LLMProviderOpencodeCLI:
-		// A structured opencode call may make one repair call, each
-		// followed by a session cleanup.
-		timeout = 2*(s.OpencodeCLITimeout+clirun.FollowUpTimeout) + llmCheckSlack
+		// A structured opencode call may make one repair call. Each call's
+		// session cleanup may be attempted twice.
+		timeout = 2*(s.OpencodeCLITimeout+2*clirun.FollowUpTimeout) + llmCheckSlack
 	}
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
@@ -86,6 +86,9 @@ func llmCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.W
 	row["cache_tokens"] = res.CacheTokens
 	if res.CostUSD > 0 {
 		row["cost_usd"] = res.CostUSD
+	}
+	if res.Note != "" {
+		row["note"] = res.Note
 	}
 	return json.NewEncoder(out).Encode(row)
 }

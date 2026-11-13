@@ -55,6 +55,8 @@ var (
 	ErrStart = errors.New("clirun: cannot start binary")
 	// ErrWorkDir: the temporary working directory could not be prepared.
 	ErrWorkDir = errors.New("clirun: cannot prepare working directory")
+	// ErrFollowUp: a follow-up command failed. Child output is never exposed.
+	ErrFollowUp = errors.New("clirun: follow-up failed")
 )
 
 // Config configures a Runner.
@@ -86,11 +88,11 @@ type Config struct {
 //
 // FollowUp, when set, is called with the stdout captured so far once the
 // main process has ended (exited, failed, timed out or been cancelled).
-// When it returns arguments, the same binary runs once more with them, in
-// the same working directory and environment, with no stdin, bounded by
-// FollowUpTimeout, before the directory is deleted; its outcome and output
-// are discarded (best effort, for example deleting a session the main
-// call created).
+// When it returns arguments, the same binary runs with them, in the same
+// working directory and environment, with no stdin, bounded per attempt by
+// FollowUpTimeout, before the directory is deleted. A failed command is
+// retried once; its output is discarded and the final failure is reported
+// on Result without replacing the main command's outcome.
 type Call struct {
 	Args        []string
 	Stdin       []byte
@@ -108,6 +110,8 @@ type Result struct {
 	Stdout, Stderr []byte
 	ExitCode       int
 	Duration       time.Duration
+	// FollowUpError is ErrFollowUp when both follow-up attempts failed.
+	FollowUpError error
 }
 
 // Runner runs one configured binary.
@@ -273,9 +277,15 @@ func (r *Runner) Run(ctx context.Context, c Call) (*Result, error) {
 	killGroup(pid)
 	dur := time.Since(start)
 
+	var followUpErr error
 	if c.FollowUp != nil {
 		if args := c.FollowUp(stdout.buf.Bytes()); len(args) > 0 {
-			r.followUp(ctx, dir, env, args)
+			for attempt := 0; attempt < 2; attempt++ {
+				followUpErr = r.followUp(ctx, dir, env, args)
+				if followUpErr == nil {
+					break
+				}
+			}
 		}
 	}
 
@@ -288,7 +298,7 @@ func (r *Runner) Run(ctx context.Context, c Call) (*Result, error) {
 	if stdout.truncated {
 		return nil, ErrOutputTooLarge
 	}
-	res := &Result{Stdout: stdout.buf.Bytes(), Stderr: stderr.buf.Bytes(), Duration: dur}
+	res := &Result{Stdout: stdout.buf.Bytes(), Stderr: stderr.buf.Bytes(), Duration: dur, FollowUpError: followUpErr}
 	var ee *exec.ExitError
 	switch {
 	case waitErr == nil:
@@ -305,10 +315,10 @@ func (r *Runner) Run(ctx context.Context, c Call) (*Result, error) {
 	return res, nil
 }
 
-// followUp runs the binary once more in dir, best effort: bounded by
-// FollowUpTimeout even when ctx is already cancelled, in its own process
-// group, killed with it; output and outcome are discarded.
-func (r *Runner) followUp(ctx context.Context, dir string, env, args []string) {
+// followUp runs the binary once more in dir: bounded by FollowUpTimeout even
+// when ctx is already cancelled, in its own process group, killed with it.
+// Child output is discarded and never included in the returned error.
+func (r *Runner) followUp(ctx context.Context, dir string, env, args []string) error {
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), FollowUpTimeout)
 	defer cancel()
 	cmd := exec.Command(r.path, args...)
@@ -320,18 +330,32 @@ func (r *Runner) followUp(ctx context.Context, dir string, env, args []string) {
 	cmd.WaitDelay = waitDelay
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if cmd.Start() != nil {
-		return
+		return ErrFollowUp
 	}
 	pid := cmd.Process.Pid
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	var waitErr error
 	select {
-	case <-done:
+	case waitErr = <-done:
 	case <-fctx.Done():
 		killGroup(pid)
 		<-done
+		return ErrFollowUp
 	}
 	killGroup(pid)
+	if sink.truncated {
+		return ErrFollowUp
+	}
+	var ee *exec.ExitError
+	switch {
+	case waitErr == nil, errors.Is(waitErr, exec.ErrWaitDelay):
+		return nil
+	case errors.As(waitErr, &ee):
+		return ErrFollowUp
+	default:
+		return ErrFollowUp
+	}
 }
 
 func signalOf(ee *exec.ExitError) syscall.Signal {
