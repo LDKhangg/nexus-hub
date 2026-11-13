@@ -128,6 +128,19 @@ requirements below answer:
   group, kill on timeout/cancel, 4 MiB output cap, and the semaphore. If the
   probe for C2 shows a run still offers a tool or reads outside the temp
   directory, the Implementer stops and reports instead of shipping.
+  **Amended 2026-11-13 (owner chose option (a), "a"):** on opencode v2.2.7 the
+  built-in `browser` plugin keeps the `skill` tool offered to every agent.
+  This is accepted under these conditions, which replace "every tool
+  disabled" for opencode:
+  - every permission is denied (`*` and `skill`), skill loading is denied, and
+    no read, glob, grep, write, edit, shell, web or MCP tool is offered;
+  - the child gets a hub-owned, empty `XDG_CONFIG_HOME` (so the owner's global
+    opencode AGENTS.md, plugins and MCP config are never loaded); its
+    `XDG_DATA_HOME` stays the owner's, where the sign-in lives;
+  - **any `tool_use` event in the output makes the call a provider error**
+    (`llm_error`, code noted as `cli_tool_use`); its text is not used;
+  - the system prompt states that no tools exist;
+  - runs use `--title nexus-hub` (no extra titling model call on content).
 - REQ-C10: Output parsing: the answer is the concatenated `text` parts;
   usage comes from `step_finish.tokens`; `reason` other than `stop`, an
   `error` event, a non-zero exit, a timeout or bad JSON map to the REQ-C3
@@ -139,6 +152,13 @@ requirements below answer:
   same emulation as REQ-C4. The session the run created is deleted (or the
   run is made not to persist one, whichever the probe proves); no transcript
   of a hub call stays in opencode's history.
+- REQ-C12 (from the C2 probe): `nh settings set` accepts several
+  `key value` pairs and stores them in one transaction, so the owner can
+  switch `llm_provider` and the model settings together; validation runs on
+  the merged result and names every model setting that does not fit the
+  provider. Behavior `model` and the profile's default model accept both id
+  shapes at import; the run checks the shape against the provider and fails
+  with `llm_unconfigured` on a mismatch.
 - REQ-C11: `nh llm check` works for `opencode_cli` too and prints the input
   token count, so the owner sees the cost of the agent prompt. REQ-C5 (no
   content in logs) and REQ-C7 (runbook) cover opencode.
