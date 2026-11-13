@@ -158,6 +158,22 @@ type BehaviorVersion struct {
 	PublishedAt pgtype.Timestamptz
 }
 
+// ClickUp Chat poller cursor and error state per source integration; identifiers and counters only.
+type ClickupChatPoll struct {
+	WorkspaceID            pgtype.UUID
+	IntegrationID          pgtype.UUID
+	ClickupTeamID          string
+	CursorMs               int64
+	InitializedAt          pgtype.Timestamptz
+	ErrorStreak            int32
+	UnauthorizedStreak     int32
+	LastErrorCode          pgtype.Text
+	BackoffUntil           pgtype.Timestamptz
+	UnauthorizedNotifiedAt pgtype.Timestamptz
+	CreatedAt              pgtype.Timestamptz
+	UpdatedAt              pgtype.Timestamptz
+}
+
 // AES-256-GCM ciphertext only; AAD binds workspace, name and kind. The master key lives outside the database.
 type Credential struct {
 	ID          pgtype.UUID
