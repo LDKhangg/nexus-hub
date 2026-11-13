@@ -14,13 +14,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const traceUsage = `usage: trace --workspace-id <uuid> <run id | task id/URL | correlation id> [--item <key>] [--json]
+const traceUsage = `usage: trace --workspace-id <uuid> <run id | task id/URL | clickup:chat:<message id> | correlation id> [--item <key>] [--json]
   shows a behavior run: behavior and version, trigger, subject, revision,
-  status, times, correlation ID, usage, items and their action results;
+  status, times, correlation ID, usage, run-level action outcomes (pull
+  requests, review IDs, reaction), items and their action results;
   with --item, that item in full; --json prints the trace as JSON`
 
 const runsUsage = `usage: runs --workspace-id <uuid> [--behavior <name>] [--limit N]
-  lists recent behavior runs, newest first (N: 1-200, default 20)`
+  lists recent behavior runs, newest first (N: 1-200, default 20); a
+  chat-triggered run also shows its pull requests and run-level outcomes`
 
 func traceLocation(ctx context.Context, store *storage.BehaviorStore, ws string) *time.Location {
 	tz := behavior.DefaultProfile().Timezone
@@ -90,13 +92,22 @@ func runsCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.
 	}
 	enc := json.NewEncoder(out)
 	for _, r := range list {
-		if err := enc.Encode(map[string]any{
+		line := map[string]any{
 			"id": r.ID, "behavior": r.Behavior, "version": r.Version, "behavior_version": r.Behavior + "@" + strconv.Itoa(r.Version),
 			"trigger": r.TriggerKind, "subject": r.Subject, "status": r.Status, "error_code": r.ErrorCode,
 			"correlation_id": r.CorrelationID,
 			"items":          map[string]int{"auto": r.AutoItems, "notify": r.NotifyItems, "ask": r.AskItems},
 			"created_at":     r.CreatedAt.UTC().Format(time.RFC3339),
-		}); err != nil {
+		}
+		// Chat-triggered runs: their pull requests and run-level outcomes
+		// (identifiers and codes only; the message text is never stored).
+		if len(r.PRs) > 0 {
+			line["prs"] = r.PRs
+		}
+		if len(r.RunActions) > 0 {
+			line["run_actions"] = r.RunActions
+		}
+		if err := enc.Encode(line); err != nil {
 			return err
 		}
 	}

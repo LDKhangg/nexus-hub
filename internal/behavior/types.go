@@ -213,7 +213,10 @@ type Run struct {
 	Snapshot      json.RawMessage
 	// Context is the context snapshot the model saw (see ContextSnapshot);
 	// empty until the run collected its context.
-	Context    json.RawMessage
+	Context json.RawMessage
+	// RunActions holds the outcomes of the run's run-level actions
+	// (RunActionsResult); empty until the first one finished.
+	RunActions json.RawMessage
 	UndoneAt   *time.Time
 	RunAt      time.Time
 	StartedAt  *time.Time
@@ -476,7 +479,7 @@ type RunStore interface {
 	// SetSnapshot stores the undo snapshot once; false when one exists.
 	SetSnapshot(ctx context.Context, workspaceID string, runID int64, snapshot json.RawMessage) (bool, error)
 	// MarkUndone records an undo once; ErrConflict when already undone or
-	// there is nothing to undo.
+	// there is nothing to undo (no snapshot and no run-level outcomes).
 	MarkUndone(ctx context.Context, workspaceID string, runID int64) error
 	GetRun(ctx context.Context, workspaceID string, runID int64) (Run, error)
 	LatestRunBySubject(ctx context.Context, workspaceID, subject string) (Run, error)

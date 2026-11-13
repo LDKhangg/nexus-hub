@@ -28,6 +28,8 @@ const (
 	TriggerTaskAssigned      = "clickup.task_assigned"
 	TriggerCommentAdded      = "clickup.comment_added"
 	TriggerTelegramCommand   = "telegram.command"
+	// TriggerChatMessage is a new ClickUp Chat message, found by polling.
+	TriggerChatMessage = "clickup.chat_message"
 )
 
 // Action types (closed list).
@@ -37,7 +39,21 @@ const (
 	ActionDescriptionBlock = "clickup.description_block"
 	ActionSetStatus        = "clickup.set_status"
 	ActionUnassign         = "clickup.unassign"
+	// ActionPRApprove approves the pull requests in trusted chat trigger
+	// data. Allowed only in actions.run.
+	ActionPRApprove = "github.pr_approve"
+	// ActionChatReaction adds a reaction to the triggering chat message.
+	// Allowed only in actions.run.
+	ActionChatReaction = "clickup.chat_reaction"
 )
+
+// ActionsRun is the actions key of run-level actions: actions that run once
+// per run on trusted trigger data, not per item or class.
+const ActionsRun = "run"
+
+// OnSuccessOfPrevious is the only value of an action's "on" field: run the
+// action only when the action before it ended OK.
+const OnSuccessOfPrevious = "success_of_previous"
 
 // MemorySearchTool is the read tool over decision memory. Callers add it to
 // the read tool names they pass to Validate.
@@ -49,6 +65,9 @@ const (
 	FromAny        = "any"
 	FromOthers     = "others"
 	CommandArgTask = "task" // a ClickUp task ID or URL
+	// ChannelDM and ChannelGroupDM are the chat channel filter values.
+	ChannelDM      = "dm"
+	ChannelGroupDM = "group_dm"
 )
 
 // Doc is a behavior document as the owner writes it (YAML or JSON).
@@ -84,7 +103,35 @@ type FilterDoc struct {
 	Assignee string   `json:"assignee,omitempty" yaml:"assignee,omitempty"`
 	List     []string `json:"list,omitempty" yaml:"list,omitempty"`
 	From     string   `json:"from,omitempty" yaml:"from,omitempty"`
+	// Channel lists the chat channel types (dm, group_dm); one value may be
+	// written as a plain string.
+	Channel StringList `json:"channel,omitempty" yaml:"channel,omitempty"`
+	// HasPRLink true matches only messages with a GitHub pull request link.
+	HasPRLink *bool `json:"has_pr_link,omitempty" yaml:"has_pr_link,omitempty"`
+	// Senders lists the ClickUp user IDs a chat message may come from;
+	// empty means anyone.
+	Senders []string `json:"senders,omitempty" yaml:"senders,omitempty"`
 }
+
+// StringList is a list of strings that may be written as a single string.
+type StringList []string
+
+// UnmarshalJSON accepts a string or a list of strings.
+func (l *StringList) UnmarshalJSON(b []byte) error {
+	var one string
+	if err := json.Unmarshal(b, &one); err == nil {
+		*l = StringList{one}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(b, &many); err != nil {
+		return err
+	}
+	*l = many
+	return nil
+}
+
+var stringListType = reflect.TypeOf(StringList{})
 
 // ReadDoc allows one read tool, with an optional output cap.
 type ReadDoc struct {
@@ -100,10 +147,12 @@ type AutonomyDoc struct {
 	NotifyWhenInformational *bool    `json:"notify_when_informational,omitempty" yaml:"notify_when_informational,omitempty"`
 }
 
-// ActionDoc is one allowed action and its parameters.
+// ActionDoc is one allowed action and its parameters. On is set only on a
+// run-level action (actions.run): OnSuccessOfPrevious.
 type ActionDoc struct {
 	Type   string            `json:"type" yaml:"type"`
 	Params map[string]string `json:"params,omitempty" yaml:"params,omitempty"`
+	On     string            `json:"on,omitempty" yaml:"on,omitempty"`
 }
 
 // BudgetsDoc caps one run.
@@ -346,6 +395,11 @@ func checkShape(v any, t reflect.Type, path string, errs *FieldErrors) {
 		t = t.Elem()
 	}
 	add := func(msg string) { *errs = append(*errs, FieldError{Path: path, Msg: msg}) }
+	if t == stringListType {
+		if _, ok := v.(string); ok {
+			return
+		}
+	}
 	switch t.Kind() {
 	case reflect.Struct:
 		m, ok := v.(map[string]any)

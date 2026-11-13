@@ -1,0 +1,54 @@
+# PR auto-approve: when someone sends me a ClickUp Chat direct message with
+# a GitHub pull request link, approve that pull request with my own GitHub
+# account, add a reaction to the message with my ClickUp account, and tell
+# me on Telegram what was done.
+#
+# How it runs:
+# - The server polls ClickUp Chat for new direct messages (ClickUp has no
+#   Chat webhooks) every clickup_chat_poll_interval (default 30s). My own
+#   messages never start a run (owner_clickup_user_id must be set).
+# - The pull request links are taken from the message deterministically
+#   (https://github.com/<owner>/<repo>/pull/<n>, at most 5). The message
+#   text is never stored, logged or sent to Telegram, and there is no model
+#   step: no instructions, no tokens spent.
+# - actions.run run once per message, in order: approve every linked pull
+#   request (already approved counts as done; my own PR, a closed PR or one
+#   my token cannot see is reported, not approved), then add the reaction
+#   only if every approval succeeded, then report on Telegram.
+# - dry_run: true writes nothing and the Telegram report says "would
+#   approve / would react". Switch it to false once the report looks right.
+# - Anyone who can DM me can get a PR approved (owner decision). To limit
+#   senders, add `senders: ["<ClickUp user id>", ...]` under the trigger's
+#   filter; vars are single strings, so a list of senders is written here,
+#   not in the values file.
+# - /undo <run id> removes the reaction; GitHub approvals are never
+#   dismissed by Nexus: the reply lists each pull request to dismiss by hand.
+schema: 1
+name: "pr-auto-approve"
+description: "Approve the GitHub PRs linked in a ClickUp Chat DM, react to the DM and report on Telegram."
+
+triggers:
+  - type: "clickup.chat_message"
+    filter:
+      channel: "dm"
+      has_pr_link: true
+
+actions:
+  run:
+    - type: "github.pr_approve"
+      params:
+        account: "{{vars.github_account}}"
+    - type: "clickup.chat_reaction"
+      on: "success_of_previous"
+      params:
+        reaction: "{{vars.reaction}}"
+    - type: "telegram.message"
+
+dry_run: true
+
+vars:
+  github_account:
+    description: "Hub GitHub account (type pat) that approves as you; see nh github-account"
+  reaction:
+    description: "ClickUp reaction name (lower-case emoji name) added to the DM"
+    default: "white_check_mark"

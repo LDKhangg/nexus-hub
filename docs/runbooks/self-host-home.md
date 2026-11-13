@@ -2,7 +2,8 @@
 
 This guide runs Nexus-Hub on a home Linux machine that stays on. It receives
 ClickUp webhooks and Telegram messages through a public HTTPS tunnel. It covers
-Phase 1 notices, the Phase 2 agent and Phase 3 behaviors with Telegram commands.
+Phase 1 notices, the Phase 2 agent and Phase 3 behaviors with Telegram commands,
+and (section 9) PR auto-approve from ClickUp Chat DMs.
 
 Phase 3 is merged with test debt (`docs/product/test-debt/phase3-behavior-engine.md`).
 Keep every behavior on `dry_run: true`: then nothing is written to ClickUp until
@@ -42,7 +43,7 @@ Load it in each terminal you use for setup, then migrate:
 
 ```sh
 set -a; . ~/.config/nexus-hub/env; set +a
-goose -dir db/migrations postgres "$DATABASE_URL" up      # applies 00001–00009
+goose -dir db/migrations postgres "$DATABASE_URL" up      # applies 00001–00011
 nh master-key init --path "$NEXUS_MASTER_KEY_FILE"         # 32 random bytes, 0600; back it up offline
 ```
 
@@ -95,6 +96,17 @@ nh settings set public_base_url "$PUBLIC"
 nh settings set owner_telegram_chat_id '<your-chat-id>'
 nh settings set owner_clickup_user_id '<your ClickUp numeric user id>'
 nh profile set --workspace-id $WS --language vi --timezone Asia/Ho_Chi_Minh --quiet-hours 22:00-07:00 --digest per_run
+```
+
+The server runs as your user (section 6), so point its data directories at a
+path you can write. The defaults under `/var/lib/nexus-hub` are for the
+system unit; as a user service the server stops at start with "cannot create
+agent data directory":
+
+```sh
+mkdir -p ~/.local/share/nexus-hub/repos ~/.local/share/nexus-hub/tmp
+nh settings set repos_dir "$HOME/.local/share/nexus-hub/repos"
+nh settings set tmp_dir   "$HOME/.local/share/nexus-hub/tmp"
 ```
 
 For the agent and GitHub (accounts, repos, `enable-agent`), follow
@@ -176,6 +188,111 @@ nh behavior enable   --workspace-id $WS spec-review
 
 Write down anything odd: the run number, the `corr=` value and what you
 expected. These go to the Tester as live evidence for TD3-3.
+
+## 9. PR auto-approve from ClickUp Chat DMs
+
+When someone sends you a ClickUp Chat direct message with a GitHub pull
+request link, the `pr-auto-approve` behavior approves the pull request with
+your own GitHub account, adds a reaction to the DM with your ClickUp account
+and tells you on Telegram. There is no confirmation step, and anyone who can
+DM you can get a PR approved on any repo your token reaches; add `senders`
+to the trigger to narrow it (see the file's header). The DM text is never
+stored, logged or sent to Telegram, and no model is called.
+
+**a. A GitHub token that approves as you.** Create a personal access token
+on your own GitHub account (an App account would approve as a bot and is
+refused):
+
+- classic: scope `repo` (every repo you can reach); or
+- fine-grained: the repos to cover, with "Pull requests: Read and write" and
+  "Metadata: Read". A fine-grained token covers one resource owner (you or
+  one organization); create one per owner if needed.
+
+Store it and add it as a `pat` account on the ClickUp source (no
+`github-repo` grant is needed for approving). Behaviors take their GitHub
+accounts and ClickUp token from this source's agent configuration:
+
+```sh
+nh secret set --workspace-id $WS --name gh_me --kind github_pat    # paste the token
+nh github-account add --source-id $SRC --name me --pat-ref gh_me --login '<your GitHub login>'
+nh github-check --source-id $SRC                                   # ok per account, never a token
+```
+
+`--login` must be your GitHub login: it is checked against the token, and it
+is how the hub tells your own PR (`own_pr`, never approved) and your earlier
+approval (`already_approved`) apart. The source's agent configuration must
+not have `"dry_run": true` in `agent.tools` once you go live (step f):
+that policy turns every approval into "policy dry run".
+
+**b. Settings.** `owner_clickup_user_id` is required (section 4): without it
+no DM ever matches, since the trigger only takes messages from others. The
+poll interval is optional (default `30s`, `10s`..`10m`):
+
+```sh
+nh settings set owner_clickup_user_id '<your ClickUp numeric user id>'
+nh settings set clickup_chat_poll_interval 30s
+systemctl --user restart nexus-hub
+```
+
+ClickUp has no webhooks for Chat, so the server polls the DMs of the
+source's team (`--team-id` of `nh init`) with your ClickUp token. It polls
+only while an enabled behavior has a `clickup.chat_message` trigger, and
+the first poll starts from "now": older DMs are never processed.
+
+**c. Import, validate, publish, enable** (the file starts with
+`dry_run: true`):
+
+```sh
+cp examples/behaviors/pr-auto-approve.vars.example.yaml ~/.config/nexus-hub/pr-auto-approve.vars.yaml   # set github_account: "me"
+nh behavior import   --workspace-id $WS examples/behaviors/pr-auto-approve.yaml --vars ~/.config/nexus-hub/pr-auto-approve.vars.yaml
+nh behavior validate --workspace-id $WS pr-auto-approve
+nh behavior publish  --workspace-id $WS pr-auto-approve
+nh behavior enable   --workspace-id $WS pr-auto-approve
+```
+
+Validation refuses an unknown account or an account that is not `pat`.
+
+**d. Smoke test in dry run.** From another ClickUp account, DM yourself a
+message with a PR link (`https://github.com/<owner>/<repo>/pull/<n>`). Within
+about one poll interval (30s) Telegram shows "would approve <owner>/<repo>#<n>
+/ would add reaction …". Check the run:
+
+```sh
+nh runs  --workspace-id $WS --behavior pr-auto-approve   # subject clickup:chat:<id>, prs, run_actions
+nh trace --workspace-id $WS <run id>                      # each PR outcome, review id, reaction
+```
+
+On Telegram, `/trace #<run id>` or `/trace clickup:chat:<message id>` shows
+the same.
+
+**e. Probe the reaction name.** The default is `white_check_mark` (✅). ClickUp
+only accepts names it knows, and a dry run does not call ClickUp. On the
+first live run (step f), if the Telegram report says `reaction_unsupported`,
+change `reaction` in the values file, import again and publish:
+
+```sh
+nh behavior import  --workspace-id $WS examples/behaviors/pr-auto-approve.yaml --vars ~/.config/nexus-hub/pr-auto-approve.vars.yaml
+nh behavior publish --workspace-id $WS pr-auto-approve
+```
+
+**f. Go live.** Copy the example to your own file, set `dry_run: false`,
+import it with the same values file and publish. Only runs started after
+the publish use the new version:
+
+```sh
+cp examples/behaviors/pr-auto-approve.yaml ~/.config/nexus-hub/pr-auto-approve.yaml   # set dry_run: false
+nh behavior import  --workspace-id $WS ~/.config/nexus-hub/pr-auto-approve.yaml --vars ~/.config/nexus-hub/pr-auto-approve.vars.yaml
+nh behavior publish --workspace-id $WS pr-auto-approve
+```
+
+`/undo <run id>` removes the reaction the run added. Nexus never dismisses a
+GitHub approval: the reply lists each approved PR to dismiss by hand on
+GitHub.
+
+Downtime: on restart the poller catches up from its stored cursor. It reads
+at most about 250 new messages per DM channel in one poll; after a long
+downtime, a single DM with a bigger backlog loses its oldest messages
+(`chat_backlog_truncated` in the logs). Those messages start no run.
 
 ## Upkeep
 

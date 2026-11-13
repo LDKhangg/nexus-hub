@@ -124,11 +124,85 @@ func (t texts) undoAlready() string {
 func (t texts) undoNothing() string {
 	return t.pick("Run này chưa ghi mô tả nào để hoàn tác.", "This run wrote no description to undo.")
 }
+func (t texts) undoRunNothing() string {
+	return t.pick("Run này không có gì để Nexus tự hoàn tác.", "This run has nothing Nexus can undo.")
+}
+
+// undoApprovalsByHand tells the owner that Nexus never dismisses a GitHub
+// approval and lists the pull requests to dismiss by hand.
+func (t texts) undoApprovalsByHand(links []string) string {
+	return t.pick("Nexus không gỡ approval trên GitHub; hãy tự dismiss từng approval:\n",
+		"Nexus does not dismiss GitHub approvals; dismiss each one by hand:\n") + strings.Join(links, "\n")
+}
 func (t texts) undoChanged() string {
 	return t.pick("Mô tả đã thay đổi sau lần ghi của Nexus, không hoàn tác.", "The description changed after Nexus wrote it; not undone.")
 }
 func (t texts) undoFailed(code string) string {
 	return t.pick(fmt.Sprintf("Không hoàn tác được (%s).", code), fmt.Sprintf("Undo failed (%s).", code))
+}
+
+// Run-level action report (actions.run telegram.message).
+func (t texts) runActionsHead() string {
+	return t.pick("🤖 Đã xử lý tin nhắn", "🤖 Message handled")
+}
+func (t texts) runActionsDryHead() string {
+	return t.pick("🧪 Chạy thử (dry run), không ghi gì", "🧪 Dry run, nothing written")
+}
+func (t texts) chatFrom(user string) string {
+	return t.pick(fmt.Sprintf("Tin nhắn ClickUp từ user %s", user), fmt.Sprintf("ClickUp message from user %s", user))
+}
+func (t texts) prLine(ref, word string) string  { return ref + ": " + word }
+func (t texts) prActionLine(word string) string { return "Approve PR: " + word }
+
+// prWord describes one pull request's approval outcome.
+func (t texts) prWord(po RunPROutcome) string {
+	switch {
+	case po.Status == OutcomeOK && po.Result == resultAlreadyApproved:
+		return t.pick("đã approve từ trước", "already approved")
+	case po.Status == OutcomeOK:
+		return t.pick("đã approve", "approved")
+	case po.Status == OutcomeDryRun:
+		return t.pick("sẽ approve", "would approve")
+	}
+	return t.outcomeWord(po.Status, po.Code)
+}
+
+// outcomeWord describes a run-level status that is not a success.
+func (t texts) outcomeWord(status, code string) string {
+	if !codeRe.MatchString(code) {
+		code = ""
+	}
+	switch status {
+	case OutcomeOK:
+		return t.pick("xong", "done")
+	case OutcomeDryRun:
+		return t.pick("chạy thử, không ghi", "dry run, not written")
+	case OutcomePolicyDryRun:
+		return t.pick("policy đang ở chế độ chạy thử, không ghi", "the policy is in dry-run mode; not written")
+	case OutcomeSkippedPrevious:
+		return t.pick("bỏ qua vì bước trước chưa thành công", "skipped: the previous step did not succeed")
+	case OutcomeUnknown:
+		return t.pick("không rõ kết quả, hãy kiểm tra tay", "outcome unknown; check by hand")
+	}
+	if code == "" {
+		return t.pick("lỗi", "failed")
+	}
+	return t.pick(fmt.Sprintf("lỗi (%s)", code), fmt.Sprintf("failed (%s)", code))
+}
+
+// reactionLine describes the chat reaction's outcome.
+func (t texts) reactionLine(o RunActionOutcome) string {
+	name := o.Reaction
+	switch {
+	case o.Status == OutcomeOK && o.Result == resultAlreadyReacted:
+		return t.pick(fmt.Sprintf("✅ Reaction %s đã có từ trước", name), fmt.Sprintf("✅ Reaction %s was already there", name))
+	case o.Status == OutcomeOK:
+		return t.pick(fmt.Sprintf("✅ Đã thả reaction %s", name), fmt.Sprintf("✅ Reaction %s added", name))
+	case o.Status == OutcomeDryRun:
+		return t.pick(fmt.Sprintf("Sẽ thả reaction %s", name), fmt.Sprintf("Would add reaction %s", name))
+	}
+	return t.pick(fmt.Sprintf("Không thả reaction %s: %s", name, t.outcomeWord(o.Status, o.Code)),
+		fmt.Sprintf("Reaction %s not added: %s", name, t.outcomeWord(o.Status, o.Code)))
 }
 
 // capRunes clips s to n runes with an ellipsis.

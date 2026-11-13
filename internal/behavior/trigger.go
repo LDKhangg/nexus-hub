@@ -37,6 +37,18 @@ type Event struct {
 	AssigneesAdded []string
 	SenderID       string
 	FromOwnBot     bool
+	// Chat message fields (TriggerChatMessage), set by the chat poller from
+	// trusted identifiers only. Key is ChatSubject(MessageID).
+	MessageID string
+	ChannelID string
+	// ChannelType is the chat channel type ("dm"/"group_dm", or ClickUp's
+	// "DM"/"GROUP_DM"); it is matched case-insensitively.
+	ChannelType string
+	// PRs are the pull requests linked from the message (ExtractPRRefs).
+	PRs []PRRef
+	// TeamID is the ClickUp workspace (team) ID of the source integration
+	// the message was read from.
+	TeamID string
 }
 
 // EventFromNormalized maps a normalized ClickUp event to a trigger event.
@@ -100,6 +112,16 @@ type TriggerData struct {
 	TelegramChatID   int64    `json:"telegram_chat_id,omitempty"`
 	TelegramUpdateID int64    `json:"telegram_update_id,omitempty"`
 	Actor            string   `json:"actor,omitempty"`
+	// Chat message fields (TriggerChatMessage). SenderID above is the
+	// message's ClickUp user. The message text is never stored here.
+	MessageID   string  `json:"message_id,omitempty"`
+	ChannelID   string  `json:"channel_id,omitempty"`
+	ChannelType string  `json:"channel_type,omitempty"` // "dm" or "group_dm"
+	PRs         []PRRef `json:"prs,omitempty"`
+	// TeamID is the ClickUp workspace (team) ID of the source integration
+	// the chat poller read the message from: the target workspace of
+	// run-level ClickUp Chat actions.
+	TeamID string `json:"team_id,omitempty"`
 }
 
 // DecodeTriggerData reads a run's stored trigger data.
@@ -134,8 +156,20 @@ func (m Match) NewRun(subject, revision string) (NewRun, error) {
 }
 
 // RunFor returns the run request of a ClickUp event match, or ok=false
-// when the event's identifiers cannot make a valid run.
+// when the event's identifiers cannot make a valid run. A chat message
+// run's subject and revision are both ChatSubject(MessageID), so a message
+// starts each version at most once.
 func (m Match) RunFor(ev Event) (NewRun, bool) {
+	if ev.Type == TriggerChatMessage {
+		if !chatIDRe.MatchString(ev.MessageID) || ev.Key != ChatSubject(ev.MessageID) {
+			return NewRun{}, false
+		}
+		r, err := m.NewRun(ChatSubject(ev.MessageID), ev.Key)
+		if err != nil {
+			return NewRun{}, false
+		}
+		return r, true
+	}
 	if !taskIDRe.MatchString(ev.TaskID) || strings.TrimSpace(ev.Key) == "" || len(ev.Key) > 512 {
 		return NewRun{}, false
 	}
@@ -245,6 +279,15 @@ func matchTrigger(t ResolvedTrigger, ev Event, owner string) (TriggerData, bool)
 				return TriggerData{}, false
 			}
 		}
+	case TriggerChatMessage:
+		if !matchChat(t, ev, owner) {
+			return TriggerData{}, false
+		}
+		data.TaskID, data.ListID = "", ""
+		data.MessageID, data.ChannelID = ev.MessageID, ev.ChannelID
+		data.ChannelType = strings.ToLower(ev.ChannelType)
+		data.PRs = append([]PRRef(nil), ev.PRs...)
+		data.TeamID = ev.TeamID
 	default:
 		return TriggerData{}, false
 	}

@@ -144,6 +144,8 @@ type BehaviorRun struct {
 	UpdatedAt  pgtype.Timestamptz
 	// Context fragments the model saw, by locator; secrets redacted; at most 512 KiB of text.
 	ContextSnapshot []byte
+	// Outcomes of the run-level actions: types, identifiers and codes only, never message text.
+	RunActions []byte
 }
 
 // Published behavior versions are immutable; a trigger rejects UPDATE.
@@ -156,6 +158,22 @@ type BehaviorVersion struct {
 	Vars        []byte
 	Source      string
 	PublishedAt pgtype.Timestamptz
+}
+
+// ClickUp Chat poller cursor and error state per source integration; identifiers and counters only.
+type ClickupChatPoll struct {
+	WorkspaceID            pgtype.UUID
+	IntegrationID          pgtype.UUID
+	ClickupTeamID          string
+	CursorMs               int64
+	InitializedAt          pgtype.Timestamptz
+	ErrorStreak            int32
+	UnauthorizedStreak     int32
+	LastErrorCode          pgtype.Text
+	BackoffUntil           pgtype.Timestamptz
+	UnauthorizedNotifiedAt pgtype.Timestamptz
+	CreatedAt              pgtype.Timestamptz
+	UpdatedAt              pgtype.Timestamptz
 }
 
 // AES-256-GCM ciphertext only; AAD binds workspace, name and kind. The master key lives outside the database.

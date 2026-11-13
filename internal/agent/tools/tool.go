@@ -57,6 +57,26 @@ type RepoScoped interface {
 	Repo(json.RawMessage) (string, error)
 }
 
+// AccountScoped tools act as a named hub GitHub account on any repository
+// the account can reach, without a repo grant (for example approving a pull
+// request as the owner). Target returns the account name and the
+// repository the input names; the repository is recorded in the audit only.
+// The executor resolves the account from the policy's Accounts and passes
+// it as Call.Account (Call.Repo stays nil); an unknown account is denied
+// with account_not_found. A tool that is also RepoScoped is treated as
+// RepoScoped only.
+type AccountScoped interface {
+	Target(json.RawMessage) (account, repo string, err error)
+}
+
+// ActionOnly tools are write actions run only by the behavior engine's
+// run-level action executor. The executor offers and runs one only when it
+// is both enabled and listed in UnscopedWrites, so an agent job's policy
+// can never expose it to the model or call it.
+type ActionOnly interface {
+	ActionOnly()
+}
+
 // TierEscalator tools may raise the tier of a specific call (git_push to a
 // protected branch becomes dangerous).
 type TierEscalator interface {

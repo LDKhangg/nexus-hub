@@ -11,6 +11,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/google/uuid"
 )
 
@@ -56,7 +57,29 @@ type RunSummary struct {
 	AutoItems     int       `json:"auto"`
 	NotifyItems   int       `json:"notify"`
 	AskItems      int       `json:"ask"`
-	CreatedAt     time.Time `json:"created_at"`
+	// PRs are the pull requests of a chat-triggered run ("owner/repo#n"),
+	// from its trusted trigger data.
+	PRs []string `json:"prs,omitempty"`
+	// RunActions are the run's run-level action outcomes (identifiers and
+	// codes only).
+	RunActions []RunActionOutcome `json:"run_actions,omitempty"`
+	CreatedAt  time.Time          `json:"created_at"`
+}
+
+// RunPRRefs returns the pull requests of a run's stored trigger data as
+// "owner/repo#n"; nil when there are none or the data is unreadable.
+func RunPRRefs(trigger json.RawMessage) []string {
+	td, err := DecodeTriggerData(trigger)
+	if err != nil || len(td.PRs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(td.PRs))
+	for _, p := range td.PRs {
+		if tenant.ValidRepo(p.Repo) && p.Number > 0 {
+			out = append(out, p.String())
+		}
+	}
+	return out
 }
 
 // TraceStore is what a trace reads (storage.BehaviorStore).
@@ -76,30 +99,35 @@ type RunLister interface {
 
 // Trace is one run and its items.
 type Trace struct {
-	Run       TraceRun         `json:"run"`
-	Items     []TraceItem      `json:"items"`
-	ToolCalls []ToolCallRecord `json:"tool_calls"`
+	Run   TraceRun    `json:"run"`
+	Items []TraceItem `json:"items"`
+	// RunActions are the outcomes of the run's run-level actions
+	// (actions.run), identifiers and codes only.
+	RunActions []RunActionOutcome `json:"run_actions,omitempty"`
+	ToolCalls  []ToolCallRecord   `json:"tool_calls"`
 }
 
 // TraceRun is the run part of a trace.
 type TraceRun struct {
-	ID            int64           `json:"id"`
-	Behavior      string          `json:"behavior"`
-	Version       int             `json:"version"`
-	TriggerKind   string          `json:"trigger"`
-	Trigger       json.RawMessage `json:"trigger_data,omitempty"`
-	Subject       string          `json:"subject"`
-	Revision      string          `json:"revision"`
-	Status        RunStatus       `json:"status"`
-	ErrorCode     string          `json:"error_code,omitempty"`
-	CorrelationID string          `json:"correlation_id"`
-	Attempts      int             `json:"attempts"`
-	Usage         TraceUsage      `json:"usage"`
-	RunAt         time.Time       `json:"run_at"`
-	StartedAt     *time.Time      `json:"started_at,omitempty"`
-	FinishedAt    *time.Time      `json:"finished_at,omitempty"`
-	UndoneAt      *time.Time      `json:"undone_at,omitempty"`
-	CreatedAt     time.Time       `json:"created_at"`
+	ID          int64           `json:"id"`
+	Behavior    string          `json:"behavior"`
+	Version     int             `json:"version"`
+	TriggerKind string          `json:"trigger"`
+	Trigger     json.RawMessage `json:"trigger_data,omitempty"`
+	Subject     string          `json:"subject"`
+	Revision    string          `json:"revision"`
+	// PRs are the pull requests of a chat-triggered run ("owner/repo#n").
+	PRs           []string   `json:"prs,omitempty"`
+	Status        RunStatus  `json:"status"`
+	ErrorCode     string     `json:"error_code,omitempty"`
+	CorrelationID string     `json:"correlation_id"`
+	Attempts      int        `json:"attempts"`
+	Usage         TraceUsage `json:"usage"`
+	RunAt         time.Time  `json:"run_at"`
+	StartedAt     *time.Time `json:"started_at,omitempty"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty"`
+	UndoneAt      *time.Time `json:"undone_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
 }
 
 // TraceUsage is a run's model usage.
@@ -157,8 +185,9 @@ func redactText(s string) string {
 }
 
 // ResolveTraceRef finds the run a trace reference names: a run ID ("12" or
-// "#12"), a correlation ID, or a ClickUp task ID or URL (its latest run).
-// A number that is no run ID is tried as a task ID.
+// "#12"), a correlation ID, a chat subject ("clickup:chat:<message id>",
+// its latest run), or a ClickUp task ID or URL (its latest run). A number
+// that is no run ID is tried as a task ID.
 func ResolveTraceRef(ctx context.Context, store TraceStore, workspaceID, ref string) (Run, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -173,6 +202,12 @@ func ResolveTraceRef(ctx context.Context, store TraceStore, workspaceID, ref str
 	}
 	if _, err := uuid.Parse(ref); err == nil && len(ref) == 36 {
 		return store.LatestRunByCorrelation(ctx, workspaceID, strings.ToLower(ref))
+	}
+	if msgID, ok := strings.CutPrefix(ref, SubjectChatPrefix); ok {
+		if !chatIDRe.MatchString(msgID) {
+			return Run{}, ErrInvalid
+		}
+		return store.LatestRunBySubject(ctx, workspaceID, ChatSubject(msgID))
 	}
 	if taskID, ok := ParseTaskRef(ref); ok {
 		return store.LatestRunBySubject(ctx, workspaceID, TaskSubject(taskID))
@@ -199,7 +234,7 @@ func BuildTrace(ctx context.Context, store TraceStore, workspaceID, ref, itemKey
 	if err != nil {
 		return Trace{}, err
 	}
-	t := Trace{Run: traceRun(run), Items: []TraceItem{}, ToolCalls: calls}
+	t := Trace{Run: traceRun(run), Items: []TraceItem{}, RunActions: DecodeRunActions(run.RunActions).Actions, ToolCalls: calls}
 	if t.ToolCalls == nil {
 		t.ToolCalls = []ToolCallRecord{}
 	}
@@ -231,6 +266,7 @@ func traceRun(r Run) TraceRun {
 			CacheReadTokens: r.Usage.CacheReadTokens, CacheWriteTokens: r.Usage.CacheWriteTokens, Steps: r.Usage.Steps,
 		},
 		RunAt: r.RunAt, StartedAt: r.StartedAt, FinishedAt: r.FinishedAt, UndoneAt: r.UndoneAt, CreatedAt: r.CreatedAt,
+		PRs: RunPRRefs(r.Trigger),
 	}
 	// The trigger holds trusted identifiers only; it is kept when it is
 	// still valid JSON after redaction.
@@ -322,6 +358,9 @@ func (w *traceText) runHeader(r TraceRun) {
 	w.line("Trigger: %s", r.TriggerKind)
 	w.line("Đối tượng: %s", r.Subject)
 	w.line("Revision: %s", r.Revision)
+	if r.TriggerKind == TriggerChatMessage {
+		w.chatTrigger(r)
+	}
 	if r.ErrorCode != "" {
 		w.line("Trạng thái: %s (%s)", r.Status, r.ErrorCode)
 	} else {
@@ -355,6 +394,7 @@ func renderTrace(t Trace, loc *time.Location, item, calls bool) string {
 	w := &traceText{loc: loc}
 	w.runHeader(t.Run)
 	if !item {
+		w.runActions(t.RunActions)
 		w.line("Items (%d):", len(t.Items))
 		for _, it := range t.Items {
 			label := it.Label
@@ -439,6 +479,64 @@ func renderTrace(t Trace, loc *time.Location, item, calls bool) string {
 	return w.b.String()
 }
 
+// chatTrigger renders the trusted identifiers of a chat-triggered run:
+// channel type, sender and message IDs and the pull requests. The message
+// text is never stored, so it cannot be shown.
+func (w *traceText) chatTrigger(r TraceRun) {
+	td, err := DecodeTriggerData(r.Trigger)
+	if err == nil {
+		w.line("Chat: %s · người gửi %s · tin nhắn %s", orDash(td.ChannelType), orDash(td.SenderID), orDash(td.MessageID))
+	}
+	if len(r.PRs) > 0 {
+		w.line("PR: %s", strings.Join(r.PRs, ", "))
+	}
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// runActions renders the run-level action outcomes: type, status and code,
+// each pull request's result and review ID, and the reaction.
+func (w *traceText) runActions(as []RunActionOutcome) {
+	if len(as) == 0 {
+		return
+	}
+	w.line("Hành động run (%d):", len(as))
+	for _, a := range as {
+		s := fmt.Sprintf("- #%d %s: %s", a.Index, a.Type, a.Status)
+		if a.Code != "" && a.Code != a.Status {
+			s += " (" + a.Code + ")"
+		}
+		if a.Reaction != "" {
+			s += " · reaction " + a.Reaction
+		}
+		if a.Result != "" {
+			s += " · " + a.Result
+		}
+		if a.TelegramMessageID != 0 {
+			s += fmt.Sprintf(" · tin %d", a.TelegramMessageID)
+		}
+		w.line("%s", s)
+		for _, p := range a.PRs {
+			ps := fmt.Sprintf("  • %s: %s", PRRef{Repo: p.Repo, Number: p.Number}.String(), p.Status)
+			if p.Result != "" {
+				ps += " · " + p.Result
+			}
+			if p.Code != "" && p.Code != p.Status {
+				ps += " (" + p.Code + ")"
+			}
+			if p.ReviewID != 0 {
+				ps += fmt.Sprintf(" · review %d", p.ReviewID)
+			}
+			w.line("%s", ps)
+		}
+	}
+}
+
 func (w *traceText) toolCalls(calls []ToolCallRecord) {
 	w.line("Tool calls (%d):", len(calls))
 	for _, c := range calls {
@@ -500,7 +598,7 @@ type TraceService struct {
 
 var _ Tracer = (*TraceService)(nil)
 
-const usageTraceRef = "Cú pháp: /trace <run id | task id/URL | correlation id> [item]"
+const usageTraceRef = "Cú pháp: /trace <run id | task id/URL | clickup:chat:<message id> | correlation id> [item]"
 
 func (s *TraceService) location(ctx context.Context, workspaceID string) *time.Location {
 	tz := DefaultProfile().Timezone

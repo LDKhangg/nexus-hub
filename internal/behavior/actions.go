@@ -35,6 +35,19 @@ const (
 	ToolRemoveAssignee      = "clickup_remove_assignee"
 )
 
+// Run-level write tools (actions.run). Both are ActionOnly tools: the
+// executor runs them only when they are enabled and in UnscopedWrites.
+// ToolPRApprove takes {"account","repo","number"} and needs the account in
+// the policy's Accounts; ToolChatReaction takes
+// {"team_id","message_id","reaction"} and the ClickUp token reference.
+const (
+	ToolPRApprove    = "github_pr_approve"
+	ToolChatReaction = "clickup_chat_reaction"
+	// ToolChatReactionRemove undoes ToolChatReaction (same input); a
+	// reaction already gone counts as removed.
+	ToolChatReactionRemove = "clickup_chat_reaction_remove"
+)
+
 // Action outcome statuses stored in an item's action result.
 const (
 	OutcomeOK              = "ok"

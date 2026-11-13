@@ -123,6 +123,12 @@ WHERE id = sqlc.arg(id) AND claim_token = sqlc.arg(token)::uuid AND status = 'ru
 UPDATE public.behavior_runs SET context_snapshot = sqlc.arg(snapshot), updated_at = now()
 WHERE id = sqlc.arg(id) AND claim_token = sqlc.arg(token)::uuid AND status = 'running';
 
+-- name: SetBehaviorRunActions :execrows
+-- Stores the run-level action outcomes of the claimed run (replaced as
+-- actions finish; a retry starts from the stored outcomes).
+UPDATE public.behavior_runs SET run_actions = sqlc.arg(result), updated_at = now()
+WHERE id = sqlc.arg(id) AND claim_token = sqlc.arg(token)::uuid AND status = 'running';
+
 -- name: LockClaimedBehaviorRun :one
 -- Locks a run only while the caller still holds its claim.
 SELECT workspace_id FROM public.behavior_runs
@@ -140,7 +146,8 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND snapshot I
 
 -- name: MarkBehaviorRunUndone :execrows
 UPDATE public.behavior_runs SET undone_at = now(), updated_at = now()
-WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND undone_at IS NULL AND snapshot IS NOT NULL;
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND undone_at IS NULL
+  AND (snapshot IS NOT NULL OR run_actions IS NOT NULL);
 
 -- name: GetBehaviorRun :one
 SELECT sqlc.embed(r), b.name AS behavior_name
@@ -161,9 +168,10 @@ ORDER BY r.created_at DESC, r.id DESC LIMIT 1;
 
 -- name: ListRecentBehaviorRuns :many
 -- Recent runs, newest first, optionally of one behavior, with item counts
--- by class.
+-- by class, the trusted trigger data and the run-level action outcomes.
 SELECT r.id, b.name AS behavior_name, r.version, r.trigger_kind, r.subject, r.status,
        COALESCE(r.error_code, '')::text AS error_code, r.correlation_id, r.created_at,
+       r.trigger, r.run_actions,
        COUNT(i.id) FILTER (WHERE i.class = 'auto')::int AS auto_items,
        COUNT(i.id) FILTER (WHERE i.class = 'notify')::int AS notify_items,
        COUNT(i.id) FILTER (WHERE i.class = 'ask')::int AS ask_items

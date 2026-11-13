@@ -7,11 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/control/telegram"
 	githubapi "github.com/LDKhangg/nexus-hub/internal/adapters/github"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/llm"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/netguard"
+	"github.com/LDKhangg/nexus-hub/internal/adapters/sources/clickupchat"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage"
 	clickuptools "github.com/LDKhangg/nexus-hub/internal/adapters/tools/clickup"
 	codetools "github.com/LDKhangg/nexus-hub/internal/adapters/tools/code"
@@ -20,6 +22,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/agent"
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
+	"github.com/LDKhangg/nexus-hub/internal/behavior/chatpoll"
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/memory"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
@@ -78,6 +81,13 @@ func buildTools(s settings.Settings, resolver *secrets.Resolver, redactor *agent
 	// ClickUp writes of the behavior action library: tier write, not repo
 	// scoped, so agent jobs can never call them (no repo grant allows them).
 	all = append(all, clickuptools.NewWriteTools(apiClient, resolver)...)
+	// Run-level actions of the behavior engine (approve a pull request as
+	// the owner's pat account, react to a ClickUp Chat message). They are
+	// ActionOnly: offered and run only by the behavior action executor.
+	all = append(all, githubtools.NewApproveTool(gh))
+	all = append(all, clickuptools.NewChatReactionTool(apiClient, resolver, clickupchat.New(apiClient)))
+	// Undo of a run-level reaction (/undo), also ActionOnly.
+	all = append(all, clickuptools.NewChatReactionRemoveTool(apiClient, resolver, clickupchat.New(apiClient)))
 	all = append(all, extra...)
 	if gitPath, err := resolveGit(s.GitPath); err != nil {
 		log.Print("git not found; code and workspace tools disabled")
@@ -258,4 +268,84 @@ func (p behaviorPolicies) RunPolicy(ctx context.Context, workspaceID, integratio
 		}
 	}
 	return tenant.AgentConfig{}, errors.New("no ClickUp source in workspace")
+}
+
+// buildChatPoller wires the ClickUp Chat poller: every enabled ClickUp
+// source with a team ID, its agent config's ClickUp token reference, the
+// behavior store for enabled versions, the poll state and the chat run
+// starter, and the owner's Telegram chat for the unauthorized notice.
+func buildChatPoller(s settings.Settings, store *storage.BehaviorStore, workspaces *storage.WorkspaceRepository, integrations *storage.IntegrationRepository, known map[string]tenant.Tier, resolver *secrets.Resolver, messenger behavior.Messenger) *chatpoll.Poller {
+	return chatpoll.New(chatpoll.Deps{
+		Targets:   chatPollTargets{workspaces: workspaces, integrations: integrations, known: known},
+		Versions:  store,
+		State:     store,
+		Runs:      store,
+		Chat:      clickupchat.New(netguard.Client(s.ToolTimeout, netguard.DefaultHosts)),
+		Secrets:   resolver,
+		Chats:     ownerChats{integrations: integrations, ownerChatID: s.OwnerTelegramChatID},
+		Messenger: messenger,
+		Profiles:  store,
+	}, chatpoll.Settings{Interval: s.ClickUpChatPollInterval, OwnerClickUpUserID: s.OwnerClickUpUserID})
+}
+
+// chatPollTargets lists, across all workspaces, the enabled ClickUp
+// sources that have a clickup_team_id and a valid agent config; the token
+// reference is the agent config's clickup_token_ref (default "clickup"),
+// the same one the ClickUp tools resolve.
+type chatPollTargets struct {
+	workspaces   *storage.WorkspaceRepository
+	integrations *storage.IntegrationRepository
+	known        map[string]tenant.Tier
+}
+
+// chatPollPage is the page size of the workspace and integration listings.
+const chatPollPage = 100
+
+func (c chatPollTargets) ChatPollTargets(ctx context.Context) ([]chatpoll.Target, error) {
+	var out []chatpoll.Target
+	for off := int32(0); ; off += chatPollPage {
+		wss, err := c.workspaces.List(ctx, chatPollPage, off)
+		if err != nil {
+			return nil, err
+		}
+		for _, ws := range wss {
+			targets, err := c.workspaceTargets(ctx, ws.ID)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, targets...)
+		}
+		if len(wss) < chatPollPage {
+			return out, nil
+		}
+	}
+}
+
+func (c chatPollTargets) workspaceTargets(ctx context.Context, workspaceID string) ([]chatpoll.Target, error) {
+	var out []chatpoll.Target
+	for off := int32(0); ; off += chatPollPage {
+		list, err := c.integrations.List(ctx, workspaceID, chatPollPage, off)
+		if err != nil {
+			return nil, err
+		}
+		for _, in := range list {
+			if !clickUpSource(in) {
+				continue
+			}
+			team, _ := in.Config["clickup_team_id"].(string)
+			team = strings.TrimSpace(team)
+			if team == "" {
+				continue
+			}
+			cfg, err := tenant.ParseAgentConfig(in.Config, c.known)
+			if err != nil {
+				log.Printf("clickup chat poll: invalid agent config workspace=%s integration=%s", workspaceID, in.ID)
+				continue
+			}
+			out = append(out, chatpoll.Target{WorkspaceID: workspaceID, IntegrationID: in.ID, TeamID: team, TokenRef: cfg.ClickUpTokenRef})
+		}
+		if len(list) < chatPollPage {
+			return out, nil
+		}
+	}
 }

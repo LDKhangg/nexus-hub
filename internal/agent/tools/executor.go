@@ -150,10 +150,15 @@ func (e *Executor) CleanText(s string) string {
 
 // Enabled reports whether a tool may be offered to the LLM: read tools in
 // the enabled list, and non-read tools allowed for at least one repo.
+// An ActionOnly tool is enabled only when it is in the enabled list and in
+// UnscopedWrites (the behavior engine's action executor).
 func (e *Executor) Enabled(name string) bool {
 	t := e.reg.Get(name)
 	if t == nil {
 		return false
+	}
+	if _, ok := t.(ActionOnly); ok {
+		return slices.Contains(e.policy.Enabled, name) && slices.Contains(e.UnscopedWrites, name)
 	}
 	if t.Spec().Tier == tenant.TierRead {
 		return slices.Contains(e.policy.Enabled, name)
@@ -227,6 +232,18 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 		}
 		start.Account = account.Name
 		call.Repo, call.Account = &grant, &account
+	} else if as, ok := tool.(AccountScoped); ok {
+		name, repo, err := as.Target(input)
+		if err != nil || !tenant.ValidRepo(repo) || name == "" {
+			return e.deny(ctx, start, "invalid_input")
+		}
+		start.Repo = repo
+		account, ok := e.policy.Accounts[name]
+		if !ok {
+			return e.deny(ctx, start, "account_not_found")
+		}
+		start.Account = account.Name
+		call.Account = &account
 	}
 	// 5. tier gate
 	tier := spec.Tier

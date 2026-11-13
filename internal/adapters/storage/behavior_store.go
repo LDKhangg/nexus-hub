@@ -417,7 +417,7 @@ func mapRun(r sqlc.BehaviorRun, name string) behavior.Run {
 			InputTokens: int(r.InputTokens), OutputTokens: int(r.OutputTokens), CacheReadTokens: int(r.CacheReadTokens),
 			CacheWriteTokens: int(r.CacheWriteTokens), Steps: int(r.Steps),
 		},
-		ErrorCode: r.ErrorCode.String, Snapshot: r.Snapshot, Context: r.ContextSnapshot, UndoneAt: tsPtr(r.UndoneAt), RunAt: r.RunAt.Time,
+		ErrorCode: r.ErrorCode.String, Snapshot: r.Snapshot, Context: r.ContextSnapshot, RunActions: r.RunActions, UndoneAt: tsPtr(r.UndoneAt), RunAt: r.RunAt.Time,
 		StartedAt: tsPtr(r.StartedAt), FinishedAt: tsPtr(r.FinishedAt), CreatedAt: r.CreatedAt.Time, UpdatedAt: r.UpdatedAt.Time,
 	}
 }
@@ -573,6 +573,26 @@ func (s *BehaviorStore) SetRunContext(ctx context.Context, runID int64, token st
 		return err
 	}
 	n, err := s.q.SetBehaviorRunContext(ctx, sqlc.SetBehaviorRunContextParams{Snapshot: snap, ID: runID, Token: t})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return behavior.ErrStaleClaim
+	}
+	return nil
+}
+
+// SetRunActions stores the run-level action outcomes of a claimed run.
+func (s *BehaviorStore) SetRunActions(ctx context.Context, runID int64, token string, result json.RawMessage) error {
+	t, err := claimToken(token)
+	if err != nil {
+		return err
+	}
+	res, err := objectJSON(result, "run actions")
+	if err != nil {
+		return err
+	}
+	n, err := s.q.SetBehaviorRunActions(ctx, sqlc.SetBehaviorRunActionsParams{Result: res, ID: runID, Token: t})
 	if err != nil {
 		return err
 	}
