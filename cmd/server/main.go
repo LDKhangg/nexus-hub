@@ -113,6 +113,11 @@ func run() error {
 		Commands: commands, Undoer: engine, Callbacks: engine,
 		Tracer: &behavior.TraceService{Store: behaviors, Profiles: behaviors},
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
+	workspaces, err := storage.NewWorkspaceRepository(pool)
+	if err != nil {
+		return errors.New("workspace repository startup failed")
+	}
+	chatPoller := buildChatPoller(s, behaviors, workspaces, integrations, ag.known, resolver, messenger)
 	handler := httpdelivery.NewWebhookHandler(integrations, httpdelivery.NewVerifiedParserFactory(resolver), relay.NewNoticeService(notices))
 	e := echo.New()
 	e.HideBanner = true
@@ -124,7 +129,7 @@ func run() error {
 	e.POST("/webhook/:source/:integrationID", handler.HandleWebhook)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runServices(ctx, e, []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine}, s.ListenAddr, shutdownTimeout)
+	return runServices(ctx, e, []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller}, s.ListenAddr, shutdownTimeout)
 }
 
 type serviceWorker interface{ Run(context.Context) error }
