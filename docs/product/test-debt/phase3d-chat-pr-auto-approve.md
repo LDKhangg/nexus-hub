@@ -26,10 +26,10 @@
 
 | # | Item | REQ | PCC | Proof needed | Status |
 |---|---|---|---|---|---|
-| TD3d-1 | Every Phase 3d requirement | REQ-1..REQ-16 | FR-012, FR-013, FR-018, FR-024, FR-025, FR-027, FR-029, FR-082, FR-090, FR-133, FR-135, FR-137, NFR-001, NFR-004 | Approved Test Plan, CI PASS | open |
+| TD3d-1 | Every Phase 3d requirement | REQ-1..REQ-16 | FR-012, FR-013, FR-018, FR-024, FR-025, FR-027, FR-029, FR-082, FR-090, FR-133, FR-135, FR-137, NFR-001, NFR-004 | Approved Test Plan, CI PASS | closed: CI 43394889383 green on 85f5d5d (merged 6c9a0a6) |
 | TD3d-2 | Independent review of 45caa64..9a0bdbe, with the review focus of Phase Brief 1 (exactly-once DMs, model cannot steer targets, `AccountScoped`/`ActionOnly` never reachable from agent jobs, dry run writes nothing) | all | as above | Review Report APPROVE | open |
 | TD3d-3 | Live checks: ClickUp Chat v3 field shapes and message order, the reaction name for ✅ (`white_check_mark` assumed), the "already exists" 400 text | REQ-2, REQ-3, REQ-11 | FR-012 | owner's first live DM, then a test against recorded payloads | open |
-| TD3d-4 | Defect found by the Lead during setup: a poll-only ClickUp source stays `is_enabled=false` after `nh init` (only `bind-webhook` enables it), so the poller finds no target; worked around locally by an SQL update | REQ-1 | FR-012 | a CLI path or documented step, then a test | open (fix in the next phase's Fix Brief) |
+| TD3d-4 | Defect found by the Lead during setup: a poll-only ClickUp source stays `is_enabled=false` after `nh init` (only `bind-webhook` enables it), so the poller finds no target; worked around locally by an SQL update | REQ-1 | FR-012 | a CLI path or documented step, then a test | closed: CI 43394889383 green on 85f5d5d (merged 6c9a0a6) |
 
 Phase 2 debt (TD-1..TD-6) and Phase 3 debt (TD3-1..TD3-4) stay open as well.
 

@@ -4,6 +4,8 @@ Status of every PCC-001 requirement. Statuses follow PCC §10.1.2: `PENDING`, `I
 
 Snapshot: 2026-11-12. Phase 1 merged; Phase 2 under test and review. Nothing is `VERIFIED` against the PCC yet: Phase 1/2 work covers parts of the IDs marked `IN_PROGRESS`.
 
+Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889383 green (664 tests). Open test debt: TD-6, TD3-2, TD3-3, TD3d-2, TD3d-3 (independent reviews of Phases 2/3/3d and live ClickUp payload facts). Per-ID statuses are updated per phase when the owner asks.
+
 | ID | Requirement | Phase | Status | Evidence / note |
 |---|---|---|---|---|
 | FR-001 | Có persistent internal user ID dạng UUID. | 4 | PENDING |  |

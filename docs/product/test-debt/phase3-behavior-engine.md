@@ -18,10 +18,10 @@
 
 | # | Item | REQ | Proof needed | Status |
 |---|---|---|---|---|
-| TD3-1 | Every Phase 3 requirement | REQ-1..REQ-25 | Approved Test Plan, CI PASS | open |
+| TD3-1 | Every Phase 3 requirement | REQ-1..REQ-25 | Approved Test Plan, CI PASS | closed: CI 43394889383 green on 85f5d5d (merged 6c9a0a6) |
 | TD3-2 | Independent review of 37b5746..d1b24e2 | all | Review Report APPROVE | open |
 | TD3-3 | Live checks of unconfirmed assumptions: ClickUp `list_id`/`parent_id`, description markers and `markdown_content` writes | REQ-4, REQ-16 | owner's first home run, then a test against recorded payloads | open |
-| TD3-4 | TestHardening_FsmonitorNotExecuted updated by the Tester | REQ-F1 | CI PASS | open |
+| TD3-4 | TestHardening_FsmonitorNotExecuted updated by the Tester | REQ-F1 | CI PASS | closed: CI 43394889383 green on 85f5d5d (merged 6c9a0a6) |
 
 Phase 2 debt (TD-1..TD-6) stays open as well.
 
