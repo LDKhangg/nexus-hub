@@ -18,7 +18,7 @@ var placeholderRE = regexp.MustCompile(`\{[^{}]*\}`)
 var allowedPlaceholders = map[string]bool{
 	"contact": true, "contact_platform": true,
 	"pr_number": true, "pr_repo": true, "pr_title": true, "prs": true,
-	"verdict": true, "confidence": true, "ai_summary": true,
+	"verdict": true, "confidence": true, "ai_summary": true, "items": true,
 	"outcome": true, "reason": true,
 	"task": true, "channel": true, "link": true,
 	"behavior": true, "run_id": true,
@@ -37,20 +37,23 @@ type Values struct {
 	Verdict         string
 	Confidence      string
 	AISummary       string
-	Outcome         string
-	Reason          string
-	Task            string
-	Channel         string
-	Link            string
-	Behavior        string
-	RunID           string
+	// Items is the reported content of a notify, FYI, mention or digest
+	// report: one item per line. It is distinct from the AI summary.
+	Items    string
+	Outcome  string
+	Reason   string
+	Task     string
+	Channel  string
+	Link     string
+	Behavior string
+	RunID    string
 }
 
 func (v Values) fields() map[string]string {
 	return map[string]string{
 		"contact": v.Contact, "contact_platform": v.ContactPlatform,
 		"pr_number": v.PRNumber, "pr_repo": v.PRRepo, "pr_title": v.PRTitle, "prs": v.PRs,
-		"verdict": v.Verdict, "confidence": v.Confidence, "ai_summary": v.AISummary,
+		"verdict": v.Verdict, "confidence": v.Confidence, "ai_summary": v.AISummary, "items": v.Items,
 		"outcome": v.Outcome, "reason": v.Reason,
 		"task": v.Task, "channel": v.Channel, "link": v.Link,
 		"behavior": v.Behavior, "run_id": v.RunID,
@@ -121,10 +124,19 @@ func cleanValue(s string) string {
 	return strings.TrimSpace(b.String())
 }
 
-// Render validates and renders one owner template. Optional lines begin with
-// ?{name}; the marker is removed, and the whole line is omitted when name is
-// empty. Failure and skipped-approval templates cannot suppress their reason.
+// Render validates and renders one owner template in Vietnamese. See
+// RenderLanguage.
 func Render(body string, kind Kind, values Values) (string, error) {
+	return RenderLanguage(body, kind, values, "vi")
+}
+
+// RenderLanguage validates and renders one owner template. Optional lines
+// begin with ?{name}; the marker is removed, and the whole line is omitted
+// when name is empty. Each line is scanned once and every {name} token is
+// replaced by its cleaned value; inserted values are never rescanned.
+// Failure, skipped-approval and verdict-unavailable reports cannot suppress
+// their reason: when the rendered output lacks it, a reason line is appended.
+func RenderLanguage(body string, kind Kind, values Values, language string) (string, error) {
 	if err := Validate(body); err != nil {
 		return "", err
 	}
@@ -142,19 +154,30 @@ func Render(body string, kind Kind, values Values) (string, error) {
 			}
 			line = line[end+1:]
 		}
-		for name, value := range fields {
-			line = strings.ReplaceAll(line, "{"+name+"}", value)
-		}
+		line = placeholderRE.ReplaceAllStringFunc(line, func(token string) string {
+			return fields[token[1:len(token)-1]]
+		})
 		lines = append(lines, strings.TrimRight(line, " \t"))
 	}
 	out := strings.TrimSpace(strings.Join(lines, "\n"))
-	if (kind == KindFailure || kind == KindPRSkipped) && fields["reason"] != "" && !strings.Contains(body, "{reason}") {
+	if reason := fields["reason"]; reason != "" && needsReason(kind) && !strings.Contains(out, reason) {
 		if out != "" {
 			out += "\n"
 		}
-		out += fields["reason"]
+		out += reasonPrefix(language) + reason
 	}
 	return out, nil
+}
+
+func needsReason(kind Kind) bool {
+	return kind == KindFailure || kind == KindPRSkipped || kind == KindVerdictUnavailable
+}
+
+func reasonPrefix(language string) string {
+	if strings.HasPrefix(language, "en") {
+		return "Reason: "
+	}
+	return "Lý do: "
 }
 
 // Preview renders a template with fake, non-sensitive values. With no body,
@@ -162,7 +185,7 @@ func Render(body string, kind Kind, values Values) (string, error) {
 // the optional second argument.
 func Preview(kind Kind, body ...string) (string, error) {
 	template := "{outcome}\n?{verdict}AI: {verdict} ({confidence})\n?{link}{link}"
-	if kind == KindFailure || kind == KindPRSkipped {
+	if needsReason(kind) {
 		template += "\n{reason}"
 	}
 	if len(body) > 0 {
@@ -171,7 +194,7 @@ func Preview(kind Kind, body ...string) (string, error) {
 	return Render(template, kind, Values{
 		Contact: "Sample Contact", ContactPlatform: "clickup", PRNumber: "1601", PRRepo: "org/repo",
 		PRTitle: "Sample pull request", PRs: "org/repo#1601", Verdict: "approve_request", Confidence: "0.94",
-		AISummary: "Sample summary", Outcome: "✅ Approved PR #1601 for Sample Contact", Reason: "Sample reason",
+		AISummary: "Sample summary", Items: "• Sample item", Outcome: "✅ Approved PR #1601 for Sample Contact", Reason: "Sample reason",
 		Task: "TASK-123", Channel: "project-chat", Link: "https://github.com/org/repo/pull/1601",
 		Behavior: "sample-behavior", RunID: "42",
 	})

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/LDKhangg/nexus-hub/internal/people"
 )
@@ -83,7 +84,7 @@ func (r *Renderer) Render(ctx context.Context, report Report) (string, error) {
 			return "", err
 		}
 		if ok {
-			return Render(body, report.Kind, v)
+			return RenderLanguage(body, report.Kind, v, language)
 		}
 	}
 	return renderDefault(report, v, prefs, language), nil
@@ -159,6 +160,13 @@ func renderDefault(report Report, v Values, prefs Prefs, language string) string
 	} else if prefs.ShowAISummary && v.AISummary != "" && prefs.Style != StyleShort {
 		lines = append(lines, cleanValue(v.AISummary))
 	}
+	if v.Items != "" {
+		if prefs.Style == StyleShort {
+			lines = append(lines, compactItems(cleanValue(v.Items)))
+		} else {
+			lines = append(lines, strings.Split(cleanValue(v.Items), "\n")...)
+		}
+	}
 	if prefs.Style != StyleShort {
 		if prefs.ShowPRTitles && v.PRs != "" {
 			lines = append(lines, strings.Split(cleanValue(v.PRs), "\n")...)
@@ -178,20 +186,84 @@ func renderDefault(report Report, v Values, prefs Prefs, language string) string
 			}
 		}
 	}
-	if v.Reason != "" && (report.Kind == KindFailure || report.Kind == KindPRSkipped || report.Kind == KindVerdictUnavailable) {
-		prefix := "Lý do: "
-		if strings.HasPrefix(language, "en") {
-			prefix = "Reason: "
-		}
-		lines = append(lines, prefix+cleanValue(v.Reason))
+	reason := ""
+	if v.Reason != "" && needsReason(report.Kind) {
+		reason = reasonPrefix(language) + cleanValue(v.Reason)
+		lines = append(lines, reason)
 	}
 	if prefs.ShowLinks && v.Link != "" {
 		lines = append(lines, cleanValue(v.Link))
 	}
+	lines = nonEmpty(lines)
 	if prefs.Style == StyleShort && len(lines) > 4 {
-		lines = lines[:4]
+		keep := lines[:4]
+		if reason != "" && !containsLine(keep, reason) {
+			keep = append(lines[:3:3], reason)
+		}
+		lines = keep
 	}
-	return strings.TrimSpace(strings.Join(nonEmpty(lines), "\n"))
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+const maxCompactItemRunes = 200
+
+// compactItems folds an item list into one line for the short style: the
+// first items, then "+N" for the ones that do not fit in 200 runes. Bullet
+// lines are the items when present; other lines are headings.
+func compactItems(items string) string {
+	var all, bullets []string
+	for _, line := range strings.Split(items, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		all = append(all, line)
+		if strings.HasPrefix(line, "•") {
+			bullets = append(bullets, strings.TrimSpace(strings.TrimPrefix(line, "•")))
+		}
+	}
+	if len(bullets) > 0 {
+		all = bullets
+	}
+	out := ""
+	for i, item := range all {
+		next := item
+		if out != "" {
+			next = out + " · " + item
+		}
+		rest := ""
+		if left := len(all) - i - 1; left > 0 {
+			rest = " +" + strconv.Itoa(left)
+		}
+		if utf8.RuneCountInString(next+rest) > maxCompactItemRunes {
+			if out == "" {
+				return truncRunes(item, maxCompactItemRunes-utf8.RuneCountInString(rest)-1) + "…" + rest
+			}
+			return out + " +" + strconv.Itoa(len(all)-i)
+		}
+		out = next
+	}
+	return out
+}
+
+func truncRunes(s string, n int) string {
+	if n < 0 {
+		n = 0
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
+func containsLine(lines []string, want string) bool {
+	for _, line := range lines {
+		if line == want {
+			return true
+		}
+	}
+	return false
 }
 
 func nonEmpty(lines []string) []string {

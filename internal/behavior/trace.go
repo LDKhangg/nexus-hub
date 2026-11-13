@@ -8,9 +8,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/google/uuid"
 )
@@ -122,7 +124,10 @@ type TraceRun struct {
 	Subject     string          `json:"subject"`
 	Revision    string          `json:"revision"`
 	// PRs are the pull requests of a chat-triggered run ("owner/repo#n").
-	PRs           []string   `json:"prs,omitempty"`
+	PRs []string `json:"prs,omitempty"`
+	// SenderName is the directory name of a chat run's sender, resolved
+	// when the trace is built (ResolveTraceSender); empty when unknown.
+	SenderName    string     `json:"sender_name,omitempty"`
 	Status        RunStatus  `json:"status"`
 	ErrorCode     string     `json:"error_code,omitempty"`
 	CorrelationID string     `json:"correlation_id"`
@@ -524,7 +529,11 @@ func renderTrace(t Trace, loc *time.Location, item, calls bool) string {
 func (w *traceText) chatTrigger(r TraceRun) {
 	td, err := DecodeTriggerData(r.Trigger)
 	if err == nil {
-		w.line("Chat: %s · người gửi %s · tin nhắn %s", orDash(td.ChannelType), orDash(td.SenderID), orDash(td.MessageID))
+		sender := orDash(td.SenderID)
+		if name := strings.TrimSpace(cleanTraceName(r.SenderName)); name != "" && td.SenderID != "" {
+			sender = name + " (" + td.SenderID + ")"
+		}
+		w.line("Chat: %s · người gửi %s · tin nhắn %s", orDash(td.ChannelType), sender, orDash(td.MessageID))
 		if td.ChannelName != "" {
 			w.line("Kênh: %s", td.ChannelName)
 		}
@@ -534,6 +543,39 @@ func (w *traceText) chatTrigger(r TraceRun) {
 	}
 	if len(r.PRs) > 0 {
 		w.line("PR: %s", strings.Join(r.PRs, ", "))
+	}
+}
+
+// cleanTraceName flattens a directory name to one plain line: control and
+// bidi characters become spaces and @-mentions are broken.
+func cleanTraceName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case unicode.IsControl(r) || (r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069') || r == '\u200e' || r == '\u200f':
+			b.WriteRune(' ')
+		case r == '@':
+			b.WriteString("@\u200b")
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return clip(strings.Join(strings.Fields(b.String()), " "), 80)
+}
+
+// ResolveTraceSender fills t.Run.SenderName for a chat-triggered run from
+// the workspace directory. A missing resolver or name leaves it empty, and
+// the trace shows the sender ID alone.
+func ResolveTraceSender(ctx context.Context, resolver people.Resolver, workspaceID string, t *Trace) {
+	if resolver == nil || t == nil || t.Run.TriggerKind != TriggerChatMessage {
+		return
+	}
+	td, err := DecodeTriggerData(t.Run.Trigger)
+	if err != nil || td.SenderID == "" {
+		return
+	}
+	if name, ok := resolver.DisplayName(ctx, workspaceID, "clickup", td.SenderID); ok {
+		t.Run.SenderName = strings.TrimSpace(name)
 	}
 }
 
@@ -662,6 +704,8 @@ func capTraceText(s string) string {
 type TraceService struct {
 	Store    TraceStore
 	Profiles ProfileStore
+	// People, when set, names a chat run's sender from the directory.
+	People people.Resolver
 }
 
 var _ Tracer = (*TraceService)(nil)
@@ -699,5 +743,6 @@ func (s *TraceService) Trace(ctx context.Context, r TraceRequest) (string, error
 	case err != nil:
 		return "", err
 	}
+	ResolveTraceSender(ctx, s.People, r.WorkspaceID, &t)
 	return RenderTraceText(t, s.location(ctx, r.WorkspaceID), r.Item != ""), nil
 }

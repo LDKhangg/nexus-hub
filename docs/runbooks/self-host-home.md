@@ -663,7 +663,7 @@ nh report-template reset   pr_approve --workspace $WS
 template; `/template <kind> reset` restores the default.
 
 Placeholders are `{contact}`, `{contact_platform}`, `{pr_number}`, `{pr_repo}`,
-`{pr_title}`, `{prs}`, `{verdict}`, `{confidence}`, `{ai_summary}`, `{outcome}`,
+`{pr_title}`, `{prs}`, `{verdict}`, `{confidence}`, `{ai_summary}`, `{items}`, `{outcome}`,
 `{reason}`, `{task}`, `{channel}`, `{link}`, `{behavior}`, and `{run_id}`. Start
 a line with `?{x}` to omit the whole line when placeholder `x` is empty; for
 example, `?{link}{link}`. A template is limited to 1,000 characters and 12

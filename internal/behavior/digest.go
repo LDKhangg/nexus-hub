@@ -268,7 +268,7 @@ func (e *Engine) flushBatch(ctx context.Context, b *DigestBatch) (bool, error) {
 	text, err := e.d.Reports.Render(ctx, reporting.Report{
 		Kind: reporting.KindDigest, UserID: reporting.DefaultOwnerUserID, WorkspaceID: ws, Language: p.Language,
 		Platform: "clickup", ExternalID: first.Trigger.SenderID,
-		Values: reporting.Values{Outcome: t.batchHead(total), AISummary: strings.TrimSpace(sb.String()), RunID: fmt.Sprint(b.ID)},
+		Values: reporting.Values{Outcome: t.batchHead(total), Items: strings.TrimSpace(sb.String()), RunID: fmt.Sprint(b.ID)},
 	})
 	if err != nil {
 		e.releaseBatch(ctx, b, time.Time{})

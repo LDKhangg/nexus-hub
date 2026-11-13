@@ -59,6 +59,9 @@ func traceCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io
 	case err != nil:
 		return errors.New("database operation failed")
 	}
+	if directory, err := storage.NewPeopleRepository(pool); err == nil {
+		behavior.ResolveTraceSender(ctx, directory, *ws, &t)
+	}
 	if *asJSON {
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")

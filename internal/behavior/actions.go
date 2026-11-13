@@ -1086,8 +1086,8 @@ func (e *Engine) summary(ctx context.Context, rc RunContext, chat ChatRef, key, 
 		Kind: kind, UserID: reporting.DefaultOwnerUserID, WorkspaceID: rc.Run.WorkspaceID,
 		Behavior: rc.Run.BehaviorName, Language: rc.Doc.Language, Platform: "clickup", ExternalID: rc.Trigger.SenderID,
 		Values: reporting.Values{
-			AISummary: head + "\n" + strings.TrimSpace(summaryLines(t, items, withStatus, max(maxTelegramRunes/len(items)-40, 60))),
-			Link:      RunLink(rc), Behavior: rc.Doc.Name, RunID: fmt.Sprint(rc.Run.ID), Channel: rc.Trigger.ChannelName,
+			Items: head + "\n" + strings.TrimSpace(summaryLines(t, items, withStatus, max(maxTelegramRunes/len(items)-40, 60))),
+			Link:  RunLink(rc), Behavior: rc.Doc.Name, RunID: fmt.Sprint(rc.Run.ID), Channel: rc.Trigger.ChannelName,
 		}, TraceHint: fmt.Sprintf("/trace %d", rc.Run.ID),
 	})
 	if err != nil {
