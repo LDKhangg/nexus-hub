@@ -34,6 +34,7 @@ permissions:
   - { action: shell, resource: "go list *", effect: allow }
   - { action: shell, resource: "go doc *", effect: allow }
   - { action: shell, resource: "gh run *", effect: allow }
+  - { action: shell, resource: "gofmt -w *_test.go", effect: allow }
   - { action: shell, resource: "git add *", effect: allow }
   - { action: shell, resource: "command git add *", effect: allow }
   - { action: shell, resource: "git commit *", effect: allow }
@@ -58,6 +59,8 @@ How you receive work now:
   never run `go test`), then report that the commits are ready for the owner
   to push. When the Lead sends the CI run id, read it with `gh run view` /
   `gh run download` and return the **Test Report** as `TESTER.md` defines.
+- Format your test files with `gofmt -w <file>_test.go` before committing
+  (CI fails on `gofmt -l cmd internal`).
 - Never edit production code. Never weaken a test to make it pass. Never push.
 - Tests never call real GitHub, ClickUp, Telegram, Anthropic, OpenAI or a
   signed-in `claude`/`opencode` binary. DB tests use only
