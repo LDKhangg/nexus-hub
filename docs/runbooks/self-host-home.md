@@ -88,7 +88,7 @@ nh init --workspace-name 'Home' --chat-id '<your-chat-id>' --team-id '<clickup-t
 # save workspace_id (WS), source_id (SRC), target_id (TG), callback_path
 
 nh secret set --workspace-id $WS --name telegram  --kind telegram_bot     # paste bot token
-nh secret set --workspace-id $WS --name anthropic --kind anthropic_key    # paste API key
+nh secret set --workspace-id $WS --name anthropic --kind anthropic_key    # paste API key (or use the Claude CLI: section 4b)
 nh secret set --workspace-id $WS --name clickup   --kind clickup_token    # paste ClickUp personal token
 
 nh settings set listen_addr 127.0.0.1:8080
@@ -113,6 +113,63 @@ For the agent and GitHub (accounts, repos, `enable-agent`), follow
 `clickup-telegram-local.md` §P2.4–P2.6. Behaviors take their ClickUp and GitHub
 grants from the agent configuration of the ClickUp source, so do run
 `nh enable-agent --source-id $SRC` with `dry_run` on.
+
+## 4b. LLM provider: start with the Claude CLI, switch to an API key later
+
+The hub needs an LLM for triage, the agent, thread summaries and behavior
+runs. Pick one with `llm_provider`:
+
+| `llm_provider` | Uses | Needs |
+|---|---|---|
+| `anthropic` (default) | the Anthropic API | the `anthropic` credential (section 4) |
+| `claude_cli` | the Claude Code CLI already signed in on this machine (`claude -p`) | `claude_cli_path` |
+
+Start with `claude_cli` while you build trust in the hub; no API key is
+needed. Sign in to Claude Code once as the same user the server runs as
+(`claude`, then `/login`), then:
+
+```sh
+nh settings set claude_cli_path "$(readlink -f "$(command -v claude)")"   # absolute path to the executable
+nh settings set llm_provider claude_cli
+nh settings set claude_cli_timeout 120s       # optional: one call (5s..30m)
+nh settings set claude_cli_concurrency 1      # optional: calls at once (1..4)
+nh llm check                                   # {"provider":"claude_cli","model":…,"ok":true,"latency_ms":…,"input_tokens":…}
+systemctl --user restart nexus-hub             # the log line "llm provider: claude_cli" confirms it
+```
+
+How the hub runs the CLI: directly (no shell), in a fresh empty temp
+directory that is deleted afterwards, with only `HOME`, `PATH`, `LANG` and
+`XDG_CONFIG_HOME`/`XDG_DATA_HOME` in its environment, with every built-in
+tool, MCP server, project setting and session file turned off
+(`--tools "" --strict-mcp-config --setting-sources "" --no-session-persistence`).
+The prompt and the ticket context go in on stdin, never in arguments. The
+agent's tools are still run by the hub, under its own policy; the CLI only
+proposes calls. The hub never reads or copies the CLI's sign-in files.
+
+Notes:
+
+- `PATH` is passed through: if `claude` is a script that needs `node`, make
+  sure the service's `PATH` contains it (for example `Environment=PATH=…` in
+  the unit file).
+- The model settings (`triage_model`, `actor_model`, `summary_model`) keep
+  their Claude model ids with `claude_cli`.
+- Usage counts as on your Claude plan. A plan limit shows as
+  `llm_unavailable`, a lost sign-in as `llm_unconfigured` (sign in again);
+  a slow call as `llm_timeout`. Logs and Telegram show only these codes,
+  never the CLI's text.
+- `nh llm check` never prints the prompt or the answer. For `anthropic` it
+  needs `--workspace-id $WS`.
+
+Switch to the API key when you are ready; nothing else changes:
+
+```sh
+nh secret set --workspace-id $WS --name anthropic --kind anthropic_key    # paste API key (stdin)
+nh settings set llm_provider anthropic
+nh llm check --workspace-id $WS
+systemctl --user restart nexus-hub
+```
+
+To go back, set `llm_provider` to `claude_cli` again and restart.
 
 ## 5. ClickUp webhook
 

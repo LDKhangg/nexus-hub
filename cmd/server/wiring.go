@@ -120,9 +120,18 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		return agentServices{}, errors.New("action store startup failed")
 	}
 	llmHTTP := netguard.Client(0, netguard.DefaultHosts) // the SDK applies its own request timeouts
-	client := func(ctx context.Context, ws string) (*llm.Client, error) {
-		return llm.NewClientFromSecret(ctx, resolver, ws, s, llmHTTP)
+	// The provider comes from llm_provider: the Anthropic API (key from the
+	// workspace credential) or a CLI signed in on the host. Only the
+	// provider name is logged, never a credential or a path.
+	factory, err := llm.NewFactory(s, resolver, llmHTTP, s.TmpDir)
+	if err != nil {
+		return agentServices{}, errors.New("llm provider startup failed")
 	}
+	log.Printf("llm provider: %s", factory.Provider())
+	if !factory.Ready() {
+		log.Printf("llm provider %s: binary not usable; LLM work falls back to notices (llm_unconfigured)", factory.Provider())
+	}
+	client := factory.Client
 	models := func(ctx context.Context, ws string) (agent.Triager, agent.Investigator, error) {
 		c, err := client(ctx, ws)
 		if err != nil {

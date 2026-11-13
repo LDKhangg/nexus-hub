@@ -35,6 +35,11 @@ func (r *Tier1Router) Triage(ctx context.Context, packet memory.ContextPacket, p
 		if ctx.Err() != nil {
 			return TriageDecision{}, domain.Usage{}, ctx.Err()
 		}
+		if le, ok := domain.AsLLMError(err); ok {
+			// A CLI provider's safe code (llm_unavailable, llm_unconfigured,
+			// llm_timeout, llm_error).
+			return TriageDecision{}, domain.Usage{}, &TriageError{Code: le.Code, Retryable: le.Retryable}
+		}
 		return TriageDecision{}, domain.Usage{}, &TriageError{Code: CodeLLMError, Retryable: true}
 	}
 	d, err := ParseTriageDecision(resp.Text)

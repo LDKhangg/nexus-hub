@@ -10,6 +10,7 @@ import (
 	"math"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -40,6 +41,10 @@ type Settings struct {
 	BehaviorPollInterval                  time.Duration // idle wait between behavior run claims
 	BehaviorMaxTokens                     int64         // run token budget when neither behavior nor profile sets one
 	ClickUpChatPollInterval               time.Duration // wait between ClickUp Chat polls
+	LLMProvider                           string        // anthropic (API key) | claude_cli
+	ClaudeCLIPath                         string        // empty: not set
+	ClaudeCLITimeout                      time.Duration // one Claude CLI call
+	ClaudeCLIConcurrency                  int64         // Claude CLI calls at once
 }
 
 // Store reads every stored setting.
@@ -61,12 +66,15 @@ const (
 	kAddr
 	kDigits
 	kPublicURL
+	kEnum
+	kExecPath
 )
 
 type spec struct {
 	kind     kind
 	def      any
-	min, max float64 // ints; durations in seconds
+	min, max float64  // ints; durations in seconds
+	enum     []string // kEnum: the accepted values
 	set      func(*Settings, any)
 }
 
@@ -107,7 +115,17 @@ var specs = map[string]spec{
 	"behavior_max_tokens":        {kind: kInt, def: int64(100000), min: 1000, max: 1_000_000, set: func(s *Settings, v any) { s.BehaviorMaxTokens = v.(int64) }},
 	"clickup_chat_poll_interval": {kind: kDuration, def: 30 * time.Second, min: 10, max: 600, set: func(s *Settings, v any) { s.ClickUpChatPollInterval = v.(time.Duration) }},
 	"public_base_url":            {kind: kPublicURL, def: "", set: func(s *Settings, v any) { s.PublicBaseURL = v.(string) }},
+	"llm_provider":               {kind: kEnum, def: LLMProviderAnthropic, enum: []string{LLMProviderAnthropic, LLMProviderClaudeCLI}, set: func(s *Settings, v any) { s.LLMProvider = v.(string) }},
+	"claude_cli_path":            {kind: kExecPath, def: "", set: func(s *Settings, v any) { s.ClaudeCLIPath = v.(string) }},
+	"claude_cli_timeout":         {kind: kDuration, def: 120 * time.Second, min: 5, max: 1800, set: func(s *Settings, v any) { s.ClaudeCLITimeout = v.(time.Duration) }},
+	"claude_cli_concurrency":     {kind: kInt, def: int64(1), min: 1, max: 4, set: func(s *Settings, v any) { s.ClaudeCLIConcurrency = v.(int64) }},
 }
+
+// LLM provider values of llm_provider.
+const (
+	LLMProviderAnthropic = "anthropic"
+	LLMProviderClaudeCLI = "claude_cli"
+)
 
 // Keys lists every known setting key, sorted.
 func Keys() []string {
@@ -146,13 +164,32 @@ func Load(ctx context.Context, store Store) (Settings, error) {
 	if s.DebounceWindow > s.DebounceMaxWait {
 		return s, errors.New("settings: debounce_window must not exceed debounce_max_wait")
 	}
+	if s.LLMProvider == LLMProviderClaudeCLI && s.ClaudeCLIPath == "" {
+		return s, errors.New("settings: llm_provider claude_cli needs claude_cli_path")
+	}
 	return s, nil
 }
 
-// Validate checks a raw JSON value for key.
+// Validate checks a raw JSON value for key. A non-empty executable path
+// must also name an existing executable file now; Load checks only its
+// form, so a binary removed later surfaces as llm_unconfigured at call
+// time instead of stopping the server.
 func Validate(key string, raw json.RawMessage) error {
-	_, err := parse(key, raw)
-	return err
+	v, err := parse(key, raw)
+	if err != nil {
+		return err
+	}
+	if specs[key].kind == kExecPath {
+		if p := v.(string); p != "" && !isExecutable(p) {
+			return fmt.Errorf("settings: %s is not an executable file", key)
+		}
+	}
+	return nil
+}
+
+func isExecutable(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0
 }
 
 func parse(key string, raw json.RawMessage) (any, error) {
@@ -216,6 +253,18 @@ func parse(key string, raw json.RawMessage) (any, error) {
 		}
 	case kPublicURL:
 		if str != "" && !validPublicURL(str) {
+			return nil, bad
+		}
+	case kEnum:
+		ok := false
+		for _, e := range sp.enum {
+			ok = ok || str == e
+		}
+		if !ok {
+			return nil, bad
+		}
+	case kExecPath:
+		if str != "" && (!filepath.IsAbs(str) || filepath.Clean(str) != str || str == "/" || strings.ContainsRune(str, 0)) {
 			return nil, bad
 		}
 	}

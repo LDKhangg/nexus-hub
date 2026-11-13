@@ -653,6 +653,14 @@ func (w *RunWorker) askModel(ctx context.Context, rc *RunContext) ([]ModelItem, 
 			if ctx.Err() != nil {
 				return nil, nil, ctx.Err()
 			}
+			if le, ok := domain.AsLLMError(err); ok {
+				// A CLI provider's safe code: a missing sign-in fails the
+				// run, a rate limit or timeout is tried again.
+				if !le.Retryable {
+					return nil, runFail(le.Code), nil
+				}
+				return nil, runRetry(le.Code), nil
+			}
 			return nil, runRetry(CodeLLMError), nil
 		}
 		u := Usage{
@@ -701,6 +709,9 @@ func (w *RunWorker) generate(ctx context.Context, p domain.LLMProvider, req *dom
 			err = errors.New("behavior: empty model response")
 		}
 		if errors.Is(err, domain.ErrLLMRefused) || ctx.Err() != nil {
+			return nil, err
+		}
+		if le, ok := domain.AsLLMError(err); ok && !le.Retryable {
 			return nil, err
 		}
 		lastErr = err

@@ -99,3 +99,34 @@ type ToolResponse struct {
 
 // ErrLLMRefused is returned when the provider's safety system refuses.
 var ErrLLMRefused = errors.New("llm: request refused")
+
+// Safe LLM failure codes shared by every provider.
+const (
+	// LLMCodeError: the provider failed (bad output, error reply, non-zero
+	// exit).
+	LLMCodeError = "llm_error"
+	// LLMCodeUnavailable: rate limited or overloaded; try again later.
+	LLMCodeUnavailable = "llm_unavailable"
+	// LLMCodeUnconfigured: missing or expired sign-in or credential.
+	LLMCodeUnconfigured = "llm_unconfigured"
+	// LLMCodeTimeout: the call ran longer than the provider timeout.
+	LLMCodeTimeout = "llm_timeout"
+)
+
+// LLMError is a provider failure with a safe code. It never carries
+// prompt, context or answer text.
+type LLMError struct {
+	Code      string
+	Retryable bool
+}
+
+func (e *LLMError) Error() string { return "llm: " + e.Code }
+
+// AsLLMError returns the LLMError in err's chain, if any.
+func AsLLMError(err error) (*LLMError, bool) {
+	var le *LLMError
+	if errors.As(err, &le) && le != nil {
+		return le, true
+	}
+	return nil, false
+}
