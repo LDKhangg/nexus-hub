@@ -48,8 +48,11 @@ const (
 	// CodeRunActionsUnavailable: the behavior has run-level actions but no
 	// RunActionRunner is wired.
 	CodeRunActionsUnavailable = "run_actions_unavailable"
-	RunToolKeyScope           = "behavior_run" // tools.Executor.KeyScope of behavior runs
-	maxRetainedOutputBytes    = 64 << 10
+	// CodeTriggerTextUnavailable means a verdict was not attempted because
+	// the triggering message or comment could not be read definitively.
+	CodeTriggerTextUnavailable = "trigger_text_unavailable"
+	RunToolKeyScope            = "behavior_run" // tools.Executor.KeyScope of behavior runs
+	maxRetainedOutputBytes     = 64 << 10
 )
 
 // MaxRunAttempts bounds how often one run is tried.
@@ -412,13 +415,13 @@ func (w *RunWorker) attempt(ctx context.Context, rc *RunContext) (*runOutcome, e
 	if out := w.precheck(ctx, col, rc.Doc, trig); out != nil {
 		return out, ctx.Err()
 	}
-	if out := w.readTriggerMessage(ctx, col, cfg.ClickUpTokenRef, run, trig); out != nil {
+	if out := w.readTriggerMessage(ctx, col, cfg.ClickUpTokenRef, run, trig, rc.Doc.Verdict != nil); out != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		return w.noVerdict(ctx, rc, out)
 	}
-	if out := w.readTriggerComment(ctx, col, cfg.ClickUpTokenRef, cfg.ClickUpTeamID, run, trig); out != nil {
+	if out := w.readTriggerComment(ctx, col, cfg.ClickUpTokenRef, cfg.ClickUpTeamID, run, trig, rc.Doc.Verdict != nil); out != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -473,14 +476,18 @@ func (w *RunWorker) attempt(ctx context.Context, rc *RunContext) (*runOutcome, e
 // to the context, before the behavior's reads: a "#meta" fragment with
 // trusted identifiers and a "#text" fragment with the untrusted message
 // text (sanitized like every fetched text, redacted with the snapshot). A
-// transient failure retries the run; any other failure is noted. nil
-// means go on.
-func (w *RunWorker) readTriggerMessage(ctx context.Context, col *collector, tokenRef string, run Run, t TriggerData) *runOutcome {
+// transient failure retries the run. A definitive failure is noted for a
+// behavior without a verdict; with a verdict it ends the model step without
+// one, so triggering text can never be inferred. nil means go on.
+func (w *RunWorker) readTriggerMessage(ctx context.Context, col *collector, tokenRef string, run Run, t TriggerData, needsVerdict bool) *runOutcome {
 	if w.d.ChatMessages == nil || run.TriggerKind != TriggerChatMessage || t.MessageID == "" {
 		return nil
 	}
 	if !chatIDRe.MatchString(t.MessageID) || !chatIDRe.MatchString(t.ChannelID) || !chatTeamIDRe.MatchString(t.TeamID) {
 		col.note(ChatMessageTool, "", CodeBadTarget)
+		if needsVerdict {
+			return runFail(CodeTriggerTextUnavailable)
+		}
 		return nil
 	}
 	text, err := w.d.ChatMessages.ChatMessageText(ctx, run.WorkspaceID, tokenRef, t.TeamID, t.ChannelID, t.MessageID)
@@ -497,6 +504,9 @@ func (w *RunWorker) readTriggerMessage(ctx context.Context, col *collector, toke
 			code = ce.Code
 		}
 		col.note(ChatMessageTool, t.MessageID, code)
+		if needsVerdict {
+			return runFail(CodeTriggerTextUnavailable)
+		}
 		return nil
 	}
 	text, cut := capBytes(text, DefaultReadBytes)
@@ -532,7 +542,7 @@ func (w *RunWorker) readTriggerMessage(ctx context.Context, col *collector, toke
 // runs its actions, so it never retries forever and never runs a gated
 // action without a verdict. Other behaviors keep the outcome as it is.
 func (w *RunWorker) noVerdict(ctx context.Context, rc *RunContext, out *runOutcome) (*runOutcome, error) {
-	if rc.Doc.Verdict == nil || len(rc.Doc.RunActions) == 0 || out.status == RunSkipped {
+	if rc.Doc.Verdict == nil || out.status == RunSkipped {
 		return out, nil
 	}
 	if out.retry && rc.Run.Attempts < MaxRunAttempts {

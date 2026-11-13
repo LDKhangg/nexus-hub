@@ -98,13 +98,17 @@ func (w *RunWorker) memberName(ctx context.Context, workspaceID, tokenRef, teamI
 // neutralized like every fetched text, redacted with the snapshot). The
 // sender's name comes from the comment, or from the MemberDirectory when
 // the comment has none. A transient failure retries the run; any other
-// failure is noted. nil means go on.
-func (w *RunWorker) readTriggerComment(ctx context.Context, col *collector, tokenRef, teamID string, run Run, t TriggerData) *runOutcome {
+// failure is noted for a behavior without a verdict; with a verdict it ends
+// the model step without one. nil means go on.
+func (w *RunWorker) readTriggerComment(ctx context.Context, col *collector, tokenRef, teamID string, run Run, t TriggerData, needsVerdict bool) *runOutcome {
 	if w.d.Comments == nil || run.TriggerKind != TriggerCommentAdded || t.CommentID == "" {
 		return nil
 	}
 	if !commentIDRe.MatchString(t.CommentID) || !taskIDRe.MatchString(t.TaskID) {
 		col.note(CommentTool, "", CodeBadTarget)
+		if needsVerdict {
+			return runFail(CodeTriggerTextUnavailable)
+		}
 		return nil
 	}
 	c, err := w.d.Comments.TaskComment(ctx, run.WorkspaceID, tokenRef, t.TaskID, t.CommentID)
@@ -121,6 +125,9 @@ func (w *RunWorker) readTriggerComment(ctx context.Context, col *collector, toke
 			code = ce.Code
 		}
 		col.note(CommentTool, t.CommentID, code)
+		if needsVerdict {
+			return runFail(CodeTriggerTextUnavailable)
+		}
 		return nil
 	}
 	text, cut := capBytes(c.Text, DefaultReadBytes)
