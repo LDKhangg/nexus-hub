@@ -30,6 +30,14 @@ permissions:
   - { action: shell, resource: "gofmt -l *", effect: allow }
   - { action: shell, resource: "grep *", effect: allow }
   - { action: shell, resource: "rg *", effect: allow }
+  - { action: shell, resource: "git rev-parse *", effect: allow }
+  - { action: shell, resource: "command git rev-parse *", effect: allow }
+  - { action: shell, resource: "git branch *", effect: allow }
+  - { action: shell, resource: "command git branch *", effect: allow }
+  - { action: shell, resource: "git grep *", effect: allow }
+  - { action: shell, resource: "command git grep *", effect: allow }
+  - { action: shell, resource: "go list *", effect: allow }
+  - { action: shell, resource: "go doc *", effect: allow }
   - { action: shell, resource: "make generate", effect: allow }
   - { action: shell, resource: "goose -dir db/migrations validate", effect: allow }
   - { action: shell, resource: "git add *", effect: allow }
@@ -75,3 +83,9 @@ End with this report and nothing after it:
 - Tests that may need new expectations: <list, without editing them>
 - Open questions for the Lead: <list or "none">
 ```
+
+Shell rule: run exactly one command per shell call. No `;`, `&&`, `||`, pipes
+or `$(...)`: each part of a compound command must be allowed on its own, so one
+unlisted part denies the whole call. If a command is denied, do not give up:
+use the read/glob/grep tools or another allowed command, and list what you
+could not check in your report.
