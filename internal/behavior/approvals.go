@@ -538,7 +538,8 @@ func (e *Engine) expired(ctx context.Context, a Approval) {
 
 // Undo puts back the description blocks a run wrote, but only when the
 // task's description is still exactly what Nexus last wrote for the run;
-// text outside the blocks is never touched.
+// text outside the blocks is never touched. A run with run-level actions
+// (actions.run) is undone by undoRunActions instead.
 func (e *Engine) Undo(ctx context.Context, r UndoRequest) (string, error) {
 	rc, err := e.loadRun(ctx, r.WorkspaceID, r.RunID)
 	if err != nil {
@@ -547,6 +548,9 @@ func (e *Engine) Undo(ctx context.Context, r UndoRequest) (string, error) {
 	t := textsFor(rc.Doc.Language)
 	if rc.Run.UndoneAt != nil {
 		return t.undoAlready(), nil
+	}
+	if len(rc.Run.RunActions) > 0 || len(rc.Doc.RunActions) > 0 {
+		return e.undoRunActions(ctx, rc, r, t)
 	}
 	snap := decodeSnapshot(rc.Run.Snapshot)
 	items, err := e.d.Store.ListItems(ctx, r.WorkspaceID, r.RunID)

@@ -3,6 +3,7 @@ package behavior
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"regexp"
@@ -89,10 +90,12 @@ type RunPROutcome struct {
 	ReviewID int64  `json:"review_id,omitempty"`
 }
 
-// Tool outcomes read from the run-level write tools' output that the
-// owner report tells apart (the others are "approved" and "reacted").
+// Tool outcomes read from the run-level write tools' output, which the
+// owner report and undo tell apart.
 const (
+	resultApproved        = "approved"
 	resultAlreadyApproved = "already_approved"
+	resultReacted         = "reacted"
 	resultAlreadyReacted  = "already_reacted"
 )
 
@@ -481,4 +484,65 @@ func runActionsText(t texts, rc RunContext, res RunActionsResult) string {
 		}
 	}
 	return capRunes(strings.TrimSpace(b.String()), maxTelegramRunes)
+}
+
+// --- undo ---
+
+// runUndoScope namespaces the idempotency keys of a run-level undo per run
+// and run-level action.
+func runUndoScope(runID int64, index int) string {
+	return fmt.Sprintf("behavior_run_undo:%d:%d", runID, index)
+}
+
+// undoRunActions undoes a run's run-level actions: it removes each
+// reaction the run itself added (result reacted, not already_reacted) and
+// dismisses nothing on GitHub. The reply lists every approval the run made
+// so the owner can dismiss it by hand. The run is marked undone only when
+// a reaction was removed; a run with nothing reversible stays as it is.
+func (e *Engine) undoRunActions(ctx context.Context, rc RunContext, r UndoRequest, t texts) (string, error) {
+	res := DecodeRunActions(rc.Run.RunActions)
+	var reactions []RunActionOutcome
+	var links []string
+	for _, o := range res.Actions {
+		switch {
+		case o.Type == ActionChatReaction && o.Status == OutcomeOK && o.Result == resultReacted:
+			reactions = append(reactions, o)
+		case o.Type == ActionPRApprove:
+			for _, p := range o.PRs {
+				if p.Status == OutcomeOK && p.Result == resultApproved && tenant.ValidRepo(p.Repo) && p.Number > 0 {
+					links = append(links, fmt.Sprintf("https://github.com/%s/pull/%d", p.Repo, p.Number))
+				}
+			}
+		}
+	}
+	byHand := ""
+	if len(links) > 0 {
+		byHand = "\n" + t.undoApprovalsByHand(links)
+	}
+	if len(reactions) == 0 {
+		return t.undoRunNothing() + byHand, nil
+	}
+	cfg, err := e.d.Policies.RunPolicy(ctx, rc.Run.WorkspaceID, rc.Trigger.IntegrationID)
+	if err != nil {
+		return t.undoFailed(CodePolicyUnavailable) + byHand, nil
+	}
+	env := runActionEnv{cfg: cfg, final: true}
+	for _, o := range reactions {
+		// The target is the stored outcome's, checked against the run.
+		if !chatIDRe.MatchString(o.MessageID) || rc.Run.Subject != ChatSubject(o.MessageID) ||
+			!chatTeamIDRe.MatchString(o.TeamID) || o.Reaction == "" {
+			return t.undoFailed(CodeBadTarget) + byHand, nil
+		}
+		out := e.callRunWrite(ctx, rc, env, runUndoScope(r.RunID, o.Index), ToolChatReactionRemove,
+			map[string]any{"team_id": o.TeamID, "message_id": o.MessageID, "reaction": o.Reaction})
+		status, code, _ := writeStatus(out, env)
+		if status != OutcomeOK {
+			return t.undoFailed(firstNonEmpty(code, status)) + byHand, nil
+		}
+	}
+	if err := e.d.Store.MarkUndone(ctx, r.WorkspaceID, r.RunID); err != nil && !errors.Is(err, ErrConflict) {
+		return "", err
+	}
+	log.Printf("behavior run %d corr=%s req=%s: undone by owner (%d reactions)", rc.Run.ID, rc.Run.CorrelationID, r.CorrelationID, len(reactions))
+	return t.undone(r.RunID) + byHand, nil
 }

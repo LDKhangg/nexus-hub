@@ -1,0 +1,8 @@
+# Values for pr-auto-approve.yaml. Copy, edit, and import with:
+#   setup-notices behavior import pr-auto-approve.yaml --vars pr-auto-approve.vars.yaml --workspace-id <uuid>
+# Plain settings only, never secrets. Quote every value.
+# The hub GitHub account of type pat that approves as you (nh github-account).
+github_account: "me"
+# The ClickUp reaction name. If the Telegram report says
+# reaction_unsupported, try another name and import again.
+reaction: "white_check_mark"

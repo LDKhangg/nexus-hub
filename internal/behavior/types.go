@@ -479,7 +479,7 @@ type RunStore interface {
 	// SetSnapshot stores the undo snapshot once; false when one exists.
 	SetSnapshot(ctx context.Context, workspaceID string, runID int64, snapshot json.RawMessage) (bool, error)
 	// MarkUndone records an undo once; ErrConflict when already undone or
-	// there is nothing to undo.
+	// there is nothing to undo (no snapshot and no run-level outcomes).
 	MarkUndone(ctx context.Context, workspaceID string, runID int64) error
 	GetRun(ctx context.Context, workspaceID string, runID int64) (Run, error)
 	LatestRunBySubject(ctx context.Context, workspaceID, subject string) (Run, error)

@@ -204,3 +204,61 @@ func mapChatErr(err error) error {
 	}
 	return toolErr(CodeChatBadRequest, false)
 }
+
+// ToolChatReactionRemove is the name of the tool that removes a ClickUp
+// Chat reaction (undo of clickup_chat_reaction).
+const ToolChatReactionRemove = "clickup_chat_reaction_remove"
+
+// OutcomeRemoved: the reaction is no longer on the message (removed now,
+// or already gone). The only outcome of clickup_chat_reaction_remove.
+const OutcomeRemoved = "removed"
+
+var chatReactionRemoveSpec = tools.ToolSpec{
+	Name:        ToolChatReactionRemove,
+	Description: "Remove a reaction (a lower-case emoji name) that the ClickUp token's user added to a ClickUp Chat message.",
+	InputSchema: chatReactionSpec.InputSchema,
+	Tier:        tenant.TierWrite,
+}
+
+// chatReactionRemoveTool is clickup_chat_reaction_remove. It is
+// ActionOnly: only the behavior engine (undo of a run-level reaction) may
+// run it.
+type chatReactionRemoveTool struct {
+	c    client
+	chat clickupchat.Client
+}
+
+var _ tools.ActionOnly = (*chatReactionRemoveTool)(nil)
+
+// NewChatReactionRemoveTool returns clickup_chat_reaction_remove,
+// authenticated with the call's clickup_token_ref. Input as
+// clickup_chat_reaction. Output: "message_id=<id> reaction=<name>
+// outcome=removed". Removing a reaction that is already gone is success,
+// so a retried undo is idempotent. chat nil uses the ClickUp Chat v3
+// client over httpc.
+func NewChatReactionRemoveTool(httpc *http.Client, resolver SecretResolver, chat clickupchat.Client) tools.Tool {
+	if chat == nil {
+		chat = clickupchat.New(httpc)
+	}
+	return &chatReactionRemoveTool{c: newClient(httpc, resolver), chat: chat}
+}
+
+func (t *chatReactionRemoveTool) Spec() tools.ToolSpec { return chatReactionRemoveSpec }
+func (t *chatReactionRemoveTool) UsesNetwork() bool    { return true }
+func (t *chatReactionRemoveTool) ActionOnly()          {}
+
+func (t *chatReactionRemoveTool) Run(ctx context.Context, call tools.Call) (tools.ToolOutput, error) {
+	in, err := parseChatReactionInput(call.Input)
+	if err != nil {
+		return tools.ToolOutput{}, err
+	}
+	token, err := t.c.token(ctx, call.WorkspaceID, call.ClickUpTokenRef)
+	if err != nil {
+		return tools.ToolOutput{}, err
+	}
+	if err := t.chat.RemoveReaction(ctx, in.TeamID, token, in.MessageID, in.Reaction); err != nil {
+		return tools.ToolOutput{}, mapChatErr(err)
+	}
+	text := "message_id=" + in.MessageID + " reaction=" + in.Reaction + " outcome=" + OutcomeRemoved
+	return tools.ToolOutput{Text: text, Summary: text}, nil
+}

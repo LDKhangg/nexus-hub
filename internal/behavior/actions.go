@@ -43,6 +43,9 @@ const (
 const (
 	ToolPRApprove    = "github_pr_approve"
 	ToolChatReaction = "clickup_chat_reaction"
+	// ToolChatReactionRemove undoes ToolChatReaction (same input); a
+	// reaction already gone counts as removed.
+	ToolChatReactionRemove = "clickup_chat_reaction_remove"
 )
 
 // Action outcome statuses stored in an item's action result.

@@ -86,6 +86,8 @@ func buildTools(s settings.Settings, resolver *secrets.Resolver, redactor *agent
 	// ActionOnly: offered and run only by the behavior action executor.
 	all = append(all, githubtools.NewApproveTool(gh))
 	all = append(all, clickuptools.NewChatReactionTool(apiClient, resolver, clickupchat.New(apiClient)))
+	// Undo of a run-level reaction (/undo), also ActionOnly.
+	all = append(all, clickuptools.NewChatReactionRemoveTool(apiClient, resolver, clickupchat.New(apiClient)))
 	all = append(all, extra...)
 	if gitPath, err := resolveGit(s.GitPath); err != nil {
 		log.Print("git not found; code and workspace tools disabled")

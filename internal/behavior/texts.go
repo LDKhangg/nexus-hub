@@ -124,6 +124,16 @@ func (t texts) undoAlready() string {
 func (t texts) undoNothing() string {
 	return t.pick("Run này chưa ghi mô tả nào để hoàn tác.", "This run wrote no description to undo.")
 }
+func (t texts) undoRunNothing() string {
+	return t.pick("Run này không có gì để Nexus tự hoàn tác.", "This run has nothing Nexus can undo.")
+}
+
+// undoApprovalsByHand tells the owner that Nexus never dismisses a GitHub
+// approval and lists the pull requests to dismiss by hand.
+func (t texts) undoApprovalsByHand(links []string) string {
+	return t.pick("Nexus không gỡ approval trên GitHub; hãy tự dismiss từng approval:\n",
+		"Nexus does not dismiss GitHub approvals; dismiss each one by hand:\n") + strings.Join(links, "\n")
+}
 func (t texts) undoChanged() string {
 	return t.pick("Mô tả đã thay đổi sau lần ghi của Nexus, không hoàn tác.", "The description changed after Nexus wrote it; not undone.")
 }

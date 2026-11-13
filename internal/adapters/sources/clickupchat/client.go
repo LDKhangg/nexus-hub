@@ -148,6 +148,9 @@ type Client interface {
 	// AddReaction adds reaction (a lower-case emoji name) to a message as
 	// the token's user. An existing reaction yields CodeReactionExists.
 	AddReaction(ctx context.Context, ws, token, messageID, reaction string) error
+	// RemoveReaction removes reaction from a message as the token's user.
+	// A 404 (the reaction or the message is already gone) is success.
+	RemoveReaction(ctx context.Context, ws, token, messageID, reaction string) error
 	// Reactions returns one page of a message's reactions.
 	Reactions(ctx context.Context, ws, token, messageID, cursor string) (Page[Reaction], error)
 }
@@ -316,6 +319,24 @@ func (c *HTTPClient) AddReaction(ctx context.Context, ws, token, messageID, reac
 	}
 	path := wsPath(ws) + "/messages/" + url.PathEscape(messageID) + "/reactions"
 	return c.do(ctx, token, http.MethodPost, path, map[string]string{"reaction": reaction}, nil, CodeMessageNotFound, true)
+}
+
+// RemoveReaction implements Client:
+// DELETE /api/v3/workspaces/{ws}/chat/messages/{message_id}/reactions/{reaction}
+// answers 204; a 404 means the reaction is already gone.
+func (c *HTTPClient) RemoveReaction(ctx context.Context, ws, token, messageID, reaction string) error {
+	if err := checkCommon(ws, token, ""); err != nil {
+		return err
+	}
+	if !idRe.MatchString(messageID) || !reactionRe.MatchString(reaction) {
+		return invalid()
+	}
+	path := wsPath(ws) + "/messages/" + url.PathEscape(messageID) + "/reactions/" + url.PathEscape(reaction)
+	err := c.do(ctx, token, http.MethodDelete, path, nil, nil, CodeMessageNotFound, false)
+	if ErrorCode(err) == CodeMessageNotFound {
+		return nil
+	}
+	return err
 }
 
 // Reactions implements Client.

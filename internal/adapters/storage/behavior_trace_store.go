@@ -54,7 +54,8 @@ func (s *BehaviorStore) ListRunToolCalls(ctx context.Context, workspaceID string
 }
 
 // ListRecentRuns returns up to limit runs, newest first, optionally of one
-// behavior, with item counts by class.
+// behavior, with item counts by class, the pull requests of chat-triggered
+// runs and their run-level action outcomes.
 func (s *BehaviorStore) ListRecentRuns(ctx context.Context, workspaceID, behaviorName string, limit int) ([]behavior.RunSummary, error) {
 	ws, err := parseDBID(workspaceID)
 	if err != nil {
@@ -72,6 +73,7 @@ func (s *BehaviorStore) ListRecentRuns(ctx context.Context, workspaceID, behavio
 			ID: r.ID, Behavior: r.BehaviorName, Version: int(r.Version), TriggerKind: r.TriggerKind, Subject: r.Subject,
 			Status: behavior.RunStatus(r.Status), ErrorCode: r.ErrorCode, CorrelationID: uuidString(r.CorrelationID),
 			AutoItems: int(r.AutoItems), NotifyItems: int(r.NotifyItems), AskItems: int(r.AskItems), CreatedAt: r.CreatedAt.Time,
+			PRs: behavior.RunPRRefs(r.Trigger), RunActions: behavior.DecodeRunActions(r.RunActions).Actions,
 		})
 	}
 	return out, nil
