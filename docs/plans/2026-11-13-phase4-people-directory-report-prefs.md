@@ -175,9 +175,35 @@ https://github.com/org/repo/pull/1601
   "Is this the owner?" checks read this table. The current settings stay as
   the bootstrap until the migration has run. No manual step.
 
+### E. Telegram assistant (owner, 2026-11-13 evening)
+
+- REQ-12 (FR-043, FR-053, FR-055): the owner can write to the bot in plain
+  words, and the hub uses the configured LLM (the owner runs `claude_cli`)
+  to work out what to do.
+  - Applies to owner free text that is not a command and not the reply to an
+    open ask or template prompt. Other chats stay ignored.
+  - One model call returns one JSON object, checked against a schema
+    (one retry with the error, then a fallback): `intent` from a fixed list,
+    `args`, a short `reply` and a `confidence`.
+  - Intents map only to existing owner capabilities: `help`, `contacts`
+    (search), `trace` (last or given run), `runs` (recent runs, short),
+    `prefs_show`, `template_show`, `answer` (a plain reply, no action),
+    `clarify` (ask one question back), and the writes `alias`,
+    `prefs_style`.
+  - Reads run at once through the same handlers as the slash commands.
+    Writes are never done directly: the bot shows what it will do with
+    "Làm" / "Huỷ" buttons, and only "Làm" runs the same handler as the slash
+    command.
+  - No provider, a model error, an invalid answer or low confidence: the
+    bot says it did not understand and points to /help. Nothing runs.
+  - The owner's text is never stored or logged; at most 6 assistant calls
+    per minute per chat (more get the /help hint).
+  - The assistant is generic: intents are hub capabilities, not personal
+    flows.
+
 ### D. Docs
 
-- REQ-11: Runbook sections:
+- REQ-11: Runbook sections (plus "Talk to the bot" for REQ-12):
   - name your contacts (CLI and Telegram);
   - merge accounts of one person;
   - choose your report style;
@@ -193,6 +219,8 @@ https://github.com/org/repo/pull/1601
 | P4a | CLI `nh contact …`; Telegram `/contacts`, `/alias`, "Đặt tên" button | 4 |
 | P4b | CLI `nh report-prefs …`, `nh report-template …`; Telegram `/prefs`, `/template` | 9, 9a |
 | P5 | Runbook, examples updated to the new report style | 11 |
+| F1 | Review #1 fixes R1–R4 | 5, 8, 9a |
+| P6 | Telegram assistant: free text → LLM intent → read now or confirm-then-write | 12 |
 
 ## Roadmap change (owner, 2026-11-13)
 
