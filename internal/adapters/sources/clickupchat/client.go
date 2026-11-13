@@ -385,6 +385,54 @@ func (c *HTTPClient) Reactions(ctx context.Context, ws, token, messageID, cursor
 	return p, nil
 }
 
+// ChannelMember is one member of a chat channel. Name and Username are
+// set by the user: callers clean and cap them before showing them, and
+// never log them.
+type ChannelMember struct {
+	ID       string
+	Name     string
+	Username string
+}
+
+// MaxChannelMembersLimit is the largest page size ChannelMembers accepts.
+const MaxChannelMembersLimit = 100
+
+// ChannelMembers returns one page of a chat channel's members (GET
+// /api/v3/workspaces/{ws}/chat/channels/{channel_id}/members), limit
+// (1..MaxChannelMembersLimit) per page, starting at cursor ("" for the
+// first page). It is not part of Client: only the run executor's name
+// lookup uses it.
+func (c *HTTPClient) ChannelMembers(ctx context.Context, ws, token, channelID, cursor string, limit int) (Page[ChannelMember], error) {
+	if err := checkCommon(ws, token, cursor); err != nil {
+		return Page[ChannelMember]{}, err
+	}
+	if !idRe.MatchString(channelID) || limit < 1 || limit > MaxChannelMembersLimit {
+		return Page[ChannelMember]{}, invalid()
+	}
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(limit))
+	if cursor != "" {
+		q.Set("cursor", cursor)
+	}
+	var resp struct {
+		NextCursor string `json:"next_cursor"`
+		Data       []struct {
+			ID       flexString `json:"id"`
+			Name     string     `json:"name"`
+			Username string     `json:"username"`
+		} `json:"data"`
+	}
+	path := wsPath(ws) + "/channels/" + url.PathEscape(channelID) + "/members?" + q.Encode()
+	if err := c.do(ctx, token, http.MethodGet, path, nil, &resp, CodeNotFound, false); err != nil {
+		return Page[ChannelMember]{}, err
+	}
+	p := Page[ChannelMember]{NextCursor: resp.NextCursor, Items: make([]ChannelMember, 0, len(resp.Data))}
+	for _, d := range resp.Data {
+		p.Items = append(p.Items, ChannelMember{ID: string(d.ID), Name: d.Name, Username: d.Username})
+	}
+	return p, nil
+}
+
 // do sends one request and decodes a 2xx JSON answer into out (when not
 // nil). notFound is the code for 404; reaction marks the add-reaction
 // call, whose 400 answers are classified by the error message.

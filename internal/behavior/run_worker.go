@@ -128,6 +128,10 @@ type RunWorkerDeps struct {
 	// Members gives display names of ClickUp users for the triggering
 	// message's context; nil gives none.
 	Members MemberDirectory
+	// ChannelMembers gives display names of the members of a chat
+	// channel for a chat-triggered run's message; nil gives none (Members
+	// is still tried).
+	ChannelMembers ChannelMemberDirectory
 }
 
 // ChatMessageReader reads the text of one ClickUp Chat message at run time
@@ -501,7 +505,7 @@ func (w *RunWorker) readTriggerMessage(ctx context.Context, col *collector, toke
 	}
 	base := chatSource(t.MessageID)
 	meta := []string{"message_id: " + t.MessageID, "sender_id: " + t.SenderID}
-	if name := w.memberName(ctx, run.WorkspaceID, tokenRef, t.TeamID, t.SenderID); name != "" {
+	if name := w.chatSenderName(ctx, run.WorkspaceID, tokenRef, t); name != "" {
 		meta = append(meta, "sender_name: "+name)
 	}
 	meta = append(meta, "channel_type: "+t.ChannelType)

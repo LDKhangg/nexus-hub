@@ -52,6 +52,32 @@ type MemberDirectory interface {
 	MemberName(ctx context.Context, workspaceID, tokenRef, teamID, userID string) (name string, ok bool)
 }
 
+// ChannelMemberDirectory gives the display name of a member of ClickUp
+// Chat channel channelID in ClickUp workspace (team) teamID, read with the
+// run's source credential (tokenRef). ok is false when the name is not
+// known or cannot be read; a run then goes on without it.
+type ChannelMemberDirectory interface {
+	ChannelMemberName(ctx context.Context, workspaceID, tokenRef, teamID, channelID, userID string) (name string, ok bool)
+}
+
+// chatSenderName is the cleaned display name of the sender of a
+// chat-triggered run's message, "" when unknown: first from the channel's
+// members (the ChannelMemberDirectory), then from the workspace's member
+// directory, whose listing can be empty.
+func (w *RunWorker) chatSenderName(ctx context.Context, workspaceID, tokenRef string, t TriggerData) string {
+	if w.d.ChannelMembers != nil && tokenRef != "" && chatTeamIDRe.MatchString(t.TeamID) && chatIDRe.MatchString(t.ChannelID) && chatTeamIDRe.MatchString(t.SenderID) {
+		if name, ok := w.d.ChannelMembers.ChannelMemberName(ctx, workspaceID, tokenRef, t.TeamID, t.ChannelID, t.SenderID); ok {
+			if name = CleanDisplayName(name); name != "" {
+				return name
+			}
+		}
+		if ctx.Err() != nil {
+			return ""
+		}
+	}
+	return w.memberName(ctx, workspaceID, tokenRef, t.TeamID, t.SenderID)
+}
+
 // memberName is the cleaned display name of a ClickUp user, "" when
 // unknown.
 func (w *RunWorker) memberName(ctx context.Context, workspaceID, tokenRef, teamID, userID string) string {
