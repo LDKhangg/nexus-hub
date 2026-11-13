@@ -344,6 +344,18 @@ source's team (`--team-id` of `nh init`) with your ClickUp token. It polls
 only while an enabled behavior has a `clickup.chat_message` trigger, and
 the first poll starts from "now": older DMs are never processed.
 
+The poller reads only enabled sources. `nh bind-webhook` (section 5)
+enables the source; if you only poll (no ClickUp webhook), enable it
+yourself:
+
+```sh
+nh source enable --source-id $SRC     # {"source_id":…,"is_enabled":true}
+```
+
+It refuses a source without a team id. `nh source disable --source-id $SRC`
+turns it off again. Enabling does not open webhooks: a source without a
+webhook secret keeps refusing callbacks.
+
 **c. Import, validate, publish, enable** (the file starts with
 `dry_run: true`):
 
