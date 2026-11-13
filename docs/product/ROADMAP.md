@@ -159,7 +159,17 @@ hosted. CI and correlation IDs are already done or built into each phase.
   - health endpoints are tested;
   - a fresh clone runs following the README with fakes only.
 
-### Phase 4: Identity and event gateway
+### Phase 4: People directory and report preferences (re-scoped 2026-11-13)
+
+- **Re-scoped by the owner:** identify the other people on connected
+  platforms (contacts with aliases across ClickUp, GitHub, Telegram), and let
+  the owner set report style, toggles and templates. Plan:
+  `docs/superpowers/plans/2026-11-13-phase4-people-directory-report-prefs.md`.
+- The original Phase 4 scope below becomes **Phase 4b: Identity and event
+  gateway** (inbox, event contract, adapter registry, `/link` for other hub
+  users).
+
+### Phase 4b: Identity and event gateway (was Phase 4)
 
 - **Goal:** the system knows who is talking to it, and every inbound event
   becomes one versioned, deduplicated, traceable event.
