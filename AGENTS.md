@@ -75,8 +75,8 @@ build is caught here.
 (fakes only, no secrets). Go modules, the build cache and Docker layers are
 cached. Each run uploads `test-logs-<sha>` (test.log, test.json, junit.xml,
 kept 14 days) and writes failed/skipped tests, races and panics to the run
-summary. On `main` and `v*` tags it publishes `ghcr.io/<repo>` tagged with
-the short SHA (and `latest` on main). Deploying to the VPS is a later phase.
+summary. On `develop` and `v*` tags it publishes `ghcr.io/<repo>` tagged with
+the short SHA (and `latest` on develop). Deploying to the VPS is a later phase.
 
 - CI is where the suite runs. The Tester writes tests and reports the CI
   run; nobody runs the full suite locally (see `TESTER.md`).

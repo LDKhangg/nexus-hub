@@ -1,4 +1,4 @@
-# Self-host at home (main, Phases 1–3)
+# Self-host at home (develop, Phases 1–3)
 
 This guide runs Nexus-Hub on a home Linux machine that stays on. It receives
 ClickUp webhooks and Telegram messages through a public HTTPS tunnel. It covers
@@ -16,7 +16,7 @@ arguments. Secrets go in through `secret set` on stdin.
 Commands below use `nh` for `go run ./cmd/setup-notices`. Build it once:
 
 ```sh
-cd ~/Dev/nexus-hub && git checkout main && git pull
+cd ~/Dev/nexus-hub && git checkout develop && git pull
 go build -o ~/.local/bin/nexus-server ./cmd/server
 go build -o ~/.local/bin/nh ./cmd/setup-notices
 ```
