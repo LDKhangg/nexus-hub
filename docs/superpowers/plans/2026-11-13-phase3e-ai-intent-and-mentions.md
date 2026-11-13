@@ -107,13 +107,27 @@ polling.
   Funnel), enable the source (REQ-E9), import the two behaviors, check
   `/trace` from the owner's Telegram group.
 
-## Facts to check (Lead probes before the tasks that need them)
+## Facts checked by the Lead (2026-11-13, owner's LEAP workspace, read-only)
 
-- ClickUp `taskCommentPosted` payload: where tagged users appear (comment
-  parts of type `tag` with `user.id`, or another field).
-- ClickUp Chat v3 channel messages: whether the message body carries tag
-  markup with user ids, or only the `links.tagged_users` URL (one extra call
-  per message).
+- ClickUp Chat v3 channel messages (`content_format=text/md`) carry mentions
+  inline as `[@<name>](#user_mention#<numeric user id>)` (238 of 238 user
+  mentions in a 300-message sample matched; ids are numeric ClickUp user ids;
+  6 tagged the owner). Group mentions appear as
+  `[@<name>](#task_user_group_mention#<id>)`: out of scope (not "me").
+  `GET /api/v3/workspaces/{ws}/chat/messages/{id}/tagged_users` returns
+  `{data:[{id,username,email,name,initials}], next_cursor}`: use it only as a
+  fallback; the inline markup is enough and costs no extra call.
+- ClickUp v2 task comments (`GET /task/{id}/comment`): `comment[]` parts of
+  `type: "tag"` with `user.id` (76 in 487 comments) and a rarer
+  `type: "user_mention"` (2). The webhook `taskCommentPosted` history item is
+  expected to carry the same parts under `comment.comment`; E3 must accept
+  both part types and confirm the webhook path against a recorded payload
+  (TD item if not possible).
+- Channel message listing: some channels have `latest_comment_at: null`.
+
+## Facts still to check
+
+- The webhook payload path of comment parts (see above).
 - The 3c provider's latency and token cost for one verdict call
   (`nh llm check`).
 
