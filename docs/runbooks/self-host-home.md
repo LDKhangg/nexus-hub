@@ -595,6 +595,81 @@ from `journalctl --user -u nexus-hub` if there is one. Do not paste the
 webhook payload or any token. If no run starts while channel mentions
 work, task comment mentions are not detected yet.
 
+## 11. People and report style
+
+The directory fills itself as Nexus sees a ClickUp user who DMs or tags you, a
+GitHub PR author, or a Telegram sender. Reports then use the contact's current
+name instead of a platform ID. List or inspect what Nexus knows with:
+
+```sh
+nh contact list --workspace-id $WS [--platform clickup] [--search '<text>']
+nh contact show --workspace-id $WS <contact-id>
+```
+
+Name a contact by contact ID or `platform:external-id`. Quote names containing
+spaces. Telegram offers the same `/alias` command; reports about an unnamed
+ClickUp sender may also have a **Đặt tên** button—press it and reply with the
+name.
+
+```sh
+nh contact alias --workspace-id $WS clickup:<user-id> 'anh Định'
+# Telegram: /alias clickup:<user-id> anh Định
+```
+
+If two contacts are one person, move every account from the source into the
+target. If one account was joined incorrectly, find its account ID with
+`contact show` and split it into a new contact. Forgetting deletes the contact
+and all its accounts; `--yes` is required. A later platform sighting can add
+that person again.
+
+```sh
+nh contact merge  --workspace-id $WS <source-contact-id> <target-contact-id>
+nh contact split  --workspace-id $WS <account-id>
+nh contact forget --workspace-id $WS --yes <contact-id>
+```
+
+Choose `short`, `normal`, or `detailed` with `/prefs [style]`; `/prefs` alone
+shows buttons for the style and optional lines. The CLI can set several values
+at once (add `--behavior <name>` for a behavior-specific override):
+
+```sh
+nh report-prefs set --workspace $WS style=short show_reaction=false
+nh report-prefs set --workspace $WS show_ai_summary=true show_links=true \
+  show_pr_titles=true show_trace_hint=true language=vi
+```
+
+The owner's default is `short`, with the reaction line off and the AI summary,
+links, PR titles, and trace hint on. For example:
+
+```text
+✅ Approved PR #1601 cho anh Định
+AI: approve_request (0.94)
+https://github.com/org/repo/pull/1601
+```
+
+Templates can be set for these kinds: `pr_approve`, `pr_skipped`,
+`verdict_unavailable`, `mention`, `notify`, `fyi`, `digest`, and `failure`.
+Write the template to a file (or use `--file -` to read stdin), then save,
+preview, or reset it:
+
+```sh
+nh report-template set     pr_approve --workspace $WS --file report.txt
+nh report-template preview pr_approve --workspace $WS
+nh report-template reset   pr_approve --workspace $WS
+```
+
+`--behavior <name>` selects a behavior-specific template. On Telegram, send
+`/template <kind>`, then reply to the bot's forced-reply message with the new
+template; `/template <kind> reset` restores the default.
+
+Placeholders are `{contact}`, `{contact_platform}`, `{pr_number}`, `{pr_repo}`,
+`{pr_title}`, `{prs}`, `{verdict}`, `{confidence}`, `{ai_summary}`, `{outcome}`,
+`{reason}`, `{task}`, `{channel}`, `{link}`, `{behavior}`, and `{run_id}`. Start
+a line with `?{x}` to omit the whole line when placeholder `x` is empty; for
+example, `?{link}{link}`. A template is limited to 1,000 characters and 12
+lines. Unknown placeholders and control characters are rejected. Failure and
+skipped-approval reports always retain a non-empty reason.
+
 ## Upkeep
 
 - Updates: `git pull`, rebuild both binaries, run `goose … up`, then
