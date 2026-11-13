@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // ResolvedDoc is a behavior with defaults applied and vars filled in. It is
@@ -20,7 +21,11 @@ type ResolvedDoc struct {
 	Instructions string
 	Autonomy     AutonomyRules
 	// Actions maps each class to its allowed actions, in document order.
-	Actions        map[Class][]ActionSpec
+	Actions map[Class][]ActionSpec
+	// RunActions are the run-level actions (actions.run), in document
+	// order. They run once per run, after the model step (if any), on
+	// trusted trigger data only.
+	RunActions     []ActionSpec
 	DryRun         bool
 	AskExpiryHours int
 	Budgets        Budgets
@@ -35,9 +40,14 @@ type ResolvedTrigger struct {
 	ToStatus []string
 	Assignee string // "", "me" or a ClickUp user ID
 	Lists    []string
-	From     string // "", "any" or "others"
+	From     string // "", "any" or "others"; a chat trigger defaults to "others"
 	Command  string
 	Args     []string
+	// Chat message filters. Channels defaults to ["dm"] for a chat trigger;
+	// Senders empty means anyone.
+	Channels  []string
+	HasPRLink bool
+	Senders   []string
 }
 
 // ReadSpec is one allowed read tool. MaxBytes 0 means the executor default.
@@ -54,10 +64,12 @@ type AutonomyRules struct {
 	NotifyWhenInformational bool
 }
 
-// ActionSpec is one allowed action with its parameters filled in.
+// ActionSpec is one allowed action with its parameters filled in. On is
+// "" or OnSuccessOfPrevious (run-level actions only).
 type ActionSpec struct {
 	Type   string
 	Params map[string]string
+	On     string
 }
 
 // Budgets cap one run. MaxTokens 0 means the profile or settings default.
@@ -65,11 +77,11 @@ type Budgets struct {
 	MaxTokens, MaxItems, MaxSteps int
 }
 
-// Resolve validates the document (except read tool names, which the
-// publisher checked), applies defaults and fills in vars. An invalid
-// document returns FieldErrors.
+// Resolve validates the document (except read tool names and GitHub
+// account existence, which the publisher checked), applies defaults and
+// fills in vars. An invalid document returns FieldErrors.
 func Resolve(doc Doc, vars map[string]string) (ResolvedDoc, error) {
-	if errs := validate(doc, vars, nil); len(errs) > 0 {
+	if errs := validate(doc, vars, nil, nil); len(errs) > 0 {
 		return ResolvedDoc{}, errs
 	}
 	values := map[string]string{}
@@ -105,10 +117,21 @@ func Resolve(doc Doc, vars map[string]string) (ResolvedDoc, error) {
 		Model:          doc.Model,
 	}
 	for _, t := range doc.Triggers {
-		out.Triggers = append(out.Triggers, ResolvedTrigger{
+		rt := ResolvedTrigger{
 			Type: t.Type, ToStatus: rl(t.Filter.ToStatus), Assignee: r(t.Filter.Assignee), Lists: rl(t.Filter.List),
 			From: r(t.Filter.From), Command: r(t.Command), Args: append([]string(nil), t.Args...),
-		})
+			Channels: rl(t.Filter.Channel), Senders: rl(t.Filter.Senders),
+			HasPRLink: t.Filter.HasPRLink != nil && *t.Filter.HasPRLink,
+		}
+		if t.Type == TriggerChatMessage {
+			if rt.From == "" {
+				rt.From = FromOthers
+			}
+			if len(rt.Channels) == 0 {
+				rt.Channels = []string{ChannelDM}
+			}
+		}
+		out.Triggers = append(out.Triggers, rt)
 	}
 	for _, rd := range doc.Reads {
 		out.Reads = append(out.Reads, ReadSpec{Tool: rd.Tool, MaxBytes: rd.MaxBytes})
@@ -139,7 +162,12 @@ func Resolve(doc Doc, vars map[string]string) (ResolvedDoc, error) {
 			if a.Type == ActionDescriptionBlock && params["block"] == "" {
 				params["block"] = doc.Name
 			}
-			out.Actions[Class(class)] = append(out.Actions[Class(class)], ActionSpec{Type: a.Type, Params: params})
+			spec := ActionSpec{Type: a.Type, Params: params, On: a.On}
+			if class == ActionsRun {
+				out.RunActions = append(out.RunActions, spec)
+				continue
+			}
+			out.Actions[Class(class)] = append(out.Actions[Class(class)], spec)
 		}
 	}
 	if doc.DryRun != nil {
@@ -168,6 +196,16 @@ func Resolve(doc Doc, vars map[string]string) (ResolvedDoc, error) {
 // ActionsFor returns the allowed actions of a class.
 func (d ResolvedDoc) ActionsFor(c Class) []ActionSpec { return d.Actions[c] }
 
+// HasModelStep reports whether a run of the behavior calls the model. A
+// behavior without instructions (allowed only for chat-triggered behaviors
+// that have only run-level actions) skips the model step and runs its
+// run-level actions directly.
+//
+// TODO(T5): the run executor must check HasModelStep and, when false,
+// skip context collection and the model call and go straight to
+// RunActions.
+func (d ResolvedDoc) HasModelStep() bool { return strings.TrimSpace(d.Instructions) != "" }
+
 // decodeStored decodes a stored document and its var values.
 func decodeStored(document, vars json.RawMessage) (Doc, map[string]string, error) {
 	doc, err := DecodeDocument(document)
@@ -182,12 +220,12 @@ func decodeStored(document, vars json.RawMessage) (Doc, map[string]string, error
 }
 
 // ValidateDraft validates a stored draft.
-func ValidateDraft(b Behavior, allowedReads []string) error {
+func ValidateDraft(b Behavior, allowedReads []string, opts ...ValidateOption) error {
 	doc, vars, err := decodeStored(b.Draft, b.DraftVars)
 	if err != nil {
 		return err
 	}
-	errs := FieldErrors(Validate(doc, vars, allowedReads))
+	errs := FieldErrors(Validate(doc, vars, allowedReads, opts...))
 	if doc.Name != b.Name && NameRe.MatchString(doc.Name) {
 		errs = append(errs, FieldError{Path: "name", Msg: fmt.Sprintf("does not match the stored behavior %q", b.Name)})
 	}
@@ -200,9 +238,9 @@ func ValidateDraft(b Behavior, allowedReads []string) error {
 // PublishDraft freezes the behavior's draft as a new immutable version. The
 // draft is validated under the store's lock, so an invalid draft is never
 // published; validation errors come back as FieldErrors.
-func PublishDraft(ctx context.Context, store DefinitionStore, workspaceID, name string, allowedReads []string) (Version, error) {
+func PublishDraft(ctx context.Context, store DefinitionStore, workspaceID, name string, allowedReads []string, opts ...ValidateOption) (Version, error) {
 	return store.Publish(ctx, workspaceID, name, func(b Behavior) error {
-		return ValidateDraft(b, allowedReads)
+		return ValidateDraft(b, allowedReads, opts...)
 	})
 }
 
@@ -261,7 +299,7 @@ func Export(ctx context.Context, store DefinitionStore, workspaceID, name string
 // already stored with the draft. A source that does not parse, or has no
 // valid name, is not saved (err is FieldErrors). A parsed draft is saved
 // even when it does not validate; its problems come back as problems.
-func ImportDraft(ctx context.Context, store DefinitionStore, workspaceID string, src []byte, format Format, vars map[string]string, allowedReads []string) (b Behavior, problems FieldErrors, err error) {
+func ImportDraft(ctx context.Context, store DefinitionStore, workspaceID string, src []byte, format Format, vars map[string]string, allowedReads []string, opts ...ValidateOption) (b Behavior, problems FieldErrors, err error) {
 	doc, err := Parse(src, format)
 	if err != nil {
 		return Behavior{}, nil, err
@@ -294,5 +332,5 @@ func ImportDraft(ctx context.Context, store DefinitionStore, workspaceID string,
 	if err != nil {
 		return Behavior{}, nil, err
 	}
-	return b, FieldErrors(Validate(doc, vars, allowedReads)), nil
+	return b, FieldErrors(Validate(doc, vars, allowedReads, opts...)), nil
 }

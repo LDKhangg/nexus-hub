@@ -52,6 +52,45 @@ func behaviorReadTools() []string {
 	return names
 }
 
+// behaviorGitHubAccounts returns the hub GitHub accounts of the workspace's
+// ClickUp sources, name to type, for the github.pr_approve account check.
+// A source whose agent configuration does not parse adds no account. A name
+// configured with different types counts as not "pat".
+func behaviorGitHubAccounts(ctx context.Context, pool *pgxpool.Pool, ws string) (map[string]string, error) {
+	rows, err := pool.Query(ctx, `SELECT config FROM integrations WHERE workspace_id=$1 AND platform='clickup'`, ws)
+	if err != nil {
+		return nil, errors.New("database operation failed")
+	}
+	defer rows.Close()
+	known := knownTools()
+	out := map[string]string{}
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, errors.New("database operation failed")
+		}
+		var cfg map[string]any
+		if json.Unmarshal(data, &cfg) != nil {
+			continue
+		}
+		agent, err := tenant.ParseAgentConfig(cfg, known)
+		if err != nil {
+			continue
+		}
+		for name, a := range agent.Tools.Accounts {
+			if prev, ok := out[name]; ok && prev != a.Type {
+				out[name] = "mixed"
+				continue
+			}
+			out[name] = a.Type
+		}
+	}
+	if rows.Err() != nil {
+		return nil, errors.New("database operation failed")
+	}
+	return out, nil
+}
+
 // parseInterspersed parses flags that may come before or after positional
 // arguments and returns the positional ones.
 func parseInterspersed(f *flag.FlagSet, args []string) ([]string, error) {
@@ -151,6 +190,14 @@ func behaviorCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 	}
 	enc := json.NewEncoder(out)
 	reads := behaviorReadTools()
+	var opts []behavior.ValidateOption
+	if sub == "import" || sub == "validate" || sub == "publish" {
+		accounts, err := behaviorGitHubAccounts(ctx, pool, *ws)
+		if err != nil {
+			return err
+		}
+		opts = append(opts, behavior.WithGitHubAccounts(accounts))
+	}
 
 	switch sub {
 	case "import":
@@ -168,7 +215,7 @@ func behaviorCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 				return behaviorError(err)
 			}
 		}
-		b, problems, err := behavior.ImportDraft(ctx, store, *ws, src, format, vars, reads)
+		b, problems, err := behavior.ImportDraft(ctx, store, *ws, src, format, vars, reads, opts...)
 		if err != nil {
 			return behaviorError(err)
 		}
@@ -182,12 +229,12 @@ func behaviorCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 		if err != nil {
 			return behaviorError(err)
 		}
-		if err := behavior.ValidateDraft(b, reads); err != nil {
+		if err := behavior.ValidateDraft(b, reads, opts...); err != nil {
 			return behaviorError(err)
 		}
 		return enc.Encode(map[string]any{"name": b.Name, "valid": true})
 	case "publish":
-		v, err := behavior.PublishDraft(ctx, store, *ws, pos[0], reads)
+		v, err := behavior.PublishDraft(ctx, store, *ws, pos[0], reads, opts...)
 		if err != nil {
 			return behaviorError(err)
 		}

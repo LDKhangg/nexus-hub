@@ -83,6 +83,12 @@ func (t *ingestTriggers) start(ctx context.Context, e domain.NormalizedEvent) (i
 	if !ok {
 		return 0, nil
 	}
+	return t.startEvent(ctx, ev)
+}
+
+// startEvent creates the runs one trigger event starts and returns how
+// many were new. Only database errors are returned.
+func (t *ingestTriggers) startEvent(ctx context.Context, ev behavior.Event) (int, error) {
 	if err := t.load(ctx); err != nil {
 		return 0, err
 	}
@@ -108,6 +114,41 @@ func (t *ingestTriggers) start(ctx context.Context, e domain.NormalizedEvent) (i
 			created++
 			log.Printf("behavior ingest: run %d created for version %d corr=%s", run.ID, m.Version.ID, run.CorrelationID)
 		}
+	}
+	return created, nil
+}
+
+var _ behavior.ChatRunStarter = (*BehaviorStore)(nil)
+
+// StartChatRuns matches ClickUp Chat message events against the enabled
+// behavior versions and creates their runs in one transaction, so either
+// every run of the batch is stored or none is. A repeated message is
+// deduplicated per (version, subject, revision); created counts new runs
+// only. Events of another type are ignored.
+func (s *BehaviorStore) StartChatRuns(ctx context.Context, workspaceID string, events []behavior.Event) (int, error) {
+	ws, err := parseDBID(workspaceID)
+	if err != nil {
+		return 0, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	t := newIngestTriggers(sqlc.New(tx), ws)
+	created := 0
+	for _, ev := range events {
+		if ev.Type != behavior.TriggerChatMessage {
+			continue
+		}
+		n, err := t.startEvent(ctx, ev)
+		if err != nil {
+			return 0, err
+		}
+		created += n
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
 	}
 	return created, nil
 }

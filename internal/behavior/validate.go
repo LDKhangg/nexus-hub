@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/LDKhangg/nexus-hub/internal/agent"
+	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
 
 // Limits and defaults of a behavior document.
@@ -48,6 +49,7 @@ var reservedCommands = map[string]bool{"/help": true, "/trace": true, "/undo": t
 
 var triggerTypes = map[string]bool{
 	TriggerTaskStatusChanged: true, TriggerTaskAssigned: true, TriggerCommentAdded: true, TriggerTelegramCommand: true,
+	TriggerChatMessage: true,
 }
 
 // actionParams lists the parameters each action type takes and whether
@@ -58,6 +60,46 @@ var actionParams = map[string]map[string]bool{
 	ActionDescriptionBlock: {"block": false},
 	ActionSetStatus:        {"status": true},
 	ActionUnassign:         {"user": true},
+	ActionPRApprove:        {"account": true},
+	ActionChatReaction:     {"reaction": true},
+}
+
+// runActionTypes lists the action types allowed in actions.run.
+var runActionTypes = map[string]bool{ActionPRApprove: true, ActionChatReaction: true, ActionTelegramMessage: true}
+
+// runOnlyActions lists the action types allowed only in actions.run.
+var runOnlyActions = map[string]bool{ActionPRApprove: true, ActionChatReaction: true}
+
+// reactionRe is a chat reaction name: a lower-case emoji name.
+var reactionRe = regexp.MustCompile(`^[a-z0-9_+-]{1,64}$`)
+
+// GitHubAccountPAT is the hub GitHub account type that acts as a person (a
+// personal access token); "app" accounts act as a bot.
+const GitHubAccountPAT = "pat"
+
+// ValidateOption adds a check against the hub's environment to Validate.
+type ValidateOption func(*validateEnv)
+
+// validateEnv holds environment facts that a document alone does not have.
+// A nil env (run-time resolution) skips those checks: the publisher made
+// them.
+type validateEnv struct {
+	// githubAccounts maps hub GitHub account names to their type; nil when
+	// the caller did not supply them.
+	githubAccounts map[string]string
+}
+
+// WithGitHubAccounts makes validation check that every github.pr_approve
+// "account" names a hub GitHub account of type "pat". accounts maps account
+// names to their type ("pat" or "app"). Without this option only the
+// account name's syntax is checked.
+func WithGitHubAccounts(accounts map[string]string) ValidateOption {
+	return func(e *validateEnv) {
+		e.githubAccounts = map[string]string{}
+		for k, v := range accounts {
+			e.githubAccounts[k] = v
+		}
+	}
 }
 
 // RequiresConfirmation reports whether an action always needs the owner's
@@ -97,6 +139,7 @@ func chars(s string) int { return utf8.RuneCountInString(s) }
 
 type checker struct {
 	errs FieldErrors
+	env  *validateEnv
 }
 
 func (c *checker) add(path, format string, args ...any) {
@@ -104,19 +147,27 @@ func (c *checker) add(path, format string, args ...any) {
 }
 
 // Validate checks a document with its var values against the schema. Read
-// tools must be in allowedReads. It returns every error, in document
-// order; nil means valid. Messages never contain var values.
-func Validate(doc Doc, vars map[string]string, allowedReads []string) []FieldError {
+// tools must be in allowedReads; opts add environment checks such as
+// WithGitHubAccounts. It returns every error, in document order; nil means
+// valid. Messages never contain var values.
+func Validate(doc Doc, vars map[string]string, allowedReads []string, opts ...ValidateOption) []FieldError {
 	allowed := map[string]bool{}
 	for _, n := range allowedReads {
 		allowed[n] = true
 	}
-	return validate(doc, vars, allowed)
+	env := &validateEnv{}
+	for _, o := range opts {
+		if o != nil {
+			o(env)
+		}
+	}
+	return validate(doc, vars, allowed, env)
 }
 
-// validate checks reads against allowed when it is non-nil.
-func validate(doc Doc, vars map[string]string, allowed map[string]bool) FieldErrors {
-	c := &checker{}
+// validate checks reads against allowed when it is non-nil, and the
+// environment facts env holds when it is non-nil.
+func validate(doc Doc, vars map[string]string, allowed map[string]bool, env *validateEnv) FieldErrors {
+	c := &checker{env: env}
 	if doc.Schema != SchemaVersion {
 		c.add("schema", "must be %d", SchemaVersion)
 	}
@@ -141,7 +192,11 @@ func validate(doc Doc, vars map[string]string, allowed map[string]bool) FieldErr
 	instructions, ok := sub("instructions", doc.Instructions)
 	switch {
 	case strings.TrimSpace(doc.Instructions) == "":
-		c.add("instructions", "is required")
+		if !runActionsOnly(doc) {
+			c.add("instructions", "is required (it may be empty only when every trigger is %s and the only actions are actions.%s)", TriggerChatMessage, ActionsRun)
+		} else if len(doc.Reads) > 0 {
+			c.add("reads", "needs instructions: without instructions the model is not called")
+		}
 	case ok && chars(instructions) > MaxInstructionsChars:
 		c.add("instructions", "must be at most %d characters after vars are filled in", MaxInstructionsChars)
 	}
@@ -167,7 +222,7 @@ func validate(doc Doc, vars map[string]string, allowed map[string]bool) FieldErr
 		}
 	}
 
-	c.checkActions(doc.Actions, sub)
+	c.checkActions(doc.Actions, doc.Triggers, sub)
 
 	if h := doc.AskExpiryHours; h != nil && (*h < 1 || *h > 720) {
 		c.add("ask_expiry_hours", "must be between 1 and 720")
@@ -294,6 +349,27 @@ var filterAllowed = map[string]map[string]bool{
 	TriggerTaskAssigned:      {"assignee": true, "list": true},
 	TriggerCommentAdded:      {"list": true, "from": true},
 	TriggerTelegramCommand:   {},
+	TriggerChatMessage:       {"channel": true, "from": true, "has_pr_link": true, "senders": true},
+}
+
+// runActionsOnly reports whether a behavior may skip the model step: every
+// trigger is a chat message, it has run-level actions and no class
+// actions.
+func runActionsOnly(doc Doc) bool {
+	if len(doc.Triggers) == 0 || len(doc.Actions[ActionsRun]) == 0 {
+		return false
+	}
+	for _, t := range doc.Triggers {
+		if t.Type != TriggerChatMessage {
+			return false
+		}
+	}
+	for class, list := range doc.Actions {
+		if class != ActionsRun && len(list) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *checker) checkTriggers(ts []TriggerDoc, sub subFunc) {
@@ -312,8 +388,11 @@ func (c *checker) checkTriggers(ts []TriggerDoc, sub subFunc) {
 		}
 		allowed := filterAllowed[t.Type]
 		f := t.Filter
-		used := map[string]bool{"to_status": len(f.ToStatus) > 0, "assignee": f.Assignee != "", "list": len(f.List) > 0, "from": f.From != ""}
-		for _, k := range []string{"to_status", "assignee", "list", "from"} {
+		used := map[string]bool{
+			"to_status": len(f.ToStatus) > 0, "assignee": f.Assignee != "", "list": len(f.List) > 0, "from": f.From != "",
+			"channel": len(f.Channel) > 0, "has_pr_link": f.HasPRLink != nil, "senders": len(f.Senders) > 0,
+		}
+		for _, k := range []string{"to_status", "assignee", "list", "from", "channel", "has_pr_link", "senders"} {
 			if used[k] && !allowed[k] {
 				c.add(p+".filter."+k, "not a filter of %s", t.Type)
 			}
@@ -344,6 +423,35 @@ func (c *checker) checkTriggers(ts []TriggerDoc, sub subFunc) {
 			fp := p + ".filter.from"
 			if v, ok := sub(fp, f.From); ok && v != FromAny && v != FromOthers {
 				c.add(fp, "must be %q or %q", FromAny, FromOthers)
+			}
+		}
+		if allowed["channel"] {
+			if len(f.Channel) > 2 {
+				c.add(p+".filter.channel", "must have at most 2 values")
+			}
+			seen := map[string]bool{}
+			for j, s := range f.Channel {
+				fp := fmt.Sprintf("%s.filter.channel[%d]", p, j)
+				v, ok := sub(fp, s)
+				switch {
+				case !ok:
+				case v != ChannelDM && v != ChannelGroupDM:
+					c.add(fp, "must be %q or %q", ChannelDM, ChannelGroupDM)
+				case seen[v]:
+					c.add(fp, "duplicate channel")
+				}
+				seen[v] = true
+			}
+		}
+		if allowed["senders"] {
+			if len(f.Senders) > 100 {
+				c.add(p+".filter.senders", "must have at most 100 user IDs")
+			}
+			for j, s := range f.Senders {
+				fp := fmt.Sprintf("%s.filter.senders[%d]", p, j)
+				if v, ok := sub(fp, s); ok && !userIDRe.MatchString(v) {
+					c.add(fp, "must be a ClickUp user ID")
+				}
 			}
 		}
 		if t.Type != TriggerTelegramCommand {
@@ -405,7 +513,17 @@ func (c *checker) checkReads(rs []ReadDoc, allowed map[string]bool) {
 	}
 }
 
-func (c *checker) checkActions(actions map[string][]ActionDoc, sub subFunc) {
+func (c *checker) checkActions(actions map[string][]ActionDoc, triggers []TriggerDoc, sub subFunc) {
+	allChat, allPRLink := len(triggers) > 0, len(triggers) > 0
+	for _, t := range triggers {
+		if t.Type != TriggerChatMessage {
+			allChat, allPRLink = false, false
+			continue
+		}
+		if t.Filter.HasPRLink == nil || !*t.Filter.HasPRLink {
+			allPRLink = false
+		}
+	}
 	classes := make([]string, 0, len(actions))
 	for k := range actions {
 		classes = append(classes, k)
@@ -414,10 +532,12 @@ func (c *checker) checkActions(actions map[string][]ActionDoc, sub subFunc) {
 	for _, class := range classes {
 		list := actions[class]
 		cp := "actions." + class
-		switch Class(class) {
-		case ClassAuto, ClassNotify, ClassAsk:
+		run := class == ActionsRun
+		switch {
+		case run:
+		case Class(class) == ClassAuto, Class(class) == ClassNotify, Class(class) == ClassAsk:
 		default:
-			c.add(cp, "unknown class (allowed: auto, notify, ask)")
+			c.add(cp, "unknown class (allowed: auto, notify, ask, %s)", ActionsRun)
 			continue
 		}
 		if len(list) > MaxActionsPerClass {
@@ -429,6 +549,16 @@ func (c *checker) checkActions(actions map[string][]ActionDoc, sub subFunc) {
 			if !known {
 				c.add(p+".type", "unknown action %q", a.Type)
 				continue
+			}
+			if run {
+				c.checkRunAction(p, i, len(list), a, allChat, allPRLink)
+			} else {
+				if runOnlyActions[a.Type] {
+					c.add(p+".type", "%s is allowed only in actions.%s", a.Type, ActionsRun)
+				}
+				if a.On != "" {
+					c.add(p+".on", "is allowed only in actions.%s", ActionsRun)
+				}
 			}
 			for _, k := range sortedParamKeys(a.Params) {
 				if _, ok := params[k]; !ok {
@@ -461,9 +591,63 @@ func (c *checker) checkActions(actions map[string][]ActionDoc, sub subFunc) {
 					if v != AssigneeMe && !userIDRe.MatchString(v) {
 						c.add(pp, "must be %q or a ClickUp user ID", AssigneeMe)
 					}
+				case "reaction":
+					if !reactionRe.MatchString(v) {
+						c.add(pp, "must be a lower-case emoji name of 1-64 of a-z, 0-9, _, + or -")
+					}
+				case "account":
+					c.checkGitHubAccount(pp, v)
 				}
 			}
 		}
+	}
+}
+
+// checkRunAction checks one run-level action (actions.run[i] of n) beyond
+// its parameters.
+func (c *checker) checkRunAction(p string, i, n int, a ActionDoc, allChat, allPRLink bool) {
+	if !runActionTypes[a.Type] {
+		c.add(p+".type", "%s is not allowed in actions.%s (allowed: %s, %s, %s)", a.Type, ActionsRun, ActionPRApprove, ActionChatReaction, ActionTelegramMessage)
+		return
+	}
+	switch a.On {
+	case "":
+	case OnSuccessOfPrevious:
+		if i == 0 {
+			c.add(p+".on", "the first action has no previous action")
+		}
+		if a.Type == ActionTelegramMessage {
+			c.add(p+".on", "%s always runs and reports every outcome", ActionTelegramMessage)
+		}
+	default:
+		c.add(p+".on", "must be %q", OnSuccessOfPrevious)
+	}
+	if a.Type == ActionTelegramMessage && i != n-1 {
+		c.add(p+".type", "%s must be the last action of actions.%s", ActionTelegramMessage, ActionsRun)
+	}
+	if runOnlyActions[a.Type] && !allChat {
+		c.add(p+".type", "%s needs every trigger to be %s", a.Type, TriggerChatMessage)
+	}
+	if a.Type == ActionPRApprove && allChat && !allPRLink {
+		c.add(p+".type", "%s needs has_pr_link: true on every trigger", ActionPRApprove)
+	}
+}
+
+// checkGitHubAccount checks a github.pr_approve account name, and when the
+// caller supplied the hub's accounts, that it names a "pat" account.
+func (c *checker) checkGitHubAccount(path, v string) {
+	if !tenant.ValidCredentialRef(v) {
+		c.add(path, "must be a GitHub account name")
+		return
+	}
+	if c.env == nil || c.env.githubAccounts == nil {
+		return
+	}
+	switch typ, ok := c.env.githubAccounts[v]; {
+	case !ok:
+		c.add(path, "unknown GitHub account (add it with the github-account command)")
+	case typ != GitHubAccountPAT:
+		c.add(path, "must be a GitHub account of type %s (an app account approves as a bot)", GitHubAccountPAT)
 	}
 }
 

@@ -57,3 +57,17 @@ type ChatPollStore interface {
 	// the streak reached minStreak.
 	ClaimChatUnauthorizedNotice(ctx context.Context, workspaceID, integrationID string, minStreak int, now time.Time) (bool, error)
 }
+
+// ChatRunStarter turns ClickUp Chat message events into behavior runs. The
+// chat poller calls it for each batch of new messages before it advances
+// its cursor past them.
+type ChatRunStarter interface {
+	// StartChatRuns matches each TriggerChatMessage event (built with
+	// ChatSubject(MessageID) as Key and ExtractPRRefs for PRs) against the
+	// enabled behavior versions, with the owner's ClickUp user ID from
+	// settings, and stores the runs in one transaction. Each run's subject
+	// and revision are ChatSubject(MessageID), so a message re-read after a
+	// restart starts no second run of the same version. created counts new
+	// runs only.
+	StartChatRuns(ctx context.Context, workspaceID string, events []Event) (created int, err error)
+}
