@@ -176,6 +176,29 @@ type ClickupChatPoll struct {
 	UpdatedAt              pgtype.Timestamptz
 }
 
+type Contact struct {
+	ID          pgtype.UUID
+	WorkspaceID pgtype.UUID
+	DisplayName pgtype.Text
+	Note        string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+type ContactAccount struct {
+	ID           pgtype.UUID
+	WorkspaceID  pgtype.UUID
+	ContactID    pgtype.UUID
+	Platform     string
+	ExternalID   string
+	PlatformName pgtype.Text
+	Username     pgtype.Text
+	Source       string
+	IsSelf       bool
+	FirstSeen    pgtype.Timestamptz
+	LastSeen     pgtype.Timestamptz
+}
+
 // AES-256-GCM ciphertext only; AAD binds workspace, name and kind. The master key lives outside the database.
 type Credential struct {
 	ID          pgtype.UUID
@@ -289,6 +312,30 @@ type OutboundAction struct {
 	SentAt            pgtype.Timestamptz
 }
 
+type ReportPreference struct {
+	UserID        pgtype.UUID
+	WorkspaceID   pgtype.UUID
+	BehaviorName  pgtype.Text
+	Style         string
+	ShowReaction  bool
+	ShowAiSummary bool
+	ShowLinks     bool
+	ShowPrTitles  bool
+	ShowTraceHint bool
+	Language      pgtype.Text
+	CreatedAt     pgtype.Timestamptz
+	UpdatedAt     pgtype.Timestamptz
+}
+
+type ReportTemplate struct {
+	UserID       pgtype.UUID
+	WorkspaceID  pgtype.UUID
+	BehaviorName pgtype.Text
+	Kind         string
+	Body         string
+	UpdatedAt    pgtype.Timestamptz
+}
+
 type RunItem struct {
 	ID            int64
 	WorkspaceID   pgtype.UUID
@@ -367,6 +414,14 @@ type ToolRun struct {
 	CorrelationID pgtype.UUID
 }
 
+type User struct {
+	ID          pgtype.UUID
+	DisplayName string
+	Status      string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
 type UserProfile struct {
 	WorkspaceID      pgtype.UUID
 	Language         string
@@ -385,6 +440,14 @@ type UserProfile struct {
 type Workspace struct {
 	ID          pgtype.UUID
 	DisplayName string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+type WorkspaceMember struct {
+	UserID      pgtype.UUID
+	WorkspaceID pgtype.UUID
+	Role        string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }
