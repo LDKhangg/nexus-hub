@@ -91,8 +91,10 @@ func TestOwnerBootstrap(t *testing.T) {
 		if err := pool.QueryRow(ctx, `SELECT is_self FROM contact_accounts WHERE workspace_id=$1 AND platform='telegram' AND external_id='4242'`, workspaceA).Scan(&self); err != nil || !self {
 			t.Fatalf("persisted owner account is_self=%v err=%v", self, err)
 		}
-		mustExec(t, ctx, pool, `INSERT INTO users(id,display_name) VALUES('019a6690-abcd-7000-8000-000000000299','Impostor'); INSERT INTO workspace_members(user_id,workspace_id,role) VALUES('019a6690-abcd-7000-8000-000000000299',$1,'member')`, workspaceA)
-		mustExec(t, ctx, pool, `INSERT INTO contacts(id,workspace_id) VALUES('019a6690-abcd-7000-8000-000000000298',$1); INSERT INTO contact_accounts(id,workspace_id,contact_id,platform,external_id,source,is_self) VALUES('019a6690-abcd-7000-8000-000000000297',$1,'019a6690-abcd-7000-8000-000000000298','telegram','04242','manual',false)`, workspaceA)
+		mustExec(t, ctx, pool, `INSERT INTO users(id,display_name) VALUES('019a6690-abcd-7000-8000-000000000299','Impostor')`)
+		mustExec(t, ctx, pool, `INSERT INTO workspace_members(user_id,workspace_id,role) VALUES('019a6690-abcd-7000-8000-000000000299',$1,'member')`, workspaceA)
+		mustExec(t, ctx, pool, `INSERT INTO contacts(id,workspace_id) VALUES('019a6690-abcd-7000-8000-000000000298',$1)`, workspaceA)
+		mustExec(t, ctx, pool, `INSERT INTO contact_accounts(id,workspace_id,contact_id,platform,external_id,source,is_self) VALUES('019a6690-abcd-7000-8000-000000000297',$1,'019a6690-abcd-7000-8000-000000000298','telegram','04242','manual',false)`, workspaceA)
 		var impostorOwners, impostorSelf int
 		if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM workspace_members WHERE user_id='019a6690-abcd-7000-8000-000000000299' AND role='owner'), (SELECT count(*) FROM contact_accounts WHERE external_id='04242' AND is_self)`).Scan(&impostorOwners, &impostorSelf); err != nil {
 			t.Fatal(err)

@@ -12,7 +12,8 @@ func TestReportingQueries_OverrideResolutionAndTemplateConstraints(t *testing.T)
 	ctx, pool := testDB(t)
 	userID := "019a6690-abcd-7000-8000-000000000201"
 	mustExec(t, ctx, pool, `INSERT INTO workspaces(id,display_name) VALUES($1,'A')`, workspaceA)
-	mustExec(t, ctx, pool, `INSERT INTO users(id,display_name) VALUES($1,'Owner'); INSERT INTO workspace_members(user_id,workspace_id,role) VALUES($1,$2,'owner')`, userID, workspaceA)
+	mustExec(t, ctx, pool, `INSERT INTO users(id,display_name) VALUES($1,'Owner')`, userID)
+	mustExec(t, ctx, pool, `INSERT INTO workspace_members(user_id,workspace_id,role) VALUES($1,$2,'owner')`, userID, workspaceA)
 	q := dbsqlc.New(pool)
 	basePrefs := dbsqlc.SetReportPreferencesParams{UserID: testUUID(t, userID), WorkspaceID: testUUID(t, workspaceA), Style: "normal", ShowLinks: true}
 	if _, err := q.SetReportPreferences(ctx, basePrefs); err != nil {
