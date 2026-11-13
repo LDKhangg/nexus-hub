@@ -26,6 +26,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/memory"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
+	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/secrets"
 	"github.com/LDKhangg/nexus-hub/internal/settings"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
@@ -193,6 +194,7 @@ func buildBehaviorEngine(pool *pgxpool.Pool, s settings.Settings, store *storage
 		Decisions: behavior.MemoryRecorder{Store: store},
 		Digests:   store,
 		Redactor:  redactor,
+		Reports:   reporting.NewRenderer(reporting.NewPostgresStore(pool), nil),
 	}, behavior.ActionSettings{OwnerClickUpUserID: s.OwnerClickUpUserID, RequestTimeout: s.NoticeRequestTimeout})
 	if err != nil {
 		return nil, nil, errors.New("behavior action engine startup failed")

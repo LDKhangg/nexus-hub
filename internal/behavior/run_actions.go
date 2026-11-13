@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
+	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
 
@@ -503,8 +504,10 @@ func (e *Engine) runTelegram(ctx context.Context, rc RunContext, env runActionEn
 		}
 		return RunActionOutcome{}, true, nil
 	}
-	clean := func(s string) string { return e.d.Redactor.CleanOutbound(s, true) }
-	text := runActionsText(textsFor(rc.Doc.Language), rc, res, clean)
+	text, err := e.runActionsReport(ctx, rc, res)
+	if err != nil {
+		return RunActionOutcome{}, true, nil
+	}
 	id, err := e.sendOnce(ctx, rc.Run, fmt.Sprintf("run_action:%d", i), chat, OutMessage{Text: text})
 	switch {
 	case err != nil && id == 0:
@@ -521,6 +524,78 @@ func (e *Engine) runTelegram(ctx context.Context, rc RunContext, env runActionEn
 		o.Status, o.TelegramMessageID = OutcomeOK, id
 	}
 	return o, false, nil
+}
+
+// runActionsReport converts stored identifiers and safe outcome codes into
+// the shared renderer input. Triggering message text is neither available nor
+// copied into the report.
+func (e *Engine) runActionsReport(ctx context.Context, rc RunContext, res RunActionsResult) (string, error) {
+	kind := reporting.KindNotify
+	values := reporting.Values{Behavior: rc.Doc.Name, RunID: fmt.Sprint(rc.Run.ID), Channel: rc.Trigger.ChannelName}
+	var reaction string
+	var prLines []string
+	for i, a := range rc.Doc.RunActions {
+		o, ok := res.Get(i)
+		if !ok || a.Type == ActionTelegramMessage {
+			continue
+		}
+		switch a.Type {
+		case ActionPRApprove:
+			if o.Status == OutcomeSkippedVerdict || o.Status == OutcomeSkippedPrevious {
+				kind = reporting.KindPRSkipped
+				values.Reason = runActionReason(textsFor(rc.Doc.Language), a, o, res.Verdict)
+			}
+			if len(o.PRs) == 0 && o.Code != "" {
+				kind = reporting.KindFailure
+				values.Reason = textsFor(rc.Doc.Language).outcomeWord(o.Status, o.Code)
+			}
+			for _, po := range o.PRs {
+				if values.PRNumber == "" {
+					values.PRNumber = strconv.Itoa(po.Number)
+					values.PRRepo = po.Repo
+					values.Link = reporting.PRLink(po.Repo, po.Number)
+				}
+				prLines = append(prLines, "• "+textsFor(rc.Doc.Language).prLine(PRRef{Repo: po.Repo, Number: po.Number}.String(), textsFor(rc.Doc.Language).prWord(po)))
+				if passed(po.Status) && kind != reporting.KindPRSkipped && kind != reporting.KindFailure {
+					kind = reporting.KindPRApprove
+				} else if !passed(po.Status) {
+					kind = reporting.KindFailure
+					values.Reason = textsFor(rc.Doc.Language).outcomeWord(po.Status, po.Code)
+				}
+			}
+		case ActionChatReaction:
+			reaction = textsFor(rc.Doc.Language).reactionLine(o)
+		}
+	}
+	values.PRs = strings.Join(prLines, "\n")
+	if v := res.Verdict; v != nil {
+		if v.Available() {
+			values.Verdict = v.Label
+			values.Confidence = reporting.Confidence(v.Confidence)
+			values.AISummary = capRunes(strings.Join(strings.Fields(e.d.Redactor.CleanOutbound(v.Summary, true)), " "), MaxVerdictSummaryChars)
+		} else {
+			if kind != reporting.KindFailure && kind != reporting.KindPRSkipped {
+				kind = reporting.KindVerdictUnavailable
+			}
+			values.Reason = textsFor(rc.Doc.Language).verdictUnavailableLine(verdictCode(v))
+		}
+	}
+	return e.d.Reports.Render(ctx, reporting.Report{
+		Kind: kind, UserID: reporting.DefaultOwnerUserID, WorkspaceID: rc.Run.WorkspaceID,
+		Behavior: rc.Run.BehaviorName, Language: rc.Doc.Language, Platform: "clickup", ExternalID: rc.Trigger.SenderID,
+		Values: values, Reaction: reaction, TraceHint: fmt.Sprintf("/trace %d", rc.Run.ID),
+	})
+}
+
+func runActionReason(t texts, a ActionSpec, o RunActionOutcome, verdict *RunVerdict) string {
+	if o.Code == CodeVerdictUnavailable || o.VerdictConfidence == nil {
+		return t.gateUnavailableLine(a.Type, verdictCode(verdict))
+	}
+	want := ""
+	if a.When != nil {
+		want = a.When.Verdict
+	}
+	return t.gateSkippedLine(a.Type, o.VerdictLabel, *o.VerdictConfidence, want)
 }
 
 // runActionsText is the owner's report of a run's run-level actions: the
