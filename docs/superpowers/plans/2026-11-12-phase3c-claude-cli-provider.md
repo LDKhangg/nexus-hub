@@ -1,7 +1,10 @@
-# Phase 3c: local Claude CLI as an LLM provider
+# Phase 3c: local AI CLIs (Claude Code, opencode) as LLM providers
 
 - Date: 2026-11-12. Status: approved by the owner in chat ("dùng cá nhân… fill vào cli rồi trả lời nhận trả lời đó rồi router… ok rồi thì mới dám dùng key").
-- Branch: `feature/phase3c` from `main`.
+- Branch: `feature/phase3c`, rebased on `main` 987d08e (Phase 3d merged).
+- Amended 2026-11-13 (v2): the owner wants **opencode with OpenAI models** as
+  well ("dùng claude cli hoặc opencode nhưng mà model của openAI"). Added
+  REQ-C8..C11 and task C2. Status of v2: waiting for the owner's approval.
 
 ## Goal
 
@@ -85,13 +88,69 @@ provider, under the rules below. Agent tools still run only git.
 - REQ-C7: `docs/runbooks/self-host-home.md` documents the switch: start with
   `claude_cli`, then move to `anthropic` with a key.
 
+### opencode provider (v2)
+
+Lead probe (2026-11-13, opencode v2.2.7, OpenAI signed in with OAuth): in an
+empty directory,
+
+```sh
+printf '<prompt>' | opencode run --model openai/gpt-6-luna --format json
+```
+
+read the prompt from stdin and printed newline-delimited JSON events:
+`step_start`, `text` (`part.text` held the JSON answer the prompt asked for),
+`step_finish` (`reason`, `cost`, `tokens.input/output`). Findings that the
+requirements below answer:
+
+- there is no `--json-schema` flag: structured output must be asked for in the
+  prompt and checked by the hub;
+- the default agent carries opencode's own system prompt and tools: the probe
+  used about 16k input tokens for a two-line prompt;
+- each run creates a session (`sessionID`);
+- v2 talks to a background service unless `--standalone` is given.
+
+- REQ-C8: `llm_provider` also accepts `opencode_cli`. Settings:
+  `opencode_cli_path` (absolute path to an executable), `opencode_cli_timeout`
+  (default 120s), `opencode_cli_concurrency` (default 1, max 4). When the
+  provider is `opencode_cli`, the model settings (`triage_model`,
+  `actor_model`, `summary_model`, a behavior's `model`) must be
+  `provider/model[#variant]` ids (for example `openai/gpt-6-luna`); with
+  `anthropic`/`claude_cli` they keep today's validation. `nh settings set
+  llm_provider opencode_cli` refuses while a model setting does not fit, and
+  says which.
+- REQ-C9: Each call runs `opencode run --standalone --format json --model
+  <model> --agent nexus-hub` directly (no shell), prompt and context on
+  **stdin**, in a fresh empty temp directory deleted afterwards. The hub writes
+  an `opencode.json` into that directory that defines the agent `nexus-hub`
+  with the engine's system prompt, **every tool disabled and every permission
+  denied**, no MCP servers. The child gets the same minimal environment as
+  REQ-C2 (plus `XDG_*` so opencode finds its own sign-in), its own process
+  group, kill on timeout/cancel, 4 MiB output cap, and the semaphore. If the
+  probe for C2 shows a run still offers a tool or reads outside the temp
+  directory, the Implementer stops and reports instead of shipping.
+- REQ-C10: Output parsing: the answer is the concatenated `text` parts;
+  usage comes from `step_finish.tokens`; `reason` other than `stop`, an
+  `error` event, a non-zero exit, a timeout or bad JSON map to the REQ-C3
+  codes (`llm_unavailable`, `llm_unconfigured` for a missing sign-in).
+  Structured calls append the JSON schema and "reply with one JSON object
+  only" to the prompt, then validate the answer against the schema; one
+  repair attempt is allowed (the error, not the content, is fed back); a
+  second failure is a provider error. Tool calling for the actor uses the
+  same emulation as REQ-C4. The session the run created is deleted (or the
+  run is made not to persist one, whichever the probe proves); no transcript
+  of a hub call stays in opencode's history.
+- REQ-C11: `nh llm check` works for `opencode_cli` too and prints the input
+  token count, so the owner sees the cost of the agent prompt. REQ-C5 (no
+  content in logs) and REQ-C7 (runbook) cover opencode.
+
 ## Tasks
 
-One Implementer.
+Two Implementers, in order.
 
 | Task | Scope | REQ |
 |---|---|---|
-| C1 | Settings, provider factory, CLI runner, structured and plain calls, tool-call emulation, usage, error mapping, `llm check`, runbook | C1–C7 |
+| C1 | Settings, provider factory, CLI runner, Claude CLI structured and plain calls, tool-call emulation, usage, error mapping, `llm check`, runbook | C1–C7 |
+| C2 | opencode provider on the C1 runner: config file, agent without tools, NDJSON parsing, schema check and repair, session cleanup, model id validation, `llm check`, runbook | C8–C11 |
 
 ## Global constraints
 
@@ -103,8 +162,8 @@ One Implementer.
 
 ## Review focus
 
-1. Can any input make the CLI run a tool, read project settings or MCP, or
-   receive the prompt through argv?
+1. Can any input make either CLI run a tool, read project settings or MCP,
+   or receive the prompt through argv? (opencode: the generated agent config.)
 2. Is the child's environment minimal, and is the child killed on timeout?
 3. Can tool-call emulation run a tool the request did not offer?
 4. Does any prompt or answer text reach logs?
