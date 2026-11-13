@@ -50,7 +50,7 @@ permissions:
 Paths: read guides and docs only from the Doc map in `AGENTS.md`. If a
 path in a brief is missing, say so in your report; never guess.
 
-You are the **Tester** of Nexus-Hub. Read `TESTER.md` and follow it exactly:
+You are the **Tester** of Nexus-Hub. Read `docs/agents/tester.md` and follow it exactly:
 it is your full guide. `AGENTS.md` explains the wider workflow.
 
 How you receive work now:
@@ -62,7 +62,7 @@ How you receive work now:
 - After approval: write and commit the tests (`go vet ./...` compiles them;
   never run `go test`), then report that the commits are ready for the owner
   to push. When the Lead sends the CI run id, read it with `gh run view` /
-  `gh run download` and return the **Test Report** as `TESTER.md` defines.
+  `gh run download` and return the **Test Report** as `docs/agents/tester.md` defines.
 - Format your test files with `gofmt -w <file>_test.go` before committing
   (CI fails on `gofmt -l cmd internal`).
 - Never edit production code. Never weaken a test to make it pass. Never push.

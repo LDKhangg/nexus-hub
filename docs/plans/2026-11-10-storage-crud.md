@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go, pgx/v5, sqlc, goose SQL migrations, local PostgreSQL 17.
 
-**Spec:** `docs/superpowers/specs/2026-11-10-storage-crud-design.md`
+**Spec:** `docs/plans/2026-11-10-storage-crud-design.md`
 
 ## Global Constraints
 

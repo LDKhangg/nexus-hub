@@ -112,12 +112,14 @@ Only the owner's chat is obeyed.
 | `examples/behaviors` | behavior YAML you can import |
 | `docs/product` | contract, roadmap, traceability, test debt |
 | `docs/runbooks` | how to run and operate |
-| `docs/superpowers/plans` | one plan per phase with numbered requirements |
+| `docs/plans` | one plan per phase with numbered requirements |
+| `docs/agents` | the Tester and Reviewer guides |
+| `docs/architecture.md` | the original MVP design (background; the PCC and roadmap win) |
 
 ## Contributing
 
 The repo is built by several agents with fixed roles (Lead, Implementer,
-Tester, Reviewer); read `AGENTS.md` first, then `TESTER.md` or `REVIEWER.md`
+Tester, Reviewer); read `AGENTS.md` first, then `docs/agents/tester.md` or `docs/agents/reviewer.md`
 for those roles. CI (`.github/workflows/ci.yml`) runs gofmt, vet, build and
 the full test suite with `-race` against a throwaway PostgreSQL. Tests use
 fakes only and never call the real GitHub, ClickUp, Telegram or any LLM.

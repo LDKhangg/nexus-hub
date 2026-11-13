@@ -4,7 +4,7 @@
   test debt and move on), before any Phase 3d test or review.
 - Merged head: see the merge commit "Merge branch 'feature/phase3d'"; feature
   head 9a0bdbe (Phase Brief 1 was written for 9f91d92; 9a0bdbe adds REQ-16).
-- Plan: docs/superpowers/plans/2026-11-13-phase3d-chat-pr-auto-approve.md
+- Plan: docs/plans/2026-11-13-phase3d-chat-pr-auto-approve.md
 - Ledger: .superpowers/sdd/2026-11-13-phase3d-chat-pr-auto-approve/progress.md
 - Brief for Tester and Reviewer: .superpowers/sdd/2026-11-13-phase3d-chat-pr-auto-approve/phase-brief-1.md
   (add REQ-16 and the head 9a0bdbe when it is used).

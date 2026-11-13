@@ -3,7 +3,7 @@
 - Merged to `main` by the owner's decision on 2026-11-12 so it can be
   self-hosted at home the same day, before any Phase 3 test or review.
 - Merged head: d1b24e2328a5d56431c15c5d47b2db82a32e048c.
-- Plan: docs/superpowers/plans/2026-11-12-phase3-behavior-engine.md
+- Plan: docs/plans/2026-11-12-phase3-behavior-engine.md
 - Ledger: .superpowers/sdd/2026-11-12-phase3-behavior-engine/progress.md
 - Brief for Tester and Reviewer: .superpowers/sdd/2026-11-12-phase3-behavior-engine/phase-brief-1.md
 

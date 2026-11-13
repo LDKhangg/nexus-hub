@@ -14,8 +14,8 @@ permissions:
   - { action: edit, resource: "*_test.go", effect: deny }
   - { action: edit, resource: "*/testdata/*", effect: deny }
   - { action: edit, resource: "docs/product/PCC-001.md", effect: deny }
-  - { action: edit, resource: "TESTER.md", effect: deny }
-  - { action: edit, resource: "REVIEWER.md", effect: deny }
+  - { action: edit, resource: "docs/agents/tester.md", effect: deny }
+  - { action: edit, resource: "docs/agents/reviewer.md", effect: deny }
   - { action: edit, resource: "AGENTS.md", effect: deny }
   - { action: edit, resource: ".opencode/*", effect: deny }
   - { action: shell, resource: "git status *", effect: allow }

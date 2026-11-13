@@ -214,7 +214,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | NFR-031 | Health/readiness endpoints. | 3 | PENDING |  |
 | NFR-032 | Có cảnh báo hoặc notification cho stuck/failed workflows. | 12 | PENDING |  |
 | NFR-033 | Có README. | 3 | PENDING |  |
-| NFR-034 | Có architecture documentation. | every | IN_PROGRESS | ARCHITECTURE.md predates PCC; ROADMAP.md added |
+| NFR-034 | Có architecture documentation. | every | IN_PROGRESS | docs/architecture.md predates PCC; ROADMAP.md added |
 | NFR-035 | Có database migrations. | 3 | IN_PROGRESS | goose migrations 00001–00003 |
 | NFR-036 | Có OpenAPI hoặc tài liệu API tương đương. | 11 | PENDING |  |
 | NFR-037 | Có automated tests. | 3 | IN_PROGRESS | Go tests exist; CI missing (P3) |
