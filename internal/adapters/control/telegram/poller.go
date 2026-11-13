@@ -189,13 +189,16 @@ func (p *Poller) skip(skipped map[string]string, t PollTarget, reason string) {
 	log.Printf("telegram poll: not polling workspace=%s integration=%s reason=%s", t.WorkspaceID, t.IntegrationID, reason)
 }
 
-// poll is one integration's loop. It removes a webhook once, only when
-// getUpdates reports a conflict, and backs off (doubling, MinBackoff to
+// poll is one integration's loop. It removes a webhook only when getUpdates
+// reports a conflict (retrying a failed removal on the next conflict), and
+// backs off (doubling, MinBackoff to
 // MaxBackoff, or the server's retry_after) on failures.
 func (p *Poller) poll(ctx context.Context, t PollTarget) {
 	var offset int64
 	var backoff time.Duration
 	webhookRemoved := false
+	var panicID int64 // update whose handler last panicked
+	panicCount := 0   // panics in a row on panicID
 	timeoutSec := int(p.s.PollTimeout / time.Second)
 	fail := func(retryAfter time.Duration) {
 		if backoff == 0 {
@@ -221,21 +224,26 @@ func (p *Poller) poll(ctx context.Context, t PollTarget) {
 				return
 			}
 			code := ErrorCode(err)
+			after := retryAfter(err)
 			if code == "conflict" && !webhookRemoved {
-				webhookRemoved = true
-				if derr := p.api.DeleteWebhook(ctx, t.WorkspaceID, t.TokenRef); derr == nil {
+				// The flag is set only after a successful delete, so a
+				// failed one (429, 5xx, transport) is tried again on the
+				// next conflict after the backoff.
+				derr := p.api.DeleteWebhook(ctx, t.WorkspaceID, t.TokenRef)
+				if derr == nil {
+					webhookRemoved = true
 					log.Print("telegram: webhook removed for polling")
 					continue
-				} else if ctx.Err() == nil {
-					log.Printf("telegram poll: removing webhook failed integration=%s code=%s", t.IntegrationID, ErrorCode(derr))
+				}
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("telegram poll: removing webhook failed integration=%s code=%s", t.IntegrationID, ErrorCode(derr))
+				if da := retryAfter(derr); da > after {
+					after = da
 				}
 			}
 			log.Printf("telegram poll: getUpdates failed integration=%s code=%s", t.IntegrationID, code)
-			var de *relay.DeliveryError
-			var after time.Duration
-			if errors.As(err, &de) {
-				after = de.RetryAfter
-			}
 			fail(after)
 			continue
 		}
@@ -248,7 +256,22 @@ func (p *Poller) poll(ctx context.Context, t PollTarget) {
 			if id < offset {
 				continue
 			}
-			status, err := p.handler.HandleUpdate(ctx, t.IntegrationID, raw)
+			status, panicked, err := p.handle(ctx, t.IntegrationID, raw)
+			if panicked {
+				if id != panicID {
+					panicID, panicCount = id, 0
+				}
+				panicCount++
+				log.Printf("telegram poll: update deferred integration=%s update=%d code=handler_panic", t.IntegrationID, id)
+				if panicCount >= maxUpdatePanics {
+					log.Printf("telegram poll: update_skipped_after_panics integration=%s update=%d", t.IntegrationID, id)
+					panicID, panicCount = 0, 0
+					offset = id + 1
+					continue
+				}
+				deferred = true
+				break
+			}
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -268,6 +291,33 @@ func (p *Poller) poll(ctx context.Context, t PollTarget) {
 		}
 		backoff = 0
 	}
+}
+
+// maxUpdatePanics is how many handler panics on one update_id the poller
+// tolerates before it skips that update, so one poisoned update can never
+// crash-loop the hub or stall the integration forever.
+const maxUpdatePanics = 3
+
+// handle calls the handler and turns a panic into panicked=true, so a bug
+// in one update's handling never kills the process. The panic value is not
+// logged: it may carry message text.
+func (p *Poller) handle(ctx context.Context, integrationID string, raw []byte) (status string, panicked bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			status, panicked, err = "", true, nil
+		}
+	}()
+	status, err = p.handler.HandleUpdate(ctx, integrationID, raw)
+	return status, false, err
+}
+
+// retryAfter is the server's retry_after on a delivery error, else 0.
+func retryAfter(err error) time.Duration {
+	var de *relay.DeliveryError
+	if errors.As(err, &de) {
+		return de.RetryAfter
+	}
+	return 0
 }
 
 // rawUpdateID reads update_id; 0 when it is missing or malformed.
