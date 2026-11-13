@@ -22,11 +22,15 @@ const (
 	MaxTopics            = 50
 	MaxReadBytes         = 1 << 20
 	MaxRunTokens         = 1000000
+	MinVerdictLabels     = 2
+	MaxVerdictLabels     = 8
 
 	DefaultConfidenceThreshold = 0.8
 	DefaultAskExpiryHours      = 72
 	DefaultMaxItems            = 30
 	DefaultMaxSteps            = 8
+	// DefaultVerdictMinConfidence is verdict.min_confidence when absent.
+	DefaultVerdictMinConfidence = 0.8
 )
 
 var (
@@ -38,6 +42,8 @@ var (
 	userIDRe      = regexp.MustCompile(`^[0-9]{1,20}$`)
 	commandRe     = regexp.MustCompile(`^/[a-z][a-z0-9_]{0,31}$`)
 	blockNameRe   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _.-]{0,62}$`)
+	// VerdictLabelRe is a verdict label: a short snake_case word.
+	VerdictLabelRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
 	// clickUpTokenRe adds ClickUp personal tokens to the shared secret
 	// patterns.
 	clickUpTokenRe = regexp.MustCompile(`\bpk_[0-9]+_[A-Za-z0-9]{20,}`)
@@ -226,7 +232,8 @@ func validate(doc Doc, vars map[string]string, allowed map[string]bool, env *val
 		}
 	}
 
-	c.checkActions(doc.Actions, doc.Triggers, sub)
+	labels := c.checkVerdict(doc)
+	c.checkActions(doc.Actions, doc.Triggers, doc.Verdict != nil, labels, sub)
 
 	if h := doc.AskExpiryHours; h != nil && (*h < 1 || *h > 720) {
 		c.add("ask_expiry_hours", "must be between 1 and 720")
@@ -254,6 +261,37 @@ func validate(doc Doc, vars map[string]string, allowed map[string]bool, env *val
 		}
 	}
 	return c.errs
+}
+
+// checkVerdict checks the verdict block and returns its valid labels (nil
+// when the behavior has no verdict).
+func (c *checker) checkVerdict(doc Doc) map[string]bool {
+	v := doc.Verdict
+	if v == nil {
+		return nil
+	}
+	if strings.TrimSpace(doc.Instructions) == "" {
+		c.add("verdict", "needs instructions: the verdict comes from the model step")
+	}
+	if n := len(v.Labels); n < MinVerdictLabels || n > MaxVerdictLabels {
+		c.add("verdict.labels", "must have %d to %d labels", MinVerdictLabels, MaxVerdictLabels)
+	}
+	labels := map[string]bool{}
+	for i, l := range v.Labels {
+		p := fmt.Sprintf("verdict.labels[%d]", i)
+		switch {
+		case !VerdictLabelRe.MatchString(l):
+			c.add(p, "must be 1-32 of a-z, 0-9 or _, starting with a letter")
+		case labels[l]:
+			c.add(p, "duplicate label")
+		default:
+			labels[l] = true
+		}
+	}
+	if m := v.MinConfidence; m != nil && (*m < 0 || *m > 1) {
+		c.add("verdict.min_confidence", "must be between 0 and 1")
+	}
+	return labels
 }
 
 // checkVars checks var declarations and values, and returns the effective
@@ -351,9 +389,9 @@ type subFunc func(path, s string) (string, bool)
 var filterAllowed = map[string]map[string]bool{
 	TriggerTaskStatusChanged: {"to_status": true, "assignee": true, "list": true},
 	TriggerTaskAssigned:      {"assignee": true, "list": true},
-	TriggerCommentAdded:      {"list": true, "from": true},
+	TriggerCommentAdded:      {"list": true, "from": true, "mentions": true},
 	TriggerTelegramCommand:   {},
-	TriggerChatMessage:       {"channel": true, "from": true, "has_pr_link": true, "senders": true},
+	TriggerChatMessage:       {"channel": true, "from": true, "has_pr_link": true, "senders": true, "mentions": true},
 }
 
 // runActionsOnly reports whether a behavior may skip the model step: every
@@ -395,8 +433,9 @@ func (c *checker) checkTriggers(ts []TriggerDoc, sub subFunc) {
 		used := map[string]bool{
 			"to_status": len(f.ToStatus) > 0, "assignee": f.Assignee != "", "list": len(f.List) > 0, "from": f.From != "",
 			"channel": len(f.Channel) > 0, "has_pr_link": f.HasPRLink != nil, "senders": len(f.Senders) > 0,
+			"mentions": f.Mentions != "",
 		}
-		for _, k := range []string{"to_status", "assignee", "list", "from", "channel", "has_pr_link", "senders"} {
+		for _, k := range []string{"to_status", "assignee", "list", "from", "channel", "has_pr_link", "senders", "mentions"} {
 			if used[k] && !allowed[k] {
 				c.add(p+".filter."+k, "not a filter of %s", t.Type)
 			}
@@ -429,9 +468,20 @@ func (c *checker) checkTriggers(ts []TriggerDoc, sub subFunc) {
 				c.add(fp, "must be %q or %q", FromAny, FromOthers)
 			}
 		}
+		mentionsMe := false
+		if allowed["mentions"] && f.Mentions != "" {
+			fp := p + ".filter.mentions"
+			if v, ok := sub(fp, f.Mentions); ok {
+				if v == MentionsMe {
+					mentionsMe = true
+				} else {
+					c.add(fp, "must be %q", MentionsMe)
+				}
+			}
+		}
 		if allowed["channel"] {
-			if len(f.Channel) > 2 {
-				c.add(p+".filter.channel", "must have at most 2 values")
+			if len(f.Channel) > 3 {
+				c.add(p+".filter.channel", "must have at most 3 values")
 			}
 			seen := map[string]bool{}
 			for j, s := range f.Channel {
@@ -439,10 +489,14 @@ func (c *checker) checkTriggers(ts []TriggerDoc, sub subFunc) {
 				v, ok := sub(fp, s)
 				switch {
 				case !ok:
-				case v != ChannelDM && v != ChannelGroupDM:
-					c.add(fp, "must be %q or %q", ChannelDM, ChannelGroupDM)
+				case v != ChannelDM && v != ChannelGroupDM && v != ChannelChannel:
+					c.add(fp, "must be %q, %q or %q", ChannelDM, ChannelGroupDM, ChannelChannel)
 				case seen[v]:
 					c.add(fp, "duplicate channel")
+				case v == ChannelChannel && !mentionsMe:
+					// A channel trigger without mentions: me would process
+					// every channel message.
+					c.add(fp, "%q needs the filter mentions: %s", ChannelChannel, MentionsMe)
 				}
 				seen[v] = true
 			}
@@ -517,7 +571,7 @@ func (c *checker) checkReads(rs []ReadDoc, allowed map[string]bool) {
 	}
 }
 
-func (c *checker) checkActions(actions map[string][]ActionDoc, triggers []TriggerDoc, sub subFunc) {
+func (c *checker) checkActions(actions map[string][]ActionDoc, triggers []TriggerDoc, hasVerdict bool, labels map[string]bool, sub subFunc) {
 	allChat, allPRLink := len(triggers) > 0, len(triggers) > 0
 	for _, t := range triggers {
 		if t.Type != TriggerChatMessage {
@@ -556,6 +610,7 @@ func (c *checker) checkActions(actions map[string][]ActionDoc, triggers []Trigge
 			}
 			if run {
 				c.checkRunAction(p, i, len(list), a, allChat, allPRLink)
+				c.checkWhen(p, a, hasVerdict, labels)
 			} else {
 				if runOnlyActions[a.Type] {
 					c.add(p+".type", "%s is allowed only in actions.%s", a.Type, ActionsRun)
@@ -565,6 +620,9 @@ func (c *checker) checkActions(actions map[string][]ActionDoc, triggers []Trigge
 				}
 				if a.On != "" {
 					c.add(p+".on", "is allowed only in actions.%s", ActionsRun)
+				}
+				if a.When != nil {
+					c.add(p+".when", "is allowed only in actions.%s", ActionsRun)
 				}
 			}
 			for _, k := range sortedParamKeys(a.Params) {
@@ -637,6 +695,26 @@ func (c *checker) checkRunAction(p string, i, n int, a ActionDoc, allChat, allPR
 	}
 	if a.Type == ActionPRApprove && allChat && !allPRLink {
 		c.add(p+".type", "%s needs has_pr_link: true on every trigger", ActionPRApprove)
+	}
+}
+
+// checkWhen checks the verdict condition of a run-level action. labels
+// holds the valid labels of the behavior's verdict block.
+func (c *checker) checkWhen(p string, a ActionDoc, hasVerdict bool, labels map[string]bool) {
+	w := a.When
+	if w == nil {
+		return
+	}
+	wp := p + ".when.verdict"
+	switch {
+	case a.Type == ActionTelegramMessage:
+		c.add(p+".when", "%s always runs and reports every outcome", ActionTelegramMessage)
+	case !hasVerdict:
+		c.add(p+".when", "needs a verdict block with labels")
+	case w.Verdict == "":
+		c.add(wp, "is required")
+	case !labels[w.Verdict]:
+		c.add(wp, "must be one of verdict.labels")
 	}
 }
 

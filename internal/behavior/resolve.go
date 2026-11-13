@@ -32,6 +32,30 @@ type ResolvedDoc struct {
 	Model          string // empty: the profile or settings default
 	Language       string // empty: the profile language
 	Tone           string // empty: the profile tone
+	// Verdict is the behavior's verdict block with defaults applied; nil
+	// when the behavior declares none.
+	Verdict *VerdictSpec
+}
+
+// VerdictSpec is a resolved verdict block: the closed list of labels the
+// model step may return and the confidence a verdict needs to pass a
+// run-level action's When gate.
+type VerdictSpec struct {
+	Labels        []string
+	MinConfidence float64
+}
+
+// HasLabel reports whether label is one of the verdict's labels.
+func (v *VerdictSpec) HasLabel(label string) bool {
+	if v == nil {
+		return false
+	}
+	for _, l := range v.Labels {
+		if l == label {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolvedTrigger is one trigger with vars filled in.
@@ -48,6 +72,9 @@ type ResolvedTrigger struct {
 	Channels  []string
 	HasPRLink bool
 	Senders   []string
+	// Mentions is "" or MentionsMe: match only a comment or chat message
+	// that tags the owner (comment and chat triggers).
+	Mentions string
 }
 
 // ReadSpec is one allowed read tool. MaxBytes 0 means the executor default.
@@ -65,11 +92,20 @@ type AutonomyRules struct {
 }
 
 // ActionSpec is one allowed action with its parameters filled in. On is
-// "" or OnSuccessOfPrevious (run-level actions only).
+// "" or OnSuccessOfPrevious, and When is nil or the action's verdict
+// condition (both run-level actions only).
 type ActionSpec struct {
 	Type   string
 	Params map[string]string
 	On     string
+	When   *ActionWhen
+}
+
+// ActionWhen is a run-level action's verdict condition: the action runs only
+// when the run's verdict has the label Verdict with a confidence of at
+// least the behavior's VerdictSpec.MinConfidence.
+type ActionWhen struct {
+	Verdict string
 }
 
 // Budgets cap one run. MaxTokens 0 means the profile or settings default.
@@ -122,6 +158,7 @@ func Resolve(doc Doc, vars map[string]string) (ResolvedDoc, error) {
 			From: r(t.Filter.From), Command: r(t.Command), Args: append([]string(nil), t.Args...),
 			Channels: rl(t.Filter.Channel), Senders: rl(t.Filter.Senders),
 			HasPRLink: t.Filter.HasPRLink != nil && *t.Filter.HasPRLink,
+			Mentions:  r(t.Filter.Mentions),
 		}
 		if t.Type == TriggerChatMessage {
 			if rt.From == "" {
@@ -163,6 +200,9 @@ func Resolve(doc Doc, vars map[string]string) (ResolvedDoc, error) {
 				params["block"] = doc.Name
 			}
 			spec := ActionSpec{Type: a.Type, Params: params, On: a.On}
+			if a.When != nil {
+				spec.When = &ActionWhen{Verdict: a.When.Verdict}
+			}
 			if class == ActionsRun {
 				out.RunActions = append(out.RunActions, spec)
 				continue
@@ -189,6 +229,12 @@ func Resolve(doc Doc, vars map[string]string) (ResolvedDoc, error) {
 	}
 	if p := doc.Profile; p != nil {
 		out.Language, out.Tone = p.Language, p.Tone
+	}
+	if v := doc.Verdict; v != nil {
+		out.Verdict = &VerdictSpec{Labels: append([]string(nil), v.Labels...), MinConfidence: DefaultVerdictMinConfidence}
+		if v.MinConfidence != nil {
+			out.Verdict.MinConfidence = *v.MinConfidence
+		}
 	}
 	return out, nil
 }
