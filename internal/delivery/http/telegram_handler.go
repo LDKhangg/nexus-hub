@@ -173,18 +173,63 @@ func (h *TelegramHandler) Handle(c echo.Context) error {
 	if subtle.ConstantTimeCompare([]byte(given), []byte(want)) != 1 {
 		return h.reject(c, id, "wrong_secret")
 	}
+	switch status, err := h.process(ctx, integration, raw, "telegram webhook"); {
+	case err != nil:
+		return respond(http.StatusServiceUnavailable, "service unavailable")
+	case status == UpdateInvalid:
+		return respond(http.StatusBadRequest, "invalid update")
+	default:
+		return ok(status)
+	}
+}
+
+// Results of HandleUpdate (and the webhook's 200 status values).
+const (
+	UpdateQueued    = "queued"    // stored for the inbox worker
+	UpdateDuplicate = "duplicate" // this update_id was stored before
+	UpdateIgnored   = "ignored"   // not the owner's: no effect, nothing stored
+	UpdateInvalid   = "invalid"   // malformed: can never be stored
+)
+
+// ErrUpdateUnavailable means the update could not be handled now (storage,
+// lookup or staging failed); the caller keeps it and tries again.
+var ErrUpdateUnavailable = errors.New("telegram update: service unavailable")
+
+// HandleUpdate handles one raw Telegram update received by long polling
+// (getUpdates) for the Telegram control integration integrationID. After
+// the integration lookup it runs exactly the webhook's path (owner rule,
+// normalize, staging, people sighting, inbox insert deduplicated by
+// update_id). It returns one of the Update* results, or an error wrapping
+// ErrUpdateUnavailable when the update must be offered again later.
+func (h *TelegramHandler) HandleUpdate(ctx context.Context, integrationID string, raw []byte) (string, error) {
+	if !tenant.ValidUUID(integrationID) {
+		return "", ErrUpdateUnavailable
+	}
+	integration, err := h.integrations.LookupWebhookIntegration(ctx, integrationID)
+	if err != nil || tenant.ValidateTelegramControl(integration) != nil {
+		return "", ErrUpdateUnavailable
+	}
+	if len(raw) > maxBodyBytes {
+		return UpdateInvalid, nil
+	}
+	return h.process(ctx, integration, raw, "telegram poll")
+}
+
+// process is the shared part of the webhook and polling paths; label only
+// prefixes its log lines.
+func (h *TelegramHandler) process(ctx context.Context, integration tenant.WebhookIntegration, raw []byte, label string) (string, error) {
 	var upd tgUpdate
 	if json.Unmarshal(raw, &upd) != nil || upd.UpdateID <= 0 {
-		return respond(http.StatusBadRequest, "invalid update")
+		return UpdateInvalid, nil
 	}
 	u, owner, err := h.normalize(ctx, integration.WorkspaceID, upd)
 	if err != nil {
-		return respond(http.StatusServiceUnavailable, "service unavailable")
+		return "", ErrUpdateUnavailable
 	}
 	if !owner {
 		n := h.ignored.Add(1)
-		log.Printf("telegram webhook: non-owner update ignored integration=%s chat=%d count=%d", id, u.ChatID, n)
-		return ok("ignored")
+		log.Printf("%s: non-owner update ignored integration=%s chat=%d count=%d", label, integration.ID, u.ChatID, n)
+		return UpdateIgnored, nil
 	}
 	if directory, ok := h.inbox.(people.Resolver); ok {
 		if from := telegramSender(upd); from != nil {
@@ -203,12 +248,12 @@ func (h *TelegramHandler) Handle(c echo.Context) error {
 	u.WorkspaceID, u.IntegrationID, u.UpdateID = integration.WorkspaceID, integration.ID, upd.UpdateID
 	created, err := h.inbox.RecordUpdate(ctx, integration.WorkspaceID, u)
 	if err != nil {
-		return respond(http.StatusServiceUnavailable, "service unavailable")
+		return "", ErrUpdateUnavailable
 	}
 	if !created {
-		return ok("duplicate")
+		return UpdateDuplicate, nil
 	}
-	return ok("queued")
+	return UpdateQueued, nil
 }
 
 func telegramSender(upd tgUpdate) *tgUser {

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/control/telegram"
 	githubapi "github.com/LDKhangg/nexus-hub/internal/adapters/github"
@@ -23,6 +24,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/behavior/chatpoll"
+	httpdelivery "github.com/LDKhangg/nexus-hub/internal/delivery/http"
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/memory"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
@@ -373,6 +375,60 @@ func (c chatPollTargets) workspaceTargets(ctx context.Context, workspaceID strin
 			out = append(out, chatpoll.Target{WorkspaceID: workspaceID, IntegrationID: in.ID, TeamID: team, TokenRef: cfg.ClickUpTokenRef})
 		}
 		if len(list) < chatPollPage {
+			return out, nil
+		}
+	}
+}
+
+// telegramPollTimeout is the HTTP timeout of getUpdates calls: longer than
+// the long-poll wait so an idle poll is never cut off.
+const telegramPollTimeout = telegram.DefaultPollTimeout + 20*time.Second
+
+// buildTelegramPoller wires Telegram long polling: every enabled Telegram
+// control integration, the bot token reference the messenger uses, a
+// Telegram client allowed only the API hosts, and the webhook's handler.
+func buildTelegramPoller(workspaces *storage.WorkspaceRepository, integrations *storage.IntegrationRepository, resolver *secrets.Resolver, handler *httpdelivery.TelegramHandler) *telegram.Poller {
+	api := telegram.NewClient(netguard.Client(telegramPollTimeout, netguard.DefaultHosts), resolver)
+	return telegram.NewPoller(telegramPollTargets{workspaces: workspaces, integrations: integrations}, api, handler, telegram.PollerSettings{})
+}
+
+// telegramPollTargets lists, across all workspaces, the enabled Telegram
+// control integrations with a valid bot token reference (the same check
+// as telegram.ControlTokenRef).
+type telegramPollTargets struct {
+	workspaces   *storage.WorkspaceRepository
+	integrations *storage.IntegrationRepository
+}
+
+func (c telegramPollTargets) TelegramPollTargets(ctx context.Context) ([]telegram.PollTarget, error) {
+	var out []telegram.PollTarget
+	for off := int32(0); ; off += chatPollPage {
+		wss, err := c.workspaces.List(ctx, chatPollPage, off)
+		if err != nil {
+			return nil, err
+		}
+		for _, ws := range wss {
+			for ioff := int32(0); ; ioff += chatPollPage {
+				list, err := c.integrations.List(ctx, ws.ID, chatPollPage, ioff)
+				if err != nil {
+					return nil, err
+				}
+				for _, in := range list {
+					if !telegramControl(in) {
+						continue
+					}
+					cfg, err := tenant.ParseTelegramTargetConfig(in.Config)
+					if err != nil {
+						continue
+					}
+					out = append(out, telegram.PollTarget{WorkspaceID: ws.ID, IntegrationID: in.ID, TokenRef: cfg.BotTokenRef})
+				}
+				if len(list) < chatPollPage {
+					break
+				}
+			}
+		}
+		if len(wss) < chatPollPage {
 			return out, nil
 		}
 	}

@@ -130,6 +130,16 @@ func run() error {
 		return errors.New("workspace repository startup failed")
 	}
 	chatPoller := buildChatPoller(s, behaviors, workspaces, integrations, ag.known, resolver, messenger)
+	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller}
+	// Telegram updates arrive by webhook, or by long polling when the hub
+	// has no public URL (telegram_mode, see settings.TelegramPolling). Both
+	// paths end in the same handler.
+	if s.TelegramPolling() {
+		log.Print("telegram: receiving updates by long polling")
+		services = append(services, buildTelegramPoller(workspaces, integrations, resolver, telegramHandler))
+	} else {
+		log.Print("telegram: receiving updates by webhook")
+	}
 	handler := httpdelivery.NewWebhookHandler(integrations, httpdelivery.NewVerifiedParserFactory(resolver), relay.NewNoticeService(notices))
 	e := echo.New()
 	e.HideBanner = true
@@ -141,7 +151,7 @@ func run() error {
 	e.POST("/webhook/:source/:integrationID", handler.HandleWebhook)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runServices(ctx, e, []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller}, s.ListenAddr, shutdownTimeout)
+	return runServices(ctx, e, services, s.ListenAddr, shutdownTimeout)
 }
 
 type serviceWorker interface{ Run(context.Context) error }

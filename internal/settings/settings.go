@@ -49,6 +49,7 @@ type Settings struct {
 	OpencodeCLITimeout                    time.Duration // one opencode call
 	OpencodeCLIConcurrency                int64         // opencode calls at once
 	TelegramAssistant                     bool          // owner free text goes to the LLM assistant
+	TelegramMode                          string        // auto | webhook | poll: how Telegram updates arrive
 }
 
 // Store reads every stored setting.
@@ -131,6 +132,7 @@ var specs = map[string]spec{
 	"opencode_cli_timeout":       {kind: kDuration, def: 120 * time.Second, min: 5, max: 1800, set: func(s *Settings, v any) { s.OpencodeCLITimeout = v.(time.Duration) }},
 	"opencode_cli_concurrency":   {kind: kInt, def: int64(1), min: 1, max: 4, set: func(s *Settings, v any) { s.OpencodeCLIConcurrency = v.(int64) }},
 	"telegram_assistant":         {kind: kBool, def: true, set: func(s *Settings, v any) { s.TelegramAssistant = v.(bool) }},
+	"telegram_mode":              {kind: kEnum, def: TelegramModeAuto, enum: []string{TelegramModeAuto, TelegramModeWebhook, TelegramModePoll}, set: func(s *Settings, v any) { s.TelegramMode = v.(string) }},
 }
 
 // modelKeys are the settings that hold a model id, in report order.
@@ -142,6 +144,25 @@ const (
 	LLMProviderClaudeCLI   = "claude_cli"
 	LLMProviderOpencodeCLI = "opencode_cli"
 )
+
+// Telegram update delivery values of telegram_mode.
+const (
+	TelegramModeAuto    = "auto"    // poll when public_base_url is empty, otherwise webhook
+	TelegramModeWebhook = "webhook" // Telegram posts to the webhook only
+	TelegramModePoll    = "poll"    // the hub long-polls getUpdates
+)
+
+// TelegramPolling reports whether the hub receives Telegram updates by long
+// polling: telegram_mode poll, or auto with no public_base_url.
+func (s Settings) TelegramPolling() bool {
+	switch s.TelegramMode {
+	case TelegramModePoll:
+		return true
+	case TelegramModeWebhook:
+		return false
+	}
+	return s.PublicBaseURL == ""
+}
 
 // maxModelIDLen bounds any model id.
 const maxModelIDLen = 200

@@ -266,6 +266,14 @@ nh telegram webhook set    --workspace-id $WS --integration-id $TG
 nh telegram webhook status --workspace-id $WS --integration-id $TG   # url_matches: true
 ```
 
+At home without a tunnel (`public_base_url` empty) you can skip the webhook:
+with `telegram_mode` `auto` (the default) the hub polls Telegram itself
+(`getUpdates`), and the log says `telegram: receiving updates by long
+polling`. If a webhook is still set, the hub removes it once and logs
+`telegram: webhook removed for polling`. To force a mode:
+`nh settings set telegram_mode webhook` (or `poll`), then restart the hub.
+Use `webhook` only when Telegram can reach `public_base_url`.
+
 Stop the machine from sleeping. For example, set `HandleLidSwitch=ignore` in
 `/etc/systemd/logind.conf`, or turn sleep off in the desktop power settings.
 
