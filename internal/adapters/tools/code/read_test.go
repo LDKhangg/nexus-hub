@@ -234,8 +234,9 @@ func TestHardening_FsmonitorNotExecuted(t *testing.T) {
 	ts := NewReadTools(newTestRunner(t), reposDir)
 	_, err := run(t, findTool(t, ts, "git_status"), grant(true, ""), `{"repo":"acme/app"}`)
 	wantCode(t, err, "unsafe_repo_config")
-	_, err = run(t, findTool(t, ts, "git_log"), grant(true, ""), `{"repo":"acme/app"}`)
-	wantCode(t, err, "unsafe_repo_config")
+	// git_log does not read the worktree and hardenedArgs neutralises both
+	// fsmonitor and pager, so it remains safe and usable.
+	mustOK(t, findTool(t, ts, "git_log"), grant(true, ""), `{"repo":"acme/app"}`)
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("fsmonitor/pager executed")
 	}
