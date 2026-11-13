@@ -122,6 +122,12 @@ type RunWorkerDeps struct {
 	// ChatMessages reads the triggering message of a chat-triggered run
 	// for its model step; nil reads none.
 	ChatMessages ChatMessageReader
+	// Comments reads the triggering comment of a comment-triggered run
+	// for its model step; nil reads none.
+	Comments CommentReader
+	// Members gives display names of ClickUp users for the triggering
+	// message's context; nil gives none.
+	Members MemberDirectory
 }
 
 // ChatMessageReader reads the text of one ClickUp Chat message at run time
@@ -134,8 +140,8 @@ type ChatMessageReader interface {
 	ChatMessageText(ctx context.Context, workspaceID, tokenRef, teamID, channelID, messageID string) (string, error)
 }
 
-// ChatReadError is a safe ChatMessageReader failure: a code and whether a
-// later attempt may succeed.
+// ChatReadError is a safe ChatMessageReader or CommentReader failure: a
+// code and whether a later attempt may succeed.
 type ChatReadError struct {
 	Code      string
 	Transient bool
@@ -408,6 +414,12 @@ func (w *RunWorker) attempt(ctx context.Context, rc *RunContext) (*runOutcome, e
 		}
 		return w.noVerdict(ctx, rc, out)
 	}
+	if out := w.readTriggerComment(ctx, col, cfg.ClickUpTokenRef, cfg.ClickUpTeamID, run, trig); out != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return w.noVerdict(ctx, rc, out)
+	}
 	snap, err := col.collect(ctx, rc.Doc.Reads)
 	var re *readError
 	if errors.As(err, &re) {
@@ -488,7 +500,17 @@ func (w *RunWorker) readTriggerMessage(ctx context.Context, col *collector, toke
 		col.note(ChatMessageTool, t.MessageID, NoteTruncated)
 	}
 	base := chatSource(t.MessageID)
-	meta := []string{"message_id: " + t.MessageID, "sender_id: " + t.SenderID, "channel_type: " + t.ChannelType}
+	meta := []string{"message_id: " + t.MessageID, "sender_id: " + t.SenderID}
+	if name := w.memberName(ctx, run.WorkspaceID, tokenRef, t.TeamID, t.SenderID); name != "" {
+		meta = append(meta, "sender_name: "+name)
+	}
+	meta = append(meta, "channel_type: "+t.ChannelType)
+	if name := CleanDisplayName(t.ChannelName); name != "" {
+		meta = append(meta, "channel_name: "+name)
+	}
+	for i := range meta {
+		meta[i] = neutralizeDelimiters(meta[i])
+	}
 	frags := []Fragment{
 		{Source: base + "#meta", Tool: ChatMessageTool, Lines: meta},
 		{Source: base + "#text", Tool: ChatMessageTool, Lines: lines(text)},
@@ -543,12 +565,17 @@ func (w *RunWorker) saveVerdict(ctx context.Context, rc *RunContext, v *RunVerdi
 }
 
 // verdictSource is the context fragment that holds the triggering content
-// of the run (the chat message text), "" when there is none.
+// of the run (the chat message or comment text), "" when there is none.
 func verdictSource(rc *RunContext) string {
-	if rc.Trigger.MessageID == "" {
+	var src string
+	switch {
+	case rc.Trigger.MessageID != "":
+		src = chatSource(rc.Trigger.MessageID) + "#text"
+	case rc.Trigger.CommentID != "":
+		src = commentSource(rc.Trigger.CommentID) + "#text"
+	default:
 		return ""
 	}
-	src := chatSource(rc.Trigger.MessageID) + "#text"
 	if rc.Context.Fragment(src) == nil {
 		return ""
 	}

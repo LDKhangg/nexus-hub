@@ -48,7 +48,11 @@ type AgentConfig struct {
 	ConfidenceThreshold float64
 	Persona             string
 	ClickUpTokenRef     string
-	Tools               ToolPolicyConfig
+	// ClickUpTeamID is the integration's clickup_team_id (the ClickUp
+	// workspace ID), "" when absent or not numeric. It is informational:
+	// a missing or invalid value never fails the config.
+	ClickUpTeamID string
+	Tools         ToolPolicyConfig
 }
 
 const (
@@ -133,7 +137,11 @@ func agentErr(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", errAgentConfig, fmt.Sprintf(format, args...))
 }
 
-// ParseAgentConfig parses source["agent"]. known maps every registered tool
+// clickUpTeamIDRe accepts a ClickUp workspace (team) ID.
+var clickUpTeamIDRe = regexp.MustCompile(`^[0-9]{1,20}$`)
+
+// ParseAgentConfig parses source["agent"] (and reads source's
+// clickup_team_id into ClickUpTeamID). known maps every registered tool
 // name to its tier; tool names outside it are rejected.
 func ParseAgentConfig(source map[string]any, known map[string]Tier) (AgentConfig, error) {
 	c := AgentConfig{
@@ -144,6 +152,9 @@ func ParseAgentConfig(source map[string]any, known map[string]Tier) (AgentConfig
 			Accounts:        map[string]GitHubAccount{},
 			Repos:           map[string]RepoGrant{},
 		},
+	}
+	if team, ok := source["clickup_team_id"].(string); ok && clickUpTeamIDRe.MatchString(strings.TrimSpace(team)) {
+		c.ClickUpTeamID = strings.TrimSpace(team)
 	}
 	raw, present := source["agent"]
 	if !present || raw == nil {

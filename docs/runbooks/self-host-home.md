@@ -561,11 +561,13 @@ your digest mode (`nh profile set --digest per_run` to get it at once).
 
 1. In a Chat channel, write a message that tags you and asks something.
    Within about one poll interval plus the model call, Telegram shows the
-   report: who, which channel, what they ask and a next step. `/trace
+   report: who (their ClickUp name), which channel, what they ask, a next
+   step and a link to the channel. `/trace
    clickup:chat:<message id>` or `/trace #<run id>` shows the run, with the
    `Kênh` and `Nhắc tới` lines.
 2. Comment on a task and tag yourself (`@you`) with a question. The report
-   names the task. `/trace <task id>` shows the run (the trigger
+   names the commenter and the task, says what the comment asks and links
+   the task. `/trace <task id>` shows the run (the trigger
    `clickup.comment_added`).
 3. A message or comment without your tag, and one you write yourself, start
    no run (`nh runs --workspace-id $WS --behavior mention-report`).

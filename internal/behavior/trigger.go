@@ -62,6 +62,9 @@ type Event struct {
 	// ChannelName is the chat channel's name (channel messages), for
 	// reports; never message text.
 	ChannelName string
+	// CommentID is the ClickUp ID of the comment (TriggerCommentAdded),
+	// from the source's trusted comment identity; never comment text.
+	CommentID string
 }
 
 // MaxTaggedUserIDs caps Event.TaggedUserIDs.
@@ -96,6 +99,9 @@ func EventFromNormalized(e domain.NormalizedEvent) (Event, bool) {
 		}
 	case domain.EventCommandPosted:
 		ev.Type = TriggerCommentAdded
+		if id, ok := strings.CutPrefix(e.ExternalMessageID, "comment:"); ok && commentIDRe.MatchString(id) {
+			ev.CommentID = id
+		}
 		for _, id := range strings.Split(e.Metadata["tagged_user_ids"], ",") {
 			if len(ev.TaggedUserIDs) == MaxTaggedUserIDs {
 				break
@@ -151,6 +157,10 @@ type TriggerData struct {
 	Mentioned bool `json:"mentioned,omitempty"`
 	// ChannelName is the chat channel's name (channel messages).
 	ChannelName string `json:"channel_name,omitempty"`
+	// CommentID is the ClickUp ID of the triggering comment
+	// (TriggerCommentAdded): the executor reads the comment's text at run
+	// time. The text is never stored here.
+	CommentID string `json:"comment_id,omitempty"`
 }
 
 // DecodeTriggerData reads a run's stored trigger data.
@@ -324,6 +334,9 @@ func matchTrigger(t ResolvedTrigger, ev Event, owner string) (TriggerData, bool)
 			}
 		}
 		data.Mentioned = ev.Mentioned
+		if commentIDRe.MatchString(ev.CommentID) {
+			data.CommentID = ev.CommentID
+		}
 	case TriggerChatMessage:
 		if !matchChat(t, ev, owner) {
 			return TriggerData{}, false

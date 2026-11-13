@@ -261,6 +261,9 @@ func (e *Engine) flushBatch(ctx context.Context, b *DigestBatch) (bool, error) {
 		}
 		sb.WriteString("\n" + head + " (" + t.runRef(sec.rc.Doc.Name, sec.rc.Run.ID) + ")\n")
 		sb.WriteString(summaryLines(t, sec.items, sec.withStatus, per))
+		if link := RunLink(sec.rc); link != "" {
+			sb.WriteString(link + "\n")
+		}
 	}
 	msg := OutMessage{Text: capRunes(strings.TrimSpace(sb.String()), maxTelegramRunes)}
 	if total == 1 {

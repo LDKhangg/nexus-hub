@@ -1,6 +1,8 @@
 // Package clickupchat is a small stdlib client for the ClickUp Chat API v3:
 // it lists channels with new messages, reads their messages, and lists and
-// adds message reactions. The caller passes the ClickUp token on every
+// adds message reactions. For behavior run context it also reads a task's
+// comments and the token's workspace members through the API v2 (v2.go).
+// The caller passes the ClickUp token on every
 // call; the client never stores it. Tokens, headers, request and response
 // bodies and message content never appear in errors or logs: an error
 // carries only a safe code.
