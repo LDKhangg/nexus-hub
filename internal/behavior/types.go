@@ -213,7 +213,10 @@ type Run struct {
 	Snapshot      json.RawMessage
 	// Context is the context snapshot the model saw (see ContextSnapshot);
 	// empty until the run collected its context.
-	Context    json.RawMessage
+	Context json.RawMessage
+	// RunActions holds the outcomes of the run's run-level actions
+	// (RunActionsResult); empty until the first one finished.
+	RunActions json.RawMessage
 	UndoneAt   *time.Time
 	RunAt      time.Time
 	StartedAt  *time.Time

@@ -67,6 +67,10 @@ var actionParams = map[string]map[string]bool{
 // runActionTypes lists the action types allowed in actions.run.
 var runActionTypes = map[string]bool{ActionPRApprove: true, ActionChatReaction: true, ActionTelegramMessage: true}
 
+// taskActions lists the class action types that write to the run's
+// ClickUp task; a behavior whose triggers are all chat messages has none.
+var taskActions = map[string]bool{ActionClickUpComment: true, ActionDescriptionBlock: true, ActionSetStatus: true, ActionUnassign: true}
+
 // runOnlyActions lists the action types allowed only in actions.run.
 var runOnlyActions = map[string]bool{ActionPRApprove: true, ActionChatReaction: true}
 
@@ -555,6 +559,9 @@ func (c *checker) checkActions(actions map[string][]ActionDoc, triggers []Trigge
 			} else {
 				if runOnlyActions[a.Type] {
 					c.add(p+".type", "%s is allowed only in actions.%s", a.Type, ActionsRun)
+				}
+				if allChat && taskActions[a.Type] {
+					c.add(p+".type", "%s needs a ClickUp task, and %s triggers have none", a.Type, TriggerChatMessage)
 				}
 				if a.On != "" {
 					c.add(p+".on", "is allowed only in actions.%s", ActionsRun)

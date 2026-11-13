@@ -199,11 +199,8 @@ func (d ResolvedDoc) ActionsFor(c Class) []ActionSpec { return d.Actions[c] }
 // HasModelStep reports whether a run of the behavior calls the model. A
 // behavior without instructions (allowed only for chat-triggered behaviors
 // that have only run-level actions) skips the model step and runs its
-// run-level actions directly.
-//
-// TODO(T5): the run executor must check HasModelStep and, when false,
-// skip context collection and the model call and go straight to
-// RunActions.
+// run-level actions directly: the run executor then collects no context,
+// calls no model and stores no items.
 func (d ResolvedDoc) HasModelStep() bool { return strings.TrimSpace(d.Instructions) != "" }
 
 // decodeStored decodes a stored document and its var values.

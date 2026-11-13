@@ -46,6 +46,9 @@ type Event struct {
 	ChannelType string
 	// PRs are the pull requests linked from the message (ExtractPRRefs).
 	PRs []PRRef
+	// TeamID is the ClickUp workspace (team) ID of the source integration
+	// the message was read from.
+	TeamID string
 }
 
 // EventFromNormalized maps a normalized ClickUp event to a trigger event.
@@ -115,6 +118,10 @@ type TriggerData struct {
 	ChannelID   string  `json:"channel_id,omitempty"`
 	ChannelType string  `json:"channel_type,omitempty"` // "dm" or "group_dm"
 	PRs         []PRRef `json:"prs,omitempty"`
+	// TeamID is the ClickUp workspace (team) ID of the source integration
+	// the chat poller read the message from: the target workspace of
+	// run-level ClickUp Chat actions.
+	TeamID string `json:"team_id,omitempty"`
 }
 
 // DecodeTriggerData reads a run's stored trigger data.
@@ -280,6 +287,7 @@ func matchTrigger(t ResolvedTrigger, ev Event, owner string) (TriggerData, bool)
 		data.MessageID, data.ChannelID = ev.MessageID, ev.ChannelID
 		data.ChannelType = strings.ToLower(ev.ChannelType)
 		data.PRs = append([]PRRef(nil), ev.PRs...)
+		data.TeamID = ev.TeamID
 	default:
 		return TriggerData{}, false
 	}

@@ -123,6 +123,12 @@ WHERE id = sqlc.arg(id) AND claim_token = sqlc.arg(token)::uuid AND status = 'ru
 UPDATE public.behavior_runs SET context_snapshot = sqlc.arg(snapshot), updated_at = now()
 WHERE id = sqlc.arg(id) AND claim_token = sqlc.arg(token)::uuid AND status = 'running';
 
+-- name: SetBehaviorRunActions :execrows
+-- Stores the run-level action outcomes of the claimed run (replaced as
+-- actions finish; a retry starts from the stored outcomes).
+UPDATE public.behavior_runs SET run_actions = sqlc.arg(result), updated_at = now()
+WHERE id = sqlc.arg(id) AND claim_token = sqlc.arg(token)::uuid AND status = 'running';
+
 -- name: LockClaimedBehaviorRun :one
 -- Locks a run only while the caller still holds its claim.
 SELECT workspace_id FROM public.behavior_runs

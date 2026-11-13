@@ -23,24 +23,33 @@ import (
 
 // Run failure and skip codes (behavior_runs.error_code).
 const (
-	CodeVersionMissing     = "version_missing"
-	CodeVersionInvalid     = "version_invalid"
-	CodeTriggerInvalid     = "trigger_invalid"
-	CodePolicyUnavailable  = "policy_unavailable"
-	CodePrecheckFailed     = "precheck_failed"
-	CodeAssigneeMismatch   = "assignee_mismatch"
-	CodeListMismatch       = "list_mismatch"
-	CodeReadTransient      = "read_transient"
-	CodeLLMUnconfigured    = "llm_unconfigured"
-	CodeLLMError           = "llm_error"
-	CodeLLMRefused         = "llm_refused"
-	CodeInvalidOutput      = "invalid_output"
-	CodeTokenBudget        = "token_budget"
-	CodeStepBudget         = "step_budget"
-	CodeDispatchFailed     = "dispatch_failed"
-	CodeRunTimeout         = "run_timeout"
-	RunToolKeyScope        = "behavior_run" // tools.Executor.KeyScope of behavior runs
-	maxRetainedOutputBytes = 64 << 10
+	CodeVersionMissing    = "version_missing"
+	CodeVersionInvalid    = "version_invalid"
+	CodeTriggerInvalid    = "trigger_invalid"
+	CodePolicyUnavailable = "policy_unavailable"
+	CodePrecheckFailed    = "precheck_failed"
+	CodeAssigneeMismatch  = "assignee_mismatch"
+	CodeListMismatch      = "list_mismatch"
+	CodeReadTransient     = "read_transient"
+	CodeLLMUnconfigured   = "llm_unconfigured"
+	CodeLLMError          = "llm_error"
+	CodeLLMRefused        = "llm_refused"
+	CodeInvalidOutput     = "invalid_output"
+	CodeTokenBudget       = "token_budget"
+	CodeStepBudget        = "step_budget"
+	CodeDispatchFailed    = "dispatch_failed"
+	CodeRunTimeout        = "run_timeout"
+	// CodeRunActionFailed: a run-level action ended in a definitive
+	// failure (an error or an unknown outcome).
+	CodeRunActionFailed = "run_action_failed"
+	// CodeRunActionTransient: a run-level action failed transiently; the
+	// run is tried again.
+	CodeRunActionTransient = "run_action_transient"
+	// CodeRunActionsUnavailable: the behavior has run-level actions but no
+	// RunActionRunner is wired.
+	CodeRunActionsUnavailable = "run_actions_unavailable"
+	RunToolKeyScope           = "behavior_run" // tools.Executor.KeyScope of behavior runs
+	maxRetainedOutputBytes    = 64 << 10
 )
 
 // MaxRunAttempts bounds how often one run is tried.
@@ -61,6 +70,9 @@ type RunExecStore interface {
 	SetRunContext(ctx context.Context, runID int64, claimToken string, snapshot json.RawMessage) error
 	// AddRunItems stores all items of the run in one transaction.
 	AddRunItems(ctx context.Context, workspaceID string, runID int64, claimToken string, items []NewItem) ([]Item, error)
+	// SetRunActions stores the run's run-level action outcomes
+	// (RunActionsResult), replacing what was stored.
+	SetRunActions(ctx context.Context, runID int64, claimToken string, result json.RawMessage) error
 }
 
 // PolicySource returns the tool policy (grants) and ClickUp credential
@@ -102,7 +114,10 @@ type RunWorkerDeps struct {
 	Models     ModelSource
 	Callers    CallerFactory
 	Dispatcher Dispatcher // nil: NopDispatcher
-	Notifier   Notifier   // nil: LogNotifier
+	// RunActions executes run-level actions (actions.run); nil uses the
+	// Dispatcher when it implements RunActionRunner.
+	RunActions RunActionRunner
+	Notifier   Notifier // nil: LogNotifier
 	Redactor   *agent.Redactor
 }
 
@@ -131,6 +146,11 @@ func NewRunWorker(d RunWorkerDeps, s RunWorkerSettings) *RunWorker {
 	}
 	if d.Notifier == nil {
 		d.Notifier = LogNotifier{}
+	}
+	if d.RunActions == nil {
+		if r, ok := d.Dispatcher.(RunActionRunner); ok {
+			d.RunActions = r
+		}
 	}
 	if d.Redactor == nil {
 		d.Redactor = agent.NewRedactor(nil)
@@ -317,13 +337,19 @@ func (w *RunWorker) attempt(ctx context.Context, rc *RunContext) (*runOutcome, e
 		rc.Context = snap
 	}
 
+	// A behavior without a model step reads nothing, calls no model and
+	// stores no items: only its run-level actions run.
+	if !rc.Doc.HasModelStep() {
+		return w.runActions(ctx, *rc)
+	}
+
 	// Items stored by an earlier attempt: only the hand-off is left.
 	items, err := w.d.Runs.ListItems(ctx, run.WorkspaceID, run.ID)
 	if err != nil {
 		return nil, err
 	}
 	if len(items) > 0 {
-		return w.dispatch(ctx, *rc, items), nil
+		return w.dispatch(ctx, *rc, items)
 	}
 
 	cfg, err := w.d.Policies.RunPolicy(ctx, run.WorkspaceID, trig.IntegrationID)
@@ -367,14 +393,56 @@ func (w *RunWorker) attempt(ctx context.Context, rc *RunContext) (*runOutcome, e
 	if err != nil {
 		return nil, err
 	}
-	return w.dispatch(ctx, *rc, stored), nil
+	return w.dispatch(ctx, *rc, stored)
 }
 
-func (w *RunWorker) dispatch(ctx context.Context, rc RunContext, items []Item) *runOutcome {
+// dispatch hands the items to the Dispatcher, then runs the run-level
+// actions.
+func (w *RunWorker) dispatch(ctx context.Context, rc RunContext, items []Item) (*runOutcome, error) {
 	if err := w.d.Dispatcher.Dispatch(ctx, rc, items); err != nil {
-		return runRetry(CodeDispatchFailed)
+		return runRetry(CodeDispatchFailed), nil
 	}
-	return &runOutcome{status: RunDone}
+	return w.runActions(ctx, rc)
+}
+
+// runActionSaveTimeout bounds one store of run-level outcomes. The store
+// survives the attempt's deadline so an action that took effect is
+// recorded.
+const runActionSaveTimeout = 10 * time.Second
+
+// runActions executes the behavior's run-level actions, if any, once per
+// run. Outcomes are stored under the run's claim as each action ends.
+func (w *RunWorker) runActions(ctx context.Context, rc RunContext) (*runOutcome, error) {
+	if len(rc.Doc.RunActions) == 0 {
+		return &runOutcome{status: RunDone}, nil
+	}
+	if w.d.RunActions == nil {
+		return runFail(CodeRunActionsUnavailable), nil
+	}
+	run := rc.Run
+	save := func(ctx context.Context, result json.RawMessage) error {
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runActionSaveTimeout)
+		defer cancel()
+		return w.d.Runs.SetRunActions(sctx, run.ID, run.ClaimToken, result)
+	}
+	end, err := w.d.RunActions.RunActions(ctx, rc, save)
+	if err != nil {
+		return nil, err
+	}
+	code := end.Code
+	switch {
+	case end.Retry:
+		if !codeRe.MatchString(code) {
+			code = CodeRunActionTransient
+		}
+		return runRetry(code), nil
+	case end.Failed:
+		if !codeRe.MatchString(code) {
+			code = CodeRunActionFailed
+		}
+		return runFail(code), nil
+	}
+	return &runOutcome{status: RunDone}, nil
 }
 
 // effectiveDoc applies the profile defaults: a field the behavior sets

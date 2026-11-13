@@ -470,6 +470,7 @@ func (p *Poller) event(t Target, ch clickupchat.Channel, m clickupchat.Message) 
 		Type:          behavior.TriggerChatMessage,
 		Key:           behavior.ChatSubject(m.ID),
 		IntegrationID: t.IntegrationID,
+		TeamID:        t.TeamID,
 		MessageID:     m.ID,
 		ChannelID:     ch.ID,
 		ChannelType:   strings.ToLower(ch.Type),

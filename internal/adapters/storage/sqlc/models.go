@@ -144,6 +144,8 @@ type BehaviorRun struct {
 	UpdatedAt  pgtype.Timestamptz
 	// Context fragments the model saw, by locator; secrets redacted; at most 512 KiB of text.
 	ContextSnapshot []byte
+	// Outcomes of the run-level actions: types, identifiers and codes only, never message text.
+	RunActions []byte
 }
 
 // Published behavior versions are immutable; a trigger rejects UPDATE.
