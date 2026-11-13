@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
+	"github.com/LDKhangg/nexus-hub/internal/secrets"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/labstack/echo/v4"
 )
@@ -28,6 +29,11 @@ func (*failingInboxFake) ClaimUpdate(context.Context, time.Time, time.Duration) 
 	return nil, nil
 }
 func (*failingInboxFake) FinishUpdate(context.Context, int64, string, string) error { return nil }
+
+// p7ErrResolver fails every Resolve with err.
+type p7ErrResolver struct{ err error }
+
+func (r p7ErrResolver) Resolve(context.Context, string, string) (string, error) { return "", r.err }
 
 const p7Workspace = "019a6690-abcd-7000-8000-000000000001"
 
@@ -247,9 +253,23 @@ func TestTelegramP7WebhookSecretRegression(t *testing.T) {
 	if len(inbox.updates) != 0 {
 		t.Fatal("unauthenticated update stored")
 	}
+	// Not configured: an empty value, or the resolver's missing-credentials
+	// error, is 401 as before P7.
+	for name, r := range map[string]SecretResolver{
+		"empty value":         testResolver{value: "", ok: true},
+		"missing credentials": p7ErrResolver{&secrets.Error{Code: secrets.CodeMissingCredentials}},
+	} {
+		if rec := p7Post(t, NewTelegramHandler(p7Lookup(), r, inbox, answerFake{}, 77), "anything", []byte(p7OwnerText)); rec.Code != http.StatusUnauthorized || p7Body(t, rec)["error"] != "unauthorized" {
+			t.Fatalf("unconfigured secret (%s): %d %s", name, rec.Code, rec.Body)
+		}
+	}
+	// Any other resolver failure is 503 as before P7.
 	unconfigured := NewTelegramHandler(p7Lookup(), testResolver{ok: false}, inbox, answerFake{}, 77)
-	if rec := p7Post(t, unconfigured, "anything", []byte(p7OwnerText)); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("unconfigured secret: %d %s", rec.Code, rec.Body)
+	if rec := p7Post(t, unconfigured, "anything", []byte(p7OwnerText)); rec.Code != http.StatusServiceUnavailable || p7Body(t, rec)["error"] != "service unavailable" {
+		t.Fatalf("resolver failure: %d %s", rec.Code, rec.Body)
+	}
+	if len(inbox.updates) != 0 {
+		t.Fatal("update stored without a usable secret")
 	}
 	// Polling path: the resolver is never needed.
 	if got, err := unconfigured.HandleUpdate(context.Background(), testIntegrationID, []byte(p7OwnerText)); err != nil || got != UpdateQueued {
