@@ -32,6 +32,36 @@ type Resolver interface {
 	Sighting(ctx context.Context, sighting Sighting) error
 }
 
+// Account is one platform identity attached to a contact.
+type Account struct {
+	ID           string `json:"id"`
+	Platform     string `json:"platform"`
+	ExternalID   string `json:"external_id"`
+	PlatformName string `json:"platform_name,omitempty"`
+	Username     string `json:"username,omitempty"`
+}
+
+// Contact is one person and all platform identities currently joined to it.
+type Contact struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Alias     string    `json:"alias,omitempty"`
+	Accounts  []Account `json:"accounts,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Directory is the writable people-directory contract used by owner tools.
+type Directory interface {
+	Resolver
+	List(ctx context.Context, workspaceID, platform, search string, limit int) ([]Contact, error)
+	Show(ctx context.Context, workspaceID, contactID string) (Contact, error)
+	SetAlias(ctx context.Context, workspaceID, ref, name string) (Contact, error)
+	Merge(ctx context.Context, workspaceID, sourceID, targetID string) (Contact, error)
+	Split(ctx context.Context, workspaceID, accountID string) (Contact, error)
+	Forget(ctx context.Context, workspaceID, contactID string) error
+	HasAlias(ctx context.Context, workspaceID, platform, externalID string) (bool, error)
+}
+
 // CleanDisplayName makes an untrusted platform label safe for one model or
 // report line. It removes control and invisible format characters, collapses
 // whitespace, neutralizes @ mentions and caps the result by rune count.

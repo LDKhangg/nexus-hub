@@ -29,6 +29,9 @@ func (e *Engine) HandleCallback(ctx context.Context, a CallbackAction) (Callback
 	case CallbackRateUp, CallbackRateDown:
 		return e.rate(ctx, a)
 	case CallbackFreeText:
+		if ap.Kind == ApprovalContactAlias {
+			return e.aliasFreeText(ctx, a)
+		}
 		if ap.Kind != ApprovalItemAnswer {
 			return CallbackResult{}, ErrNotAvailable
 		}
@@ -109,8 +112,31 @@ func (e *Engine) HandleFreeText(ctx context.Context, a FreeTextAnswer) (string, 
 		}
 		log.Printf("behavior run %d item %d corr=%s: rated down with reason", ap.RunID, ap.ItemID, rc.Run.CorrelationID)
 		return textsFor(rc.Doc.Language).reasonSaved(), nil
+	case ApprovalContactAlias:
+		if e.d.People == nil {
+			return "", ErrNotAvailable
+		}
+		contact, err := e.d.People.SetAlias(ctx, a.WorkspaceID, ap.Resource, text)
+		if err != nil {
+			return "", err
+		}
+		if _, err := e.d.Store.Decide(ctx, a.WorkspaceID, ap.Nonce, DecisionAnswered, "", a.Actor, e.now()); err != nil {
+			return "", err
+		}
+		return "Đã đặt tên: " + contact.Name, nil
 	}
 	return "", ErrNotAvailable
+}
+
+func (e *Engine) aliasFreeText(ctx context.Context, a CallbackAction) (CallbackResult, error) {
+	id, err := e.prompt(ctx, chatOf(a.WorkspaceID, a.IntegrationID, a.ChatID), a.MessageID, "Trả lời bằng tên bạn muốn đặt.")
+	if err != nil {
+		return CallbackResult{}, err
+	}
+	if err := e.d.Store.SetReplyMessage(ctx, a.WorkspaceID, a.Approval.ID, id); err != nil {
+		return CallbackResult{}, err
+	}
+	return CallbackResult{Toast: "Hãy gửi tên mới."}, nil
 }
 
 // rate stores 👍 or 👎 on the item; 👎 then waits for an optional reason.

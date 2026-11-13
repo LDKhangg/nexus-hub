@@ -15,6 +15,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/agent"
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
 	"github.com/LDKhangg/nexus-hub/internal/descblock"
+	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
@@ -173,6 +174,7 @@ type ActionDeps struct {
 	// Reports is the single preference-aware renderer for every owner report.
 	// Nil uses owner defaults and platform/id contact fallbacks.
 	Reports *reporting.Renderer
+	People  people.Directory
 }
 
 // ActionSettings tune the action library.
@@ -1103,6 +1105,7 @@ func (e *Engine) summary(ctx context.Context, rc RunContext, chat ChatRef, key, 
 		}
 		msg.Buttons = [][]Button{e.feedbackRow(t, fb.Nonce)}
 	}
+	msg = e.withAliasButton(ctx, rc, msg)
 	_, err = e.sendOnce(ctx, rc.Run, key, chat, msg)
 	return err
 }
@@ -1248,6 +1251,28 @@ func (e *Engine) RunFailed(ctx context.Context, rc RunContext, code string) erro
 	if renderErr != nil {
 		return renderErr
 	}
-	_, err = e.sendOnce(ctx, rc.Run, "failed", chat, OutMessage{Text: text})
+	_, err = e.sendOnce(ctx, rc.Run, "failed", chat, e.withAliasButton(ctx, rc, OutMessage{Text: text}))
 	return err
+}
+
+func (e *Engine) withAliasButton(ctx context.Context, rc RunContext, msg OutMessage) OutMessage {
+	if e.d.People == nil || rc.Trigger.SenderID == "" {
+		return msg
+	}
+	has, err := e.d.People.HasAlias(ctx, rc.Run.WorkspaceID, "clickup", rc.Trigger.SenderID)
+	if err != nil || has {
+		return msg
+	}
+	ap, err := e.ensureApproval(ctx, rc.Run.WorkspaceID, NewApproval{
+		Kind: ApprovalContactAlias, RunID: rc.Run.ID, Action: "contact_alias",
+		Resource: "clickup:" + rc.Trigger.SenderID, ExpiresAt: e.expiry(rc.Doc),
+	}, true)
+	if err != nil {
+		return msg
+	}
+	row := e.buttons(ap.Nonce, Button{Text: "Đặt tên"}, CallbackFreeText)
+	if len(row) > 0 {
+		msg.Buttons = append(msg.Buttons, row)
+	}
+	return msg
 }

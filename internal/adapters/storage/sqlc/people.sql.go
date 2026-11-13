@@ -29,6 +29,30 @@ func (q *Queries) ForgetContact(ctx context.Context, arg ForgetContactParams) (p
 	return id, err
 }
 
+const getContact = `-- name: GetContact :one
+SELECT id, workspace_id, display_name, note, created_at, updated_at FROM public.contacts
+WHERE workspace_id = $1::uuid AND id = $2::uuid
+`
+
+type GetContactParams struct {
+	WorkspaceID pgtype.UUID
+	ContactID   pgtype.UUID
+}
+
+func (q *Queries) GetContact(ctx context.Context, arg GetContactParams) (Contact, error) {
+	row := q.db.QueryRow(ctx, getContact, arg.WorkspaceID, arg.ContactID)
+	var i Contact
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.DisplayName,
+		&i.Note,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getContactByAccount = `-- name: GetContactByAccount :one
 SELECT c.id, c.workspace_id, c.display_name, c.note, c.created_at, c.updated_at, a.id AS account_id, a.platform, a.external_id, a.platform_name,
   a.username, a.source, a.is_self, a.first_seen, a.last_seen
@@ -104,6 +128,49 @@ func (q *Queries) GetOwnerUser(ctx context.Context) (User, error) {
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const listContactAccounts = `-- name: ListContactAccounts :many
+SELECT id, workspace_id, contact_id, platform, external_id, platform_name, username, source, is_self, first_seen, last_seen FROM public.contact_accounts
+WHERE workspace_id = $1::uuid AND contact_id = $2::uuid
+ORDER BY platform, external_id
+`
+
+type ListContactAccountsParams struct {
+	WorkspaceID pgtype.UUID
+	ContactID   pgtype.UUID
+}
+
+func (q *Queries) ListContactAccounts(ctx context.Context, arg ListContactAccountsParams) ([]ContactAccount, error) {
+	rows, err := q.db.Query(ctx, listContactAccounts, arg.WorkspaceID, arg.ContactID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ContactAccount
+	for rows.Next() {
+		var i ContactAccount
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.ContactID,
+			&i.Platform,
+			&i.ExternalID,
+			&i.PlatformName,
+			&i.Username,
+			&i.Source,
+			&i.IsSelf,
+			&i.FirstSeen,
+			&i.LastSeen,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listContacts = `-- name: ListContacts :many
