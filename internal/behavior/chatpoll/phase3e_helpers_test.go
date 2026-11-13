@@ -29,15 +29,19 @@ func (s directorySecrets) Resolve(_ context.Context, ws, ref string) (string, er
 }
 
 type teamAPIFake struct {
-	mu    sync.Mutex
-	calls int
-	block chan struct{}
+	mu     sync.Mutex
+	calls  int
+	block  chan struct{}
+	called chan struct{}
 }
 
 func (f *teamAPIFake) Teams(ctx context.Context, token string) ([]clickupchat.Team, error) {
 	f.mu.Lock()
 	f.calls++
 	f.mu.Unlock()
+	if f.called != nil {
+		f.called <- struct{}{}
+	}
 	if f.block != nil {
 		select {
 		case <-f.block:
@@ -52,7 +56,7 @@ func TestPhase3EMemberDirectory_TTLTenantIsolationAndNoHTTPUnderLock(t *testing.
 	// TC-80, TC-81 (REQ-E10).
 	now := time.Unix(100, 0)
 	api := &teamAPIFake{}
-	d := &MemberDirectory{API: api, Secrets: directorySecrets{"n1/r": "team1", "n2/r": "team2"}, TTL: time.Minute, MaxTeams: 2, Now: func() time.Time { return now }}
+	d := &MemberDirectory{API: api, Secrets: directorySecrets{"n1/r": "team1", "n2/r": "team2"}, TTL: time.Minute, MaxTeams: 3, Now: func() time.Time { return now }}
 	if name, ok := d.MemberName(context.Background(), "n1", "r", "team1", "7"); !ok || name != "Alice" {
 		t.Fatalf("first=%q/%v", name, ok)
 	}
@@ -83,27 +87,17 @@ func TestPhase3EMemberDirectory_TTLTenantIsolationAndNoHTTPUnderLock(t *testing.
 		t.Fatalf("TTL did not expire: %d", expiredCalls)
 	}
 
-	blocked := &teamAPIFake{block: make(chan struct{})}
+	blocked := &teamAPIFake{block: make(chan struct{}), called: make(chan struct{}, 2)}
 	d2 := &MemberDirectory{API: blocked, Secrets: directorySecrets{"a/r": "a", "b/r": "b"}}
 	done := make(chan struct{})
 	go func() { d2.MemberName(context.Background(), "a", "r", "a", "7"); close(done) }()
-	time.Sleep(20 * time.Millisecond)
+	<-blocked.called
 	second := make(chan struct{})
 	go func() { d2.MemberName(context.Background(), "b", "r", "b", "7"); close(second) }()
-	deadline := time.After(time.Second)
-	for {
-		blocked.mu.Lock()
-		n := blocked.calls
-		blocked.mu.Unlock()
-		if n >= 2 {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("directory held lock over HTTP")
-		default:
-			time.Sleep(time.Millisecond)
-		}
+	select {
+	case <-blocked.called:
+	case <-time.After(time.Second):
+		t.Fatal("directory held lock over HTTP")
 	}
 	close(blocked.block)
 	<-done
