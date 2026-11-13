@@ -7,6 +7,7 @@ permissions:
   - { action: read, resource: "*", effect: allow }
   - { action: glob, resource: "*", effect: allow }
   - { action: grep, resource: "*", effect: allow }
+  - { action: compress, resource: "*", effect: allow }
   - { action: read, resource: "*.env", effect: deny }
   - { action: read, resource: "*.env.*", effect: deny }
   - { action: edit, resource: "*_test.go", effect: allow }
@@ -83,6 +84,9 @@ context, so context size is the main cost):
 - Fewer, larger steps: write a whole new file in one write; group related
   edits; do not run a check after every small edit (run the checks once at
   the end, then fix).
+- When the context compression tool (DCP `compress`) suggests it, compress
+  finished exploration and old tool output; keep file paths, line numbers,
+  decisions and open items in the summary.
 - No narration between steps. Do not restate the brief or the plan.
 - Your final report starts with the KEY block below and stays under 60
   lines. Put details only for failures, defects, findings, Rulings and open
