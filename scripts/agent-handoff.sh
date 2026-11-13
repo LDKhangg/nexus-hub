@@ -56,11 +56,31 @@ jq -rs '
   [ .[] | select(.type == "text") | .part.text // empty ] as $t
   | if ($t | length) == 0 then "" else $t[-1] end' "$events" >"$report" 2>/dev/null || true
 
+# Token use of this run and the size of the session context at its end.
+usage=$(jq -rs '
+  [ .[] | select(.type == "step_finish") | .part.tokens ] as $t
+  | if ($t | length) == 0 then "steps=0"
+    else "steps=\($t | length) input=\([$t[].input] | add) cache_read=\([$t[].cache.read // 0] | add) output=\([$t[].output] | add) context_end=\(($t[-1].input // 0) + ($t[-1].cache.read // 0))"
+    end' "$events" 2>/dev/null || echo "steps=?")
+ctx=$(sed -n 's/.*context_end=\([0-9]*\).*/\1/p' <<<"$usage")
+
 echo "agent:   $agent"
 echo "session: ${sid:-unknown}"
 echo "exit:    $status"
+echo "tokens:  $usage"
+if [[ -n $ctx && $ctx -gt 100000 ]]; then
+  echo "warning: session context is ${ctx} tokens; start a new session with a carry-over note next time"
+fi
+if grep -q '"provider.quota"' "$events" 2>/dev/null; then
+  echo "warning: provider quota reached; see the error event in $events" >&2
+fi
 echo "report:  $report"
 echo "events:  $events"
+# The KEY block is what the Lead reads first.
+if grep -q '^KEY' "$report" 2>/dev/null; then
+  echo "---"
+  sed -n '/^KEY/,/^- Next:/p' "$report"
+fi
 if [[ $status -ne 0 ]]; then
   echo "stderr (last lines):" >&2
   tail -n 5 "$events.err" >&2 || true

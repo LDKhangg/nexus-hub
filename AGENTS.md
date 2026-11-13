@@ -47,6 +47,21 @@ scripts/agent-handoff.sh <implementer|tester|reviewer> "<title>" <brief.md> [ses
   attribution line, the files to read, the REQ ids, and what is out of scope.
 - The Lead never forwards a secret, token or `.env` content in a brief.
 
+Token budget (the owner's OpenAI quota is a 5-hour window):
+- Every step of an agent re-sends its whole session context, so long
+  sessions are the main cost. Continue a session only for a short follow-up
+  while it is warm (within about 10 minutes) and its context is under about
+  100k tokens; `agent-handoff.sh` prints both. Otherwise start a new session
+  with a short carry-over note (head, what is done, what is next, file
+  pointers; under 40 lines).
+- Keep each handoff small: one task, or one package/area for tests and
+  review (for example 3c and 3e in separate sessions).
+- Briefs point to files and line ranges instead of pasting code; under 80
+  lines.
+- Reports start with a KEY block (result, head, commits, item ids, next) and
+  stay under 60 lines, with details only for failures, findings and Rulings.
+  The Lead reads the KEY block and opens only the items it must judge.
+
 Lead and Implementer may only run these to prove the code compiles:
 `go build ./...`, `go vet ./...`, `gofmt -l cmd internal`, `make generate`
 (must be clean on a second run), and `goose -dir db/migrations validate`.

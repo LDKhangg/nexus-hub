@@ -89,3 +89,28 @@ or `$(...)`: each part of a compound command must be allowed on its own, so one
 unlisted part denies the whole call. If a command is denied, do not give up:
 use the read/glob/grep tools or another allowed command, and list what you
 could not check in your report.
+
+Token budget (the owner's quota is small; every step re-sends your whole
+context, so context size is the main cost):
+- Read narrowly: grep/glob first, then read only the needed range
+  (offset/limit). Never read a whole large file, a generated sqlc file, a
+  lock file or a full CI log. Do not re-read a file you already read.
+- Prefer `git diff <range> -- <path>` and `git show <sha> -- <path>` over
+  reading whole files when reviewing changes. For CI, extract only failures
+  (for example `jq` over test.json), never print the whole log.
+- Fewer, larger steps: write a whole new file in one write; group related
+  edits; do not run a check after every small edit (run the checks once at
+  the end, then fix).
+- No narration between steps. Do not restate the brief or the plan.
+- Your final report starts with the KEY block below and stays under 60
+  lines. Put details only for failures, defects, findings, Rulings and open
+  questions: never list items that simply passed or were fine.
+
+KEY block (first lines of every final report):
+```
+KEY
+- Result: <PASS|FAIL|ERROR|DONE|BLOCKED|APPROVE|CHANGES REQUESTED>
+- Head: <short sha>   Commits: <short shas or none>
+- Items: <ids of defects/findings/open questions, or none>
+- Next: <what the Lead must decide or send, or none>
+```
