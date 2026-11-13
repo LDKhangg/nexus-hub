@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
+	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
 
@@ -32,9 +33,13 @@ func (t *readTool) Run(ctx context.Context, c tools.Call) (tools.ToolOutput, err
 
 // NewReadTools returns github_pr_view, github_pr_checks, github_pr_files
 // and github_issue_view.
-func NewReadTools(api API) []tools.Tool {
+func NewReadTools(api API, directories ...people.Resolver) []tools.Tool {
+	var directory people.Resolver
+	if len(directories) > 0 {
+		directory = directories[0]
+	}
 	mk := func(name, desc string, fn func(context.Context, *readTool, tools.Call, input) (tools.ToolOutput, error)) tools.Tool {
-		return &readTool{base: base{api: api, spec: tools.ToolSpec{Name: name, Description: desc, InputSchema: schema(""), Tier: tenant.TierRead}}, run: fn}
+		return &readTool{base: base{api: api, people: directory, spec: tools.ToolSpec{Name: name, Description: desc, InputSchema: schema(""), Tier: tenant.TierRead}}, run: fn}
 	}
 	return []tools.Tool{
 		mk("github_pr_view", "Show a pull request: state, branches, head SHA, size, mergeability and a clipped description.", prView),

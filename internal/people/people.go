@@ -3,8 +3,13 @@ package people
 
 import (
 	"context"
+	"strings"
 	"time"
+	"unicode"
 )
+
+// MaxDisplayNameRunes caps a display name used in model or report output.
+const MaxDisplayNameRunes = 100
 
 // Sighting is one observation of a platform account. Names are untrusted
 // labels; ExternalID is the stable platform identifier used for resolution.
@@ -25,4 +30,39 @@ type Resolver interface {
 	DisplayName(ctx context.Context, workspaceID, platform, externalID string) (name string, ok bool)
 	// Sighting records the latest observed labels for a platform account.
 	Sighting(ctx context.Context, sighting Sighting) error
+}
+
+// CleanDisplayName makes an untrusted platform label safe for one model or
+// report line. It removes control and invisible format characters, collapses
+// whitespace, neutralizes @ mentions and caps the result by rune count.
+func CleanDisplayName(name string) string {
+	var b strings.Builder
+	n := 0
+	space := false
+	for _, r := range name {
+		if n >= MaxDisplayNameRunes {
+			break
+		}
+		if unicode.IsSpace(r) {
+			space = b.Len() > 0
+			continue
+		}
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == unicode.ReplacementChar {
+			continue
+		}
+		if space {
+			if n+1 >= MaxDisplayNameRunes {
+				break
+			}
+			b.WriteByte(' ')
+			n++
+			space = false
+		}
+		if r == '@' {
+			r = '＠'
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
 }

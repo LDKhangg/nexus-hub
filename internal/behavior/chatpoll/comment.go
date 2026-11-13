@@ -8,6 +8,7 @@ import (
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/sources/clickupchat"
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
+	"github.com/LDKhangg/nexus-hub/internal/people"
 )
 
 // Comment and member reader defaults.
@@ -44,6 +45,7 @@ type TeamAPI interface {
 type CommentReader struct {
 	API     CommentAPI
 	Secrets Secrets
+	People  people.Resolver
 	// Pages caps the comment pages read; 0 means DefaultCommentPages.
 	Pages int
 }
@@ -75,6 +77,9 @@ func (r *CommentReader) TaskComment(ctx context.Context, workspaceID, tokenRef, 
 		}
 		for _, c := range list {
 			if c.ID == commentID {
+				if r.People != nil && c.UserID != "" {
+					_ = r.People.Sighting(ctx, people.Sighting{WorkspaceID: workspaceID, Platform: "clickup", ExternalID: c.UserID, Username: c.Username, Source: "auto"})
+				}
 				return behavior.TaskComment{Text: c.Text, SenderID: c.UserID, SenderName: c.Username}, nil
 			}
 		}
@@ -100,6 +105,7 @@ func (r *CommentReader) TaskComment(ctx context.Context, workspaceID, tokenRef, 
 type MemberDirectory struct {
 	API     TeamAPI
 	Secrets Secrets
+	People  people.Resolver
 	// TTL is how long names are kept; 0 means DefaultMemberTTL.
 	TTL time.Duration
 	// MaxTeams caps the kept workspaces; 0 means DefaultMemberTeams.
@@ -152,8 +158,13 @@ func (d *MemberDirectory) MemberName(ctx context.Context, workspaceID, tokenRef,
 			if len(names) == MaxMembersPerTeam {
 				break
 			}
-			if m.UserID != "" && m.Username != "" {
-				names[m.UserID] = m.Username
+			if m.UserID != "" {
+				if d.People != nil {
+					_ = d.People.Sighting(ctx, people.Sighting{WorkspaceID: workspaceID, Platform: "clickup", ExternalID: m.UserID, Username: m.Username, Source: "auto"})
+				}
+				if m.Username != "" {
+					names[m.UserID] = m.Username
+				}
 			}
 		}
 		found[memberKey{workspaceID, t.ID}] = memberEntry{at: now, names: names}

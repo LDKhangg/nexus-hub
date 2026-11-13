@@ -38,6 +38,7 @@ type agentServices struct {
 	known        map[string]tenant.Tier
 	reg          *tools.Registry
 	limits       tools.Limits
+	people       *storage.PeopleRepository
 	// provider returns the workspace's default LLM provider.
 	provider func(ctx context.Context, ws string) (domain.LLMProvider, error)
 }
@@ -71,12 +72,16 @@ func resolveGit(configured string) (string, error) {
 // tools, such as memory_search). Code tools are skipped (with a warning)
 // when git is unavailable.
 func buildTools(s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, extra ...tools.Tool) (*tools.Registry, error) {
+	return buildToolsWithPeople(s, resolver, redactor, nil, extra...)
+}
+
+func buildToolsWithPeople(s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, directory *storage.PeopleRepository, extra ...tools.Tool) (*tools.Registry, error) {
 	apiClient := netguard.Client(s.ToolTimeout, netguard.DefaultHosts)
 	creds := githubapi.NewCredentials(apiClient, resolver, redactor, nil)
 	gh := githubapi.NewClient(apiClient, creds)
-	all := append([]tools.Tool{}, githubtools.NewReadTools(gh)...)
-	all = append(all, githubtools.NewWriteTools(gh, redactor)...)
-	all = append(all, githubtools.NewDangerousTools(gh, redactor)...)
+	all := append([]tools.Tool{}, githubtools.NewReadTools(gh, directory)...)
+	all = append(all, githubtools.NewWriteTools(gh, redactor, directory)...)
+	all = append(all, githubtools.NewDangerousTools(gh, redactor, directory)...)
 	all = append(all, clickuptools.NewTaskTool(apiClient, resolver))
 	// ClickUp writes of the behavior action library: tier write, not repo
 	// scoped, so agent jobs can never call them (no repo grant allows them).
@@ -84,7 +89,7 @@ func buildTools(s settings.Settings, resolver *secrets.Resolver, redactor *agent
 	// Run-level actions of the behavior engine (approve a pull request as
 	// the owner's pat account, react to a ClickUp Chat message). They are
 	// ActionOnly: offered and run only by the behavior action executor.
-	all = append(all, githubtools.NewApproveTool(gh))
+	all = append(all, githubtools.NewApproveTool(gh, directory))
 	all = append(all, clickuptools.NewChatReactionTool(apiClient, resolver, clickupchat.New(apiClient)))
 	// Undo of a run-level reaction (/undo), also ActionOnly.
 	all = append(all, clickuptools.NewChatReactionRemoveTool(apiClient, resolver, clickupchat.New(apiClient)))
@@ -101,7 +106,11 @@ func buildTools(s settings.Settings, resolver *secrets.Resolver, redactor *agent
 }
 
 func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, sender *telegram.Client, extra ...tools.Tool) (agentServices, error) {
-	reg, err := buildTools(s, resolver, redactor, extra...)
+	directory, err := storage.NewPeopleRepository(pool)
+	if err != nil {
+		return agentServices{}, errors.New("people directory startup failed")
+	}
+	reg, err := buildToolsWithPeople(s, resolver, redactor, directory, extra...)
 	if err != nil {
 		return agentServices{}, errors.New("tool registry startup failed")
 	}
@@ -158,7 +167,7 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
 	})
 	worker := relay.NewActionWorker(actions, sender, relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
-	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider}, nil
+	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, people: directory}, nil
 }
 
 // buildBehaviorEngine wires the behavior run executor and the action
@@ -198,9 +207,10 @@ func buildBehaviorEngine(pool *pgxpool.Pool, s settings.Settings, store *storage
 		Notifier:       engine,
 		Redactor:       redactor,
 		ChatMessages:   &chatpoll.MessageReader{Chat: clickUpAPI, Secrets: resolver},
-		Comments:       &chatpoll.CommentReader{API: clickUpAPI, Secrets: resolver},
-		Members:        &chatpoll.MemberDirectory{API: clickUpAPI, Secrets: resolver},
-		ChannelMembers: &chatpoll.ChannelMemberDirectory{API: clickUpAPI, Secrets: resolver},
+		Comments:       &chatpoll.CommentReader{API: clickUpAPI, Secrets: resolver, People: ag.people},
+		Members:        &chatpoll.MemberDirectory{API: clickUpAPI, Secrets: resolver, People: ag.people},
+		ChannelMembers: &chatpoll.ChannelMemberDirectory{API: clickUpAPI, Secrets: resolver, People: ag.people},
+		People:         ag.people,
 	}, behavior.RunWorkerSettings{
 		Workers: int(s.BehaviorWorkers), PollInterval: s.BehaviorPollInterval,
 		DefaultModel: s.ActorModel, DefaultMaxTokens: int(s.BehaviorMaxTokens), MaxOutputTokens: int(s.MaxOutputTokens),

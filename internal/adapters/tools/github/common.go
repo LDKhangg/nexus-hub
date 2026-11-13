@@ -14,6 +14,7 @@ import (
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/github"
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
+	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
 
@@ -103,8 +104,9 @@ func schema(props string, required ...string) json.RawMessage {
 
 // base carries what every GitHub tool shares.
 type base struct {
-	api  API
-	spec tools.ToolSpec
+	api    API
+	spec   tools.ToolSpec
+	people people.Resolver
 }
 
 func (b *base) Spec() tools.ToolSpec                     { return b.spec }
@@ -173,5 +175,9 @@ type pull struct {
 func (b *base) getPull(ctx context.Context, c tools.Call, in input, perms map[string]string) (pull, error) {
 	var p pull
 	err := b.do(ctx, c, in, perms, "GET", fmt.Sprintf("/repos/%s/pulls/%d", in.Repo, in.num()), nil, &p)
+	if err == nil && b.people != nil && p.User.Login != "" {
+		isSelf := c.Account != nil && strings.EqualFold(c.Account.Login, p.User.Login)
+		_ = b.people.Sighting(ctx, people.Sighting{WorkspaceID: c.WorkspaceID, Platform: "github", ExternalID: p.User.Login, Username: p.User.Login, Source: "auto", IsSelf: isSelf})
+	}
 	return p, err
 }

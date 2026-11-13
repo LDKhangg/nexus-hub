@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
+	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/LDKhangg/nexus-hub/internal/secrets"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/labstack/echo/v4"
@@ -58,7 +59,10 @@ func NewTelegramHandler(integrations WebhookIntegrationLookup, resolver SecretRe
 }
 
 type tgUser struct {
-	ID int64 `json:"id"`
+	ID        int64  `json:"id"`
+	Username  string `json:"username"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
 }
 
 type tgChat struct {
@@ -163,6 +167,20 @@ func (h *TelegramHandler) Handle(c echo.Context) error {
 		log.Printf("telegram webhook: non-owner update ignored integration=%s chat=%d count=%d", id, u.ChatID, n)
 		return ok("ignored")
 	}
+	if directory, ok := h.inbox.(people.Resolver); ok {
+		if from := telegramSender(upd); from != nil {
+			_ = directory.Sighting(ctx, people.Sighting{
+				WorkspaceID:  integration.WorkspaceID,
+				Platform:     "telegram",
+				ExternalID:   strconv.FormatInt(from.ID, 10),
+				PlatformName: strings.TrimSpace(from.FirstName + " " + from.LastName),
+				Username:     from.Username,
+				Source:       "auto",
+				IsSelf:       true,
+				SeenAt:       h.now(),
+			})
+		}
+	}
 	u.WorkspaceID, u.IntegrationID, u.UpdateID = integration.WorkspaceID, integration.ID, upd.UpdateID
 	created, err := h.inbox.RecordUpdate(ctx, integration.WorkspaceID, u)
 	if err != nil {
@@ -172,6 +190,16 @@ func (h *TelegramHandler) Handle(c echo.Context) error {
 		return ok("duplicate")
 	}
 	return ok("queued")
+}
+
+func telegramSender(upd tgUpdate) *tgUser {
+	if upd.CallbackQuery != nil {
+		return &upd.CallbackQuery.From
+	}
+	if upd.Message != nil {
+		return upd.Message.From
+	}
+	return nil
 }
 
 // WithOwnerUser sets the owner's Telegram user ID for an owner chat that is
