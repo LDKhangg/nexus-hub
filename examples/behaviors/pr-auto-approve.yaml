@@ -1,31 +1,43 @@
 # PR auto-approve: when someone sends me a ClickUp Chat direct message with
-# a GitHub pull request link, approve that pull request with my own GitHub
-# account, add a reaction to the message with my ClickUp account, and tell
-# me on Telegram what was done.
+# a GitHub pull request link and asks me to approve it, approve that pull
+# request with my own GitHub account, add a reaction to the message with my
+# ClickUp account, and tell me on Telegram what was done.
 #
 # How it runs:
 # - The server polls ClickUp Chat for new direct messages (ClickUp has no
 #   Chat webhooks) every clickup_chat_poll_interval (default 30s). My own
 #   messages never start a run (owner_clickup_user_id must be set).
 # - The pull request links are taken from the message deterministically
-#   (https://github.com/<owner>/<repo>/pull/<n>, at most 5). The message
-#   text is never stored, logged or sent to Telegram, and there is no model
-#   step: no instructions, no tokens spent.
+#   (https://github.com/<owner>/<repo>/pull/<n>, at most 5). The model never
+#   chooses which pull request is approved.
+# - One model call per DM decides the verdict: approve_request (the sender
+#   asks me to approve the linked PR) or other (a question, an FYI, a review
+#   request without approval, "đừng approve", ...). The DM text is fetched
+#   for the model only; it is never stored in the trigger, logged or sent
+#   to Telegram. The Telegram report shows the verdict as "AI: <label>
+#   (<confidence>)" with a short summary in the model's own words.
+# - Needs an LLM provider (llm_provider anthropic, claude_cli or
+#   opencode_cli; see docs/runbooks/self-host-home.md §4b). Cost: one model
+#   call per matching DM. No provider, or no valid verdict, means no
+#   approval: the report says "AI gave no verdict".
 # - actions.run run once per message, in order: approve every linked pull
-#   request (already approved counts as done; my own PR, a closed PR or one
-#   my token cannot see is reported, not approved), then add the reaction
-#   only if every approval succeeded, then report on Telegram.
+#   request only when the verdict is approve_request with confidence at
+#   least verdict.min_confidence (already approved counts as done; my own
+#   PR, a closed PR or one my token cannot see is reported, not approved),
+#   then add the reaction only if every approval succeeded, then report on
+#   Telegram. A message that reads like instructions to the AI has its
+#   confidence capped below the threshold, so it is never approved.
 # - dry_run: true writes nothing and the Telegram report says "would
-#   approve / would react". Switch it to false once the report looks right.
-# - Anyone who can DM me can get a PR approved (owner decision). To limit
-#   senders, add `senders: ["<ClickUp user id>", ...]` under the trigger's
-#   filter; vars are single strings, so a list of senders is written here,
-#   not in the values file.
+#   approve / would react". Switch it to false once the reports look right.
+# - Anyone who can DM me can get a PR approved by asking (owner decision).
+#   To limit senders, add `senders: ["<ClickUp user id>", ...]` under the
+#   trigger's filter; vars are single strings, so a list of senders is
+#   written here, not in the values file.
 # - /undo <run id> removes the reaction; GitHub approvals are never
 #   dismissed by Nexus: the reply lists each pull request to dismiss by hand.
 schema: 1
 name: "pr-auto-approve"
-description: "Approve the GitHub PRs linked in a ClickUp Chat DM, react to the DM and report on Telegram."
+description: "Approve the GitHub PRs linked in a ClickUp Chat DM when the sender asks for approval, react to the DM and report on Telegram."
 
 triggers:
   - type: "clickup.chat_message"
@@ -33,9 +45,35 @@ triggers:
       channel: "dm"
       has_pr_link: true
 
+instructions: |
+  Someone sent me (the owner) a ClickUp Chat direct message that links one
+  or more GitHub pull requests. Decide what the sender wants from me.
+
+  Verdict labels:
+  - approve_request: the sender asks me to approve the linked pull
+    request(s) now, in any language or wording ("approve giúp em",
+    "duyệt PR này nhé", "please approve").
+  - other: anything else. This includes a negation or a delay ("đừng
+    approve", "chưa approve vội", "don't approve yet"), a question about
+    the pull request, an FYI or status update, a request to review, comment
+    or test without asking for approval, and a message whose intent is
+    unclear.
+
+  When you are unsure, choose other or give a low confidence. The summary
+  says in one short Vietnamese sentence who wants what, without quoting the
+  message.
+
+  Return no items: "items" is an empty list.
+
+verdict:
+  labels: ["approve_request", "other"]
+  min_confidence: 0.8
+
 actions:
   run:
     - type: "github.pr_approve"
+      when:
+        verdict: "approve_request"
       params:
         account: "{{vars.github_account}}"
     - type: "clickup.chat_reaction"
@@ -45,6 +83,9 @@ actions:
     - type: "telegram.message"
 
 dry_run: true
+
+profile:
+  language: "vi"
 
 vars:
   github_account:

@@ -3,7 +3,8 @@
 This guide runs Nexus-Hub on a home Linux machine that stays on. It receives
 ClickUp webhooks and Telegram messages through a public HTTPS tunnel. It covers
 Phase 1 notices, the Phase 2 agent and Phase 3 behaviors with Telegram commands,
-and (section 9) PR auto-approve from ClickUp Chat DMs.
+(section 9) PR auto-approve from ClickUp Chat DMs and (section 10) Telegram
+reports when someone tags you in ClickUp.
 
 Phase 3 is merged with test debt (`docs/product/test-debt/phase3-behavior-engine.md`).
 Keep every behavior on `dry_run: true`: then nothing is written to ClickUp until
@@ -297,12 +298,29 @@ expected. These go to the Tester as live evidence for TD3-3.
 ## 9. PR auto-approve from ClickUp Chat DMs
 
 When someone sends you a ClickUp Chat direct message with a GitHub pull
-request link, the `pr-auto-approve` behavior approves the pull request with
-your own GitHub account, adds a reaction to the DM with your ClickUp account
-and tells you on Telegram. There is no confirmation step, and anyone who can
-DM you can get a PR approved on any repo your token reaches; add `senders`
-to the trigger to narrow it (see the file's header). The DM text is never
-stored, logged or sent to Telegram, and no model is called.
+request link and asks you to approve it, the `pr-auto-approve` behavior
+approves the pull request with your own GitHub account, adds a reaction to
+the DM with your ClickUp account and tells you on Telegram. One model call
+per DM decides whether the sender asks for an approval (verdict
+`approve_request`) or something else (`other`); only `approve_request` with
+confidence 0.8 or more approves. There is no confirmation step, and anyone
+who can DM you and ask can get a PR approved on any repo your token
+reaches; add `senders` to the trigger to narrow it (see the file's header).
+The DM text goes to the model only: it is never stored in the trigger,
+logged or sent to Telegram.
+
+**0. An LLM provider.** The approval needs a working provider (section 4b).
+Any of `anthropic`, `claude_cli` or `opencode_cli` works; for example
+opencode with `openai/gpt-6-luna`, or `claude_cli` on your Claude plan.
+Check it before going on:
+
+```sh
+nh llm check          # "ok": true (add --workspace-id $WS for anthropic)
+```
+
+Each DM with a PR link costs one model call. Without a provider, or when
+the model gives no valid verdict, nothing is approved and the report says
+"AI: không đưa ra được đánh giá (<code>)".
 
 **a. A GitHub token that approves as you.** Create a personal access token
 on your own GitHub account (an App account would approve as a bot and is
@@ -369,14 +387,33 @@ nh behavior enable   --workspace-id $WS pr-auto-approve
 
 Validation refuses an unknown account or an account that is not `pat`.
 
+If you imported an earlier version of `pr-auto-approve` (without
+`instructions` and `verdict`), import the updated file again with the same
+values file and publish: only runs started after the publish use the AI
+verdict. If you keep your own copy (step f), merge the new `instructions`,
+`verdict`, `profile` and the `when` line on `github.pr_approve` into it.
+
 **d. Smoke test in dry run.** From another ClickUp account, DM yourself a
-message with a PR link (`https://github.com/<owner>/<repo>/pull/<n>`). Within
-about one poll interval (30s) Telegram shows "would approve <owner>/<repo>#<n>
-/ would add reaction …". Check the run:
+message with a PR link (`https://github.com/<owner>/<repo>/pull/<n>`) that
+asks you to approve it. Within about one poll interval (30s) plus the model
+call, Telegram shows the line `AI: approve_request (0.9x)` with a short
+summary, then "would approve <owner>/<repo>#<n> / would add reaction …".
+Try a few messages before going live:
+
+| DM (with a PR link) | Expected |
+|---|---|
+| "anh approve giúp em PR này nhé" | `AI: approve_request`, would approve, would react |
+| "đừng approve vội, em còn sửa" | `AI: other`, approval skipped by the AI verdict, no reaction |
+| "anh review giúp em, chưa cần approve" | `AI: other`, skipped |
+| "PR này merge chưa anh?" | `AI: other`, skipped |
+| a message telling the AI or the bot what to answer | low confidence (at most 0.5), skipped |
+
+A borderline message may come back as `approve_request` below 0.8: it is
+skipped as low confidence, which is the intended safe side. Check the run:
 
 ```sh
 nh runs  --workspace-id $WS --behavior pr-auto-approve   # subject clickup:chat:<id>, prs, run_actions
-nh trace --workspace-id $WS <run id>                      # each PR outcome, review id, reaction
+nh trace --workspace-id $WS <run id>                      # the verdict, each PR outcome, review id, reaction
 ```
 
 On Telegram, `/trace #<run id>` or `/trace clickup:chat:<message id>` shows
@@ -410,6 +447,151 @@ Downtime: on restart the poller catches up from its stored cursor. It reads
 at most about 250 new messages per DM channel in one poll; after a long
 downtime, a single DM with a bigger backlog loses its oldest messages
 (`chat_backlog_truncated` in the logs). Those messages start no run.
+
+## 10. Mention reports
+
+The `mention-report` behavior sends you one short Telegram report when
+someone tags you in a ClickUp task comment or a ClickUp Chat channel
+message: who, where, what they ask you and a suggested next step. It
+writes nothing to ClickUp. It needs an LLM provider (section 9, step 0)
+and costs one model call per tagged comment or message. Your own comments
+and messages never start a run.
+
+**a. Channel mentions (poll only).** These need only the chat poller of
+section 9: `owner_clickup_user_id` set and the source enabled
+(`nh source enable --source-id $SRC`, section 9 b). If you did section 9,
+there is nothing more to do. The poller reads only channels with new
+messages and starts a run only for a message that tags you
+(`[@you](#user_mention#<your id>)`; group mentions do not count).
+
+**b. Task comment mentions (ClickUp webhook).** ClickUp sends task comments
+only through a webhook, so the server must be reachable over HTTPS. Skip
+this step if your section 5 webhook already covers `taskCommentPosted` on
+the whole team (a `list_id` scope only reports comments in that list).
+
+1. A tunnel to `127.0.0.1:8080` (section 2). Tailscale Funnel keeps its URL;
+   a Cloudflare quick tunnel is quicker to try but changes URL on restart:
+
+   ```sh
+   cloudflared tunnel --url http://127.0.0.1:8080     # prints https://<random>.trycloudflare.com
+   # or: sudo tailscale funnel --bg 8080 && tailscale funnel status
+   ```
+
+   Set `PUBLIC` to that URL (no trailing slash) and store it:
+
+   ```sh
+   nh settings set public_base_url "$PUBLIC"
+   systemctl --user restart nexus-hub
+   ```
+
+2. Register the webhook for `taskCommentPosted` on your team. The ClickUp
+   token goes into a header file through the shell's `read` and `printf`
+   (built-ins in bash and zsh, so it never appears in a process's
+   arguments; `curl -H @file` needs curl 7.55 or later), and the response,
+   which holds the webhook secret, goes into a private file that is never
+   printed:
+
+   ```sh
+   umask 077
+   printf 'ClickUp token: '; read -rs CU; printf 'Authorization: %s\n' "$CU" > ~/.config/nexus-hub/cu-auth.hdr; unset CU; echo
+   printf '{"endpoint":"%s/webhook/clickup/%s","events":["taskCommentPosted","taskStatusUpdated","taskAssigneeUpdated"]}' \
+     "$PUBLIC" "$SRC" > ~/.config/nexus-hub/cu-webhook.json
+   curl -sS -o ~/.config/nexus-hub/cu-webhook-resp.json -w '%{http_code}\n' \
+     -H @"$HOME/.config/nexus-hub/cu-auth.hdr" -H 'Content-Type: application/json' \
+     --data @"$HOME/.config/nexus-hub/cu-webhook.json" \
+     "https://api.clickup.com/api/v2/team/<clickup-team-id>/webhook"   # expect 200
+   jq -r '.id' ~/.config/nexus-hub/cu-webhook-resp.json                 # the webhook id (not secret)
+   ```
+
+   Keep `taskStatusUpdated` and `taskAssigneeUpdated` in the list when other
+   behaviors (for example `spec-review`) use them; a team can have only a
+   limited number of webhooks, so prefer one webhook with all three events
+   over a second one. If a webhook for this endpoint already exists, update
+   its events with `PUT /api/v2/webhook/<id>` instead (same header file).
+
+3. Store the secret from the response (stdin, never echoed), bind the
+   webhook and remove the private files:
+
+   ```sh
+   jq -j '.webhook.secret' ~/.config/nexus-hub/cu-webhook-resp.json | \
+     nh secret set --workspace-id $WS --name clickup-webhook --kind clickup_webhook
+   nh bind-webhook --source-id $SRC --webhook-id '<webhook id>'
+   systemctl --user restart nexus-hub
+   rm -f ~/.config/nexus-hub/cu-webhook-resp.json ~/.config/nexus-hub/cu-webhook.json
+   ```
+
+   Keep `cu-auth.hdr` (mode 0600) only while you still need it, then
+   remove it too.
+
+4. Telegram webhook, so `/trace` and `/undo` reach the server (section 6):
+
+   ```sh
+   nh telegram webhook set    --workspace-id $WS --integration-id $TG
+   nh telegram webhook status --workspace-id $WS --integration-id $TG   # url_matches: true
+   ```
+
+   Commands are accepted only from the owner chat (`owner_telegram_chat_id`).
+   If that chat is a group rather than your private chat with the bot, also
+   set your own numeric Telegram user id, so only you can use them there:
+
+   ```sh
+   nh settings set owner_telegram_user_id '<your Telegram user id>'
+   systemctl --user restart nexus-hub
+   ```
+
+When the tunnel URL changes (quick tunnel restart), update
+`public_base_url`, rerun `nh telegram webhook set` and update the ClickUp
+webhook endpoint (see Upkeep).
+
+**c. Import, validate, publish, enable.** No values file is needed:
+
+```sh
+nh behavior import   --workspace-id $WS examples/behaviors/mention-report.yaml
+nh behavior validate --workspace-id $WS mention-report
+nh behavior publish  --workspace-id $WS mention-report
+nh behavior enable   --workspace-id $WS mention-report
+```
+
+The file runs with `dry_run: false`: it only reports on Telegram, and
+`dry_run` holds back ClickUp writes, of which it has none. The report is a
+`notify` message, so it waits for the end of your quiet hours and follows
+your digest mode (`nh profile set --digest per_run` to get it at once).
+
+**d. Smoke test.** From another ClickUp account:
+
+1. In a Chat channel, write a message that tags you and asks something.
+   Within about one poll interval plus the model call, Telegram shows the
+   report: who, which channel, what they ask and a next step. `/trace
+   clickup:chat:<message id>` or `/trace #<run id>` shows the run, with the
+   `Kênh` and `Nhắc tới` lines.
+2. Comment on a task and tag yourself (`@you`) with a question. The report
+   names the task. `/trace <task id>` shows the run (the trigger
+   `clickup.comment_added`).
+3. A message or comment without your tag, and one you write yourself, start
+   no run (`nh runs --workspace-id $WS --behavior mention-report`).
+
+**e. Rate limits.** Every channel with new messages costs at least one
+ClickUp call per poll, on top of the DM polling. In a busy workspace the
+poller may hit ClickUp's limit: the logs show `chat_rate_limited` and the
+poller backs off, which delays DMs (and so `pr-auto-approve`) too. If you
+see it more than once in a while, raise the interval:
+
+```sh
+nh settings set clickup_chat_poll_interval 60s
+systemctl --user restart nexus-hub
+```
+
+After a long downtime with more than about 500 active channels, the
+channels beyond that are cut (`chat_mention_channels_truncated` in the
+logs) and mentions in them are lost.
+
+**f. Please report the first tagged comment.** How ClickUp's webhook
+carries the tags of a task comment is not yet confirmed against a live
+payload. After step d.2, send the Lead the result of `/trace <task id>`
+(a `mention-report` run for that comment, or no run at all) and the `corr=` value
+from `journalctl --user -u nexus-hub` if there is one. Do not paste the
+webhook payload or any token. If no run starts while channel mentions
+work, task comment mentions are not detected yet.
 
 ## Upkeep
 

@@ -1,0 +1,72 @@
+# Mention report: when someone tags me in a ClickUp task comment or in a
+# ClickUp Chat channel message, send me one short Telegram report: who
+# tagged me, where, what they ask me, and a suggested next step.
+#
+# How it runs:
+# - Task comments arrive through the ClickUp webhook (taskCommentPosted);
+#   `mentions: me` matches only a comment that tags owner_clickup_user_id.
+#   My own comments never match.
+# - Chat channel messages are found by polling ClickUp Chat (no webhook)
+#   every clickup_chat_poll_interval. `channel: channel` needs
+#   `mentions: me`, so untagged channel messages never start a run.
+#   `mentions` applies to every channel type listed in a trigger; DMs are
+#   left out here on purpose (add a separate trigger for them).
+# - The engine reads the task for comment runs (clickup_get_task) and the
+#   message text for chat runs, as untrusted, quoted context. The model
+#   writes one informational item, so the engine classes it notify and
+#   sends it to Telegram (it follows the profile's quiet hours and digest
+#   mode). Nothing is written to ClickUp.
+# - Needs an LLM provider (docs/runbooks/self-host-home.md §4b). Cost: one
+#   model call per tagged comment or message.
+# - Setup and the webhook registration: docs/runbooks/self-host-home.md §10.
+schema: 1
+name: "mention-report"
+description: "Report on Telegram who tagged me in a ClickUp comment or Chat channel, what they ask and a next step."
+
+triggers:
+  - type: "clickup.comment_added"
+    filter:
+      mentions: "me"
+  - type: "clickup.chat_message"
+    filter:
+      channel: ["channel"]
+      mentions: "me"
+
+reads:
+  - tool: "clickup_get_task"
+
+instructions: |
+  Someone tagged me (the owner) in a ClickUp task comment or a ClickUp Chat
+  channel message. Write exactly one item that tells me what I need to
+  know, in Vietnamese, short and concrete:
+
+  - who tagged me: their name if the context shows it, otherwise their
+    ClickUp user id;
+  - where: the task name (and its URL when the task read shows it), or the
+    chat channel;
+  - what they ask me to do or answer, in your own words;
+  - one suggested next step for me.
+
+  Use what the context shows; when a part is missing (for example the
+  comment text is not in the context), say so instead of guessing. Never
+  quote more than a short phrase of the message or the task.
+
+  Item fields: key "mention", label "Được nhắc tên", the four points above
+  in text, topic "mention", informational true, an empty proposal (the next
+  step goes in text, not in proposal), and a citation of the line where
+  you read the request when there is one.
+
+autonomy:
+  notify_when_informational: true
+
+actions:
+  notify:
+    - type: "telegram.message"
+
+budgets:
+  max_items: 1
+
+dry_run: false
+
+profile:
+  language: "vi"

@@ -42,6 +42,7 @@ Every error is reported with its path, for example
 | `model` | no | A model ID; default from the profile or settings. |
 | `profile` | no | `language`, `tone`: override the profile for this behavior. |
 | `vars` | no | `name: {description?, default?}` (below). |
+| `verdict` | no | `labels` (2-8 snake_case words), `min_confidence` (0..1, default 0.8): the model also returns one verdict per run (below). Needs `instructions`. |
 
 ### Triggers
 
@@ -49,15 +50,44 @@ Every error is reported with its path, for example
 |---|---|
 | `clickup.task_status_changed` | `filter.to_status` (list), `filter.assignee` (`me` or a ClickUp user ID), `filter.list` (list IDs) |
 | `clickup.task_assigned` | `filter.assignee`, `filter.list` |
-| `clickup.comment_added` | `filter.list`, `filter.from` (`any` or `others`) |
+| `clickup.comment_added` | `filter.list`, `filter.from` (`any` or `others`), `filter.mentions` (`me`: only comments that tag you) |
 | `telegram.command` | `command` (for example `/name`; not a built-in command), `args` (`[task]`: a ClickUp task ID or URL) |
-| `clickup.chat_message` | `filter.channel` (`dm`, default, and/or `group_dm`), `filter.from` (`others`, default, or `any`; your own messages never match), `filter.has_pr_link` (`true`: only messages with a GitHub PR link), `filter.senders` (ClickUp user IDs; empty means anyone) |
+| `clickup.chat_message` | `filter.channel` (`dm`, default, `group_dm` and/or `channel`), `filter.from` (`others`, default, or `any`; your own messages never match), `filter.has_pr_link` (`true`: only messages with a GitHub PR link), `filter.senders` (ClickUp user IDs; empty means anyone), `filter.mentions` (`me`: only messages that tag you) |
 
 `clickup.chat_message` is found by polling ClickUp Chat (setting
 `clickup_chat_poll_interval`, default `30s`) and needs the setting
 `owner_clickup_user_id`. The run's subject is `clickup:chat:<message id>`.
 The message text is never stored; the trigger keeps only the message,
-channel and sender IDs and up to 5 PR links (`owner/repo#n`).
+channel and sender IDs and up to 5 PR links (`owner/repo#n`). When the
+behavior has `instructions`, the engine fetches the message text for the
+model step as untrusted, quoted context (source `clickup:chat/<id>#text`);
+it is kept only in the run's context snapshot, never in the trigger, the
+trace or the logs.
+
+#### Mentions
+
+`mentions: me` matches only a comment or chat message that tags you
+(`owner_clickup_user_id`); your own comments and messages never match, and
+nothing matches while `owner_clickup_user_id` is unset. Task comments read
+the tags from the ClickUp webhook; chat messages read
+`[@name](#user_mention#<id>)` tags from the message (group mentions do not
+count).
+
+`channel: channel` (ClickUp Chat channels, not DMs) requires
+`mentions: me`, so an untagged channel message never starts a run. Channel
+messages are found by the same poller as DMs; every channel with new
+messages costs at least one ClickUp call per poll.
+
+`mentions` applies to every channel type listed in the same trigger. To get
+every DM and only the channel messages that tag you, write two triggers:
+
+```yaml
+triggers:
+  - type: "clickup.chat_message"
+    filter: {channel: ["dm"]}
+  - type: "clickup.chat_message"
+    filter: {channel: ["channel"], mentions: "me"}
+```
 
 ### Classes and actions
 
@@ -87,10 +117,47 @@ only when every trigger is `clickup.chat_message`:
 - `telegram.message`, always last, reports every outcome to you.
 
 `on: success_of_previous` runs an action only when the one before it ended
-OK. With `dry_run: true` nothing is written and the report says "would
+OK. `when: {verdict: <label>}` runs an action only when the run's verdict
+has that label with at least `verdict.min_confidence` (below); it is not
+allowed on `telegram.message`, which always runs and reports. With `dry_run: true` nothing is written and the report says "would
 approve / would react". `/undo <run id>` removes a reaction the run added;
 GitHub approvals are never dismissed by Nexus (the reply lists each PR to
 dismiss by hand).
+
+### Verdict and `when`
+
+A behavior with `instructions` may declare a closed list of verdict labels.
+The model step then returns one verdict for the run besides its items:
+`{label, confidence, summary}`. The label is one of `verdict.labels`; the
+summary (at most 280 characters, in the behavior's language) says in the
+model's words who wants what. Your instructions define what each label
+means.
+
+```yaml
+verdict:
+  labels: ["approve_request", "other"]
+  min_confidence: 0.8
+actions:
+  run:
+    - type: "github.pr_approve"
+      when: {verdict: "approve_request"}
+      params: {account: "{{vars.github_account}}"}
+    - type: "telegram.message"
+```
+
+- A run-level action with `when` runs only when the label matches and the
+  confidence is at least `min_confidence`; otherwise it is skipped
+  (`verdict_mismatch` or `verdict_low_confidence`), and an action with
+  `on: success_of_previous` after it is skipped too.
+- When the triggering content reads like instructions to the AI, the
+  confidence is capped at 0.5, so a `when` gate with the default threshold
+  does not pass.
+- When the model gives no valid verdict (provider down, bad output after one
+  retry), every gated action is skipped (`verdict_unavailable`); the other
+  actions and the report still run.
+- The Telegram report and `/trace` show `AI: <label> (<confidence>)` and the
+  summary. A verdict without any `when` is only reported.
+- Labels and `when.verdict` are literal words, not vars.
 
 ## Vars
 
@@ -149,9 +216,14 @@ log line, tool run and engine message of a run carries that correlation ID
 ## Try it: `pr-auto-approve`
 
 [`pr-auto-approve.yaml`](pr-auto-approve.yaml) approves the GitHub pull
-requests linked in a ClickUp Chat direct message sent to you, adds a reaction
-(default `white_check_mark`) to the message and reports on Telegram. It has no
-model step. Set `github_account` to your `pat` account in the values file:
+requests linked in a ClickUp Chat direct message sent to you when the sender
+asks you to approve them, adds a reaction (default `white_check_mark`) to the
+message and reports on Telegram. One model call per DM classifies the message
+as `approve_request` or `other` (a question, an FYI, "đừng approve", a review
+request without approval); only `approve_request` with confidence 0.8 or more
+approves. It needs an LLM provider (`anthropic`, `claude_cli` or
+`opencode_cli`). Set `github_account` to your `pat` account in the values
+file:
 
 ```sh
 cp examples/behaviors/pr-auto-approve.vars.example.yaml pr-auto-approve.vars.yaml   # edit the values
@@ -163,7 +235,28 @@ setup-notices behavior enable pr-auto-approve --workspace-id <uuid>
 It starts with `dry_run: true`. The full setup (GitHub token, settings,
 reaction probe, going live) is in `docs/runbooks/self-host-home.md` §9. A
 chat run is traced with `/trace #<run id>` or `/trace clickup:chat:<message
-id>`, and `setup-notices runs` shows its PRs and run-level outcomes.
+id>`, and `setup-notices runs` shows its PRs, the verdict and the run-level
+outcomes.
+
+## Try it: `mention-report`
+
+[`mention-report.yaml`](mention-report.yaml) sends you one short Telegram
+report when someone tags you in a ClickUp task comment or a ClickUp Chat
+channel message: who, where, what they ask you and a suggested next step. It
+writes nothing to ClickUp, so it runs with `dry_run: false`; the report is a
+`notify` item and follows your quiet hours and digest mode. It needs no
+values file:
+
+```sh
+setup-notices behavior import examples/behaviors/mention-report.yaml --workspace-id <uuid>
+setup-notices behavior validate mention-report --workspace-id <uuid>
+setup-notices behavior publish mention-report --workspace-id <uuid>
+setup-notices behavior enable mention-report --workspace-id <uuid>
+```
+
+Channel mentions need only the chat poller (`owner_clickup_user_id` and an
+enabled source); task comment mentions need the ClickUp webhook. The full
+setup is in `docs/runbooks/self-host-home.md` §10.
 
 ## Profile
 
