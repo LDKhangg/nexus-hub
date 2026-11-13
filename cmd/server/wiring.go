@@ -81,6 +81,11 @@ func buildTools(s settings.Settings, resolver *secrets.Resolver, redactor *agent
 	// ClickUp writes of the behavior action library: tier write, not repo
 	// scoped, so agent jobs can never call them (no repo grant allows them).
 	all = append(all, clickuptools.NewWriteTools(apiClient, resolver)...)
+	// Run-level actions of the behavior engine (approve a pull request as
+	// the owner's pat account, react to a ClickUp Chat message). They are
+	// ActionOnly: offered and run only by the behavior action executor.
+	all = append(all, githubtools.NewApproveTool(gh))
+	all = append(all, clickuptools.NewChatReactionTool(apiClient, resolver, clickupchat.New(apiClient)))
 	all = append(all, extra...)
 	if gitPath, err := resolveGit(s.GitPath); err != nil {
 		log.Print("git not found; code and workspace tools disabled")
