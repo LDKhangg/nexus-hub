@@ -230,9 +230,12 @@ func TestHardening_FsmonitorNotExecuted(t *testing.T) {
 	sh(t, root, "config", "core.pager", script)
 	writeFile(t, root, "a.txt", "dirty")
 	ts := NewReadTools(newTestRunner(t), reposDir)
-	mustOK(t, findTool(t, ts, "git_status"), grant(true, ""), `{"repo":"acme/app"}`)
+	// TD3-4 / TD-4 (REQ-F1): owner decision rejects program config,
+	// even when command-line hardening could neutralize the program.
+	_, err := run(t, findTool(t, ts, "git_status"), grant(true, ""), `{"repo":"acme/app"}`)
+	wantCode(t, err, "unsafe_repo_config")
 	mustOK(t, findTool(t, ts, "git_log"), grant(true, ""), `{"repo":"acme/app"}`)
-	if _, err := os.Stat(marker); err == nil {
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("fsmonitor/pager executed")
 	}
 }
