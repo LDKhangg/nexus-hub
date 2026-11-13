@@ -284,7 +284,8 @@ func ClassifyCLIFailure(status int, texts ...string) *domain.LLMError {
 var unconfiguredMarkers = []string{
 	"not logged in", "please run /login", "/login", "invalid api key", "authentication_error",
 	"authentication failed", "oauth token has expired", "token expired", "unauthorized",
-	"no credentials", "not authenticated", "please sign in", "credit balance is too low",
+	"no credentials", "not authenticated", "please sign in", "please login", "please log in",
+	"login required", "not signed in", "credit balance is too low",
 }
 
 var unavailableMarkers = []string{
