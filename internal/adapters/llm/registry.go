@@ -10,13 +10,15 @@ const (
 	ProviderGoogle    ProviderType = "google"
 	// ProviderClaudeCLI runs the Claude Code CLI signed in on the host.
 	ProviderClaudeCLI ProviderType = "claude_cli"
+	// ProviderOpencodeCLI runs the opencode CLI signed in on the host.
+	ProviderOpencodeCLI ProviderType = "opencode_cli"
 )
 
 // ParseProviderType chỉ chấp nhận provider đã có implementation.
 func ParseProviderType(s string) (ProviderType, error) {
 	pt := ProviderType(s)
 	switch pt {
-	case ProviderAnthropic, ProviderClaudeCLI:
+	case ProviderAnthropic, ProviderClaudeCLI, ProviderOpencodeCLI:
 		return pt, nil
 	default:
 		return "", fmt.Errorf("nhà cung cấp LLM không hợp lệ hoặc chưa hỗ trợ: %q", s)

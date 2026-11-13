@@ -30,10 +30,19 @@ func NewFactory(s settings.Settings, resolver SecretResolver, httpc *http.Client
 		return nil, err
 	}
 	f := &Factory{provider: pt, s: s, resolver: resolver, httpc: httpc}
-	if pt == ProviderClaudeCLI {
+	switch pt {
+	case ProviderClaudeCLI:
 		r, err := clirun.New(clirun.Config{Path: s.ClaudeCLIPath, Timeout: s.ClaudeCLITimeout, Concurrency: int(s.ClaudeCLIConcurrency), TmpRoot: tmpRoot})
 		if err == nil {
 			f.cli, err = NewClaudeCLI(r, s.ActorModel)
+		}
+		if err != nil {
+			f.cli = nil
+		}
+	case ProviderOpencodeCLI:
+		r, err := clirun.New(clirun.Config{Path: s.OpencodeCLIPath, Timeout: s.OpencodeCLITimeout, Concurrency: int(s.OpencodeCLIConcurrency), TmpRoot: tmpRoot})
+		if err == nil {
+			f.cli, err = NewOpencodeCLI(r, s.ActorModel)
 		}
 		if err != nil {
 			f.cli = nil
@@ -53,11 +62,11 @@ func (f *Factory) Ready() bool { return f.provider == ProviderAnthropic || f.cli
 // resolved from the workspace credential on each call.
 func (f *Factory) Client(ctx context.Context, workspaceID string) (*Client, error) {
 	switch f.provider {
-	case ProviderClaudeCLI:
+	case ProviderClaudeCLI, ProviderOpencodeCLI:
 		if f.cli == nil {
 			return nil, ErrLLMUnconfigured
 		}
-		return &Client{providers: map[ProviderType]domain.LLMProvider{ProviderClaudeCLI: f.cli}, defaultProvider: ProviderClaudeCLI}, nil
+		return &Client{providers: map[ProviderType]domain.LLMProvider{f.provider: f.cli}, defaultProvider: f.provider}, nil
 	default:
 		return NewClientFromSecret(ctx, f.resolver, workspaceID, f.s, f.httpc)
 	}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/llm"
+	"github.com/LDKhangg/nexus-hub/internal/adapters/llm/clirun"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/netguard"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage"
 	"github.com/LDKhangg/nexus-hub/internal/settings"
@@ -58,8 +59,13 @@ func llmCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.W
 	// The setup context has a short fixed deadline; a CLI call may take
 	// up to its own timeout.
 	timeout := llmCheckSlack + 60*time.Second
-	if s.LLMProvider == settings.LLMProviderClaudeCLI {
+	switch s.LLMProvider {
+	case settings.LLMProviderClaudeCLI:
 		timeout = s.ClaudeCLITimeout + llmCheckSlack
+	case settings.LLMProviderOpencodeCLI:
+		// A structured opencode call may make one repair call, each
+		// followed by a session cleanup.
+		timeout = 2*(s.OpencodeCLITimeout+clirun.FollowUpTimeout) + llmCheckSlack
 	}
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()

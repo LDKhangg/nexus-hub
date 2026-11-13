@@ -15,6 +15,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -32,6 +34,10 @@ const (
 	// waitDelay bounds how long Wait waits for the output pipes after the
 	// child exits or is killed (a grandchild may hold them open).
 	waitDelay = 2 * time.Second
+	// FollowUpTimeout bounds a call's follow-up command.
+	FollowUpTimeout = 10 * time.Second
+	// followUpOutputBytes caps a follow-up's captured output (discarded).
+	followUpOutputBytes = 64 << 10
 )
 
 // EnvKeys are the only variables the child receives (when set in the
@@ -71,11 +77,29 @@ type Config struct {
 // verbatim (no shell). Files are written into the fresh working directory
 // before start, by base name, mode 0600 (for example a config file the CLI
 // reads from its working directory).
+//
+// EmptyDirEnv names environment variables the child gets pointing at a
+// fresh, empty, hub-owned directory inside the working directory (for
+// example XDG_CONFIG_HOME, so the CLI loads no user configuration). They
+// replace the same variables from EnvKeys. Names must be environment
+// variable names; values are never chosen by the caller.
+//
+// FollowUp, when set, is called with the stdout captured so far once the
+// main process has ended (exited, failed, timed out or been cancelled).
+// When it returns arguments, the same binary runs once more with them, in
+// the same working directory and environment, with no stdin, bounded by
+// FollowUpTimeout, before the directory is deleted; its outcome and output
+// are discarded (best effort, for example deleting a session the main
+// call created).
 type Call struct {
-	Args  []string
-	Stdin []byte
-	Files map[string][]byte
+	Args        []string
+	Stdin       []byte
+	Files       map[string][]byte
+	EmptyDirEnv []string
+	FollowUp    func(stdout []byte) []string
 }
+
+var envNameRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,63}$`)
 
 // Result is the outcome of a call whose process ran to exit. A non-zero
 // exit is not an error: the caller decides. Stdout and Stderr must never be
@@ -142,11 +166,28 @@ func (r *Runner) Timeout() time.Duration { return r.timeout }
 
 // Env returns the child's environment: only EnvKeys that are set.
 func (r *Runner) Env() []string {
-	var env []string
+	return r.env(nil)
+}
+
+// env returns EnvKeys that are set, with the overrides (name → value)
+// replacing or adding entries.
+func (r *Runner) env(override map[string]string) []string {
+	env := []string{}
 	for _, k := range EnvKeys {
+		if _, ok := override[k]; ok {
+			continue
+		}
 		if v, ok := r.lookup(k); ok && v != "" {
 			env = append(env, k+"="+v)
 		}
+	}
+	names := make([]string, 0, len(override))
+	for k := range override {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, k := range names {
+		env = append(env, k+"="+override[k])
 	}
 	return env
 }
@@ -181,16 +222,29 @@ func (r *Runner) Run(ctx context.Context, c Call) (*Result, error) {
 			return nil, ErrWorkDir
 		}
 	}
+	var override map[string]string
+	for i, name := range c.EmptyDirEnv {
+		if !envNameRe.MatchString(name) {
+			return nil, ErrWorkDir
+		}
+		// A Files entry with the same name makes Mkdir fail (ErrWorkDir).
+		sub := filepath.Join(dir, fmt.Sprintf(".nh-env-%d", i))
+		if err := os.Mkdir(sub, 0o700); err != nil {
+			return nil, ErrWorkDir
+		}
+		if override == nil {
+			override = map[string]string{}
+		}
+		override[name] = sub
+	}
+	env := r.env(override)
 
 	rctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
 	cmd := exec.Command(r.path, c.Args...)
 	cmd.Dir = dir
-	cmd.Env = r.Env()
-	if cmd.Env == nil {
-		cmd.Env = []string{} // never inherit the hub's environment
-	}
+	cmd.Env = env // never nil: the hub's environment is never inherited
 	cmd.Stdin = bytes.NewReader(c.Stdin)
 	stdout := &capWriter{max: MaxOutputBytes}
 	stderr := &capWriter{max: maxStderrBytes}
@@ -219,6 +273,12 @@ func (r *Runner) Run(ctx context.Context, c Call) (*Result, error) {
 	killGroup(pid)
 	dur := time.Since(start)
 
+	if c.FollowUp != nil {
+		if args := c.FollowUp(stdout.buf.Bytes()); len(args) > 0 {
+			r.followUp(ctx, dir, env, args)
+		}
+	}
+
 	if stopped {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -243,6 +303,35 @@ func (r *Runner) Run(ctx context.Context, c Call) (*Result, error) {
 		return nil, errors.New("clirun: wait failed")
 	}
 	return res, nil
+}
+
+// followUp runs the binary once more in dir, best effort: bounded by
+// FollowUpTimeout even when ctx is already cancelled, in its own process
+// group, killed with it; output and outcome are discarded.
+func (r *Runner) followUp(ctx context.Context, dir string, env, args []string) {
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), FollowUpTimeout)
+	defer cancel()
+	cmd := exec.Command(r.path, args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	cmd.Stdin = bytes.NewReader(nil)
+	sink := &capWriter{max: followUpOutputBytes}
+	cmd.Stdout, cmd.Stderr = sink, sink
+	cmd.WaitDelay = waitDelay
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if cmd.Start() != nil {
+		return
+	}
+	pid := cmd.Process.Pid
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-fctx.Done():
+		killGroup(pid)
+		<-done
+	}
+	killGroup(pid)
 }
 
 func signalOf(ee *exec.ExitError) syscall.Signal {

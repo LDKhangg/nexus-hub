@@ -118,6 +118,9 @@ const (
 type LLMError struct {
 	Code      string
 	Retryable bool
+	// Note is an optional fixed, safe detail for logs (for example
+	// "cli_tool_use"); never content. Error() does not include it.
+	Note string
 }
 
 func (e *LLMError) Error() string { return "llm: " + e.Code }

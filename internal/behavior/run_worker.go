@@ -130,6 +130,10 @@ type RunWorkerSettings struct {
 	DefaultModel     string        // when neither behavior nor profile sets one
 	DefaultMaxTokens int           // run token budget when neither sets one
 	MaxOutputTokens  int           // cap of one model reply
+	// ModelFits reports whether a model id fits the configured LLM
+	// provider (nil: every id fits). A run whose model does not fit fails
+	// with llm_unconfigured before any model call.
+	ModelFits func(model string) bool
 }
 
 // RunWorker executes behavior runs.
@@ -621,11 +625,14 @@ func totalTokens(u Usage) int {
 // errors when the first output is invalid. Usage is recorded per call.
 func (w *RunWorker) askModel(ctx context.Context, rc *RunContext) ([]ModelItem, *runOutcome, error) {
 	run := rc.Run
+	doc := rc.Doc
+	if w.s.ModelFits != nil && !w.s.ModelFits(doc.Model) {
+		return nil, runFail(CodeLLMUnconfigured), nil
+	}
 	provider, err := w.d.Models(ctx, run.WorkspaceID)
 	if err != nil || provider == nil {
 		return nil, runFail(CodeLLMUnconfigured), nil
 	}
-	doc := rc.Doc
 	system := systemPrompt(doc)
 	msgs := []domain.Message{{Role: domain.UserRole, Text: userPrompt(doc.Instructions, rc.Context)}}
 	used := run.Usage

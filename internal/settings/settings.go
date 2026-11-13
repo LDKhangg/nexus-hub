@@ -41,10 +41,13 @@ type Settings struct {
 	BehaviorPollInterval                  time.Duration // idle wait between behavior run claims
 	BehaviorMaxTokens                     int64         // run token budget when neither behavior nor profile sets one
 	ClickUpChatPollInterval               time.Duration // wait between ClickUp Chat polls
-	LLMProvider                           string        // anthropic (API key) | claude_cli
+	LLMProvider                           string        // anthropic (API key) | claude_cli | opencode_cli
 	ClaudeCLIPath                         string        // empty: not set
 	ClaudeCLITimeout                      time.Duration // one Claude CLI call
 	ClaudeCLIConcurrency                  int64         // Claude CLI calls at once
+	OpencodeCLIPath                       string        // empty: not set
+	OpencodeCLITimeout                    time.Duration // one opencode call
+	OpencodeCLIConcurrency                int64         // opencode calls at once
 }
 
 // Store reads every stored setting.
@@ -79,9 +82,13 @@ type spec struct {
 }
 
 var (
-	modelRe   = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,99}$`)
-	credRefRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,62}$`)
-	digitsRe  = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
+	// claudeModelRe: Claude model ids (anthropic, claude_cli).
+	claudeModelRe = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,99}$`)
+	// opencodeModelRe: opencode provider/model[#variant] ids. The first
+	// character is alphanumeric so an id can never look like a flag.
+	opencodeModelRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*/[A-Za-z0-9._-]+(#[A-Za-z0-9._-]+)?$`)
+	credRefRe       = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,62}$`)
+	digitsRe        = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
 )
 
 // maxChatID bounds Telegram chat IDs so they survive a JSON number exactly.
@@ -115,17 +122,62 @@ var specs = map[string]spec{
 	"behavior_max_tokens":        {kind: kInt, def: int64(100000), min: 1000, max: 1_000_000, set: func(s *Settings, v any) { s.BehaviorMaxTokens = v.(int64) }},
 	"clickup_chat_poll_interval": {kind: kDuration, def: 30 * time.Second, min: 10, max: 600, set: func(s *Settings, v any) { s.ClickUpChatPollInterval = v.(time.Duration) }},
 	"public_base_url":            {kind: kPublicURL, def: "", set: func(s *Settings, v any) { s.PublicBaseURL = v.(string) }},
-	"llm_provider":               {kind: kEnum, def: LLMProviderAnthropic, enum: []string{LLMProviderAnthropic, LLMProviderClaudeCLI}, set: func(s *Settings, v any) { s.LLMProvider = v.(string) }},
+	"llm_provider":               {kind: kEnum, def: LLMProviderAnthropic, enum: []string{LLMProviderAnthropic, LLMProviderClaudeCLI, LLMProviderOpencodeCLI}, set: func(s *Settings, v any) { s.LLMProvider = v.(string) }},
 	"claude_cli_path":            {kind: kExecPath, def: "", set: func(s *Settings, v any) { s.ClaudeCLIPath = v.(string) }},
 	"claude_cli_timeout":         {kind: kDuration, def: 120 * time.Second, min: 5, max: 1800, set: func(s *Settings, v any) { s.ClaudeCLITimeout = v.(time.Duration) }},
 	"claude_cli_concurrency":     {kind: kInt, def: int64(1), min: 1, max: 4, set: func(s *Settings, v any) { s.ClaudeCLIConcurrency = v.(int64) }},
+	"opencode_cli_path":          {kind: kExecPath, def: "", set: func(s *Settings, v any) { s.OpencodeCLIPath = v.(string) }},
+	"opencode_cli_timeout":       {kind: kDuration, def: 120 * time.Second, min: 5, max: 1800, set: func(s *Settings, v any) { s.OpencodeCLITimeout = v.(time.Duration) }},
+	"opencode_cli_concurrency":   {kind: kInt, def: int64(1), min: 1, max: 4, set: func(s *Settings, v any) { s.OpencodeCLIConcurrency = v.(int64) }},
 }
+
+// modelKeys are the settings that hold a model id, in report order.
+var modelKeys = []string{"triage_model", "actor_model", "summary_model"}
 
 // LLM provider values of llm_provider.
 const (
-	LLMProviderAnthropic = "anthropic"
-	LLMProviderClaudeCLI = "claude_cli"
+	LLMProviderAnthropic   = "anthropic"
+	LLMProviderClaudeCLI   = "claude_cli"
+	LLMProviderOpencodeCLI = "opencode_cli"
 )
+
+// maxModelIDLen bounds any model id.
+const maxModelIDLen = 200
+
+// IsClaudeModelID reports whether m has the shape of a Claude model id
+// (for llm_provider anthropic and claude_cli).
+func IsClaudeModelID(m string) bool { return claudeModelRe.MatchString(m) }
+
+// IsOpencodeModelID reports whether m has the shape of an opencode
+// provider/model[#variant] id (for llm_provider opencode_cli).
+func IsOpencodeModelID(m string) bool {
+	return len(m) <= maxModelIDLen && opencodeModelRe.MatchString(m)
+}
+
+// IsModelID reports whether m has either accepted model id shape.
+func IsModelID(m string) bool { return IsClaudeModelID(m) || IsOpencodeModelID(m) }
+
+// ModelFitsProvider reports whether model id m has the shape provider
+// expects.
+func ModelFitsProvider(provider, m string) bool {
+	if provider == LLMProviderOpencodeCLI {
+		return IsOpencodeModelID(m)
+	}
+	return IsClaudeModelID(m)
+}
+
+// modelMismatches lists the model settings of s that do not fit its
+// provider.
+func modelMismatches(s Settings) []string {
+	vals := map[string]string{"triage_model": s.TriageModel, "actor_model": s.ActorModel, "summary_model": s.SummaryModel}
+	var bad []string
+	for _, k := range modelKeys {
+		if !ModelFitsProvider(s.LLMProvider, vals[k]) {
+			bad = append(bad, k)
+		}
+	}
+	return bad
+}
 
 // Keys lists every known setting key, sorted.
 func Keys() []string {
@@ -166,6 +218,16 @@ func Load(ctx context.Context, store Store) (Settings, error) {
 	}
 	if s.LLMProvider == LLMProviderClaudeCLI && s.ClaudeCLIPath == "" {
 		return s, errors.New("settings: llm_provider claude_cli needs claude_cli_path")
+	}
+	if s.LLMProvider == LLMProviderOpencodeCLI && s.OpencodeCLIPath == "" {
+		return s, errors.New("settings: llm_provider opencode_cli needs opencode_cli_path")
+	}
+	if bad := modelMismatches(s); len(bad) > 0 {
+		shape := "Claude model ids (for example claude-haiku-5-5)"
+		if s.LLMProvider == LLMProviderOpencodeCLI {
+			shape = "provider/model ids (for example openai/gpt-6-luna)"
+		}
+		return s, fmt.Errorf("settings: llm_provider %s needs %s; does not fit: %s", s.LLMProvider, shape, strings.Join(bad, ", "))
 	}
 	return s, nil
 }
@@ -228,7 +290,7 @@ func parse(key string, raw json.RawMessage) (any, error) {
 	}
 	switch sp.kind {
 	case kModel:
-		if !modelRe.MatchString(str) {
+		if !IsModelID(str) {
 			return nil, bad
 		}
 	case kAbsPath:

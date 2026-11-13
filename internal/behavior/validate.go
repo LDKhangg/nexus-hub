@@ -242,7 +242,7 @@ func validate(doc Doc, vars map[string]string, allowed map[string]bool, env *val
 			c.add("budgets.max_steps", "must be between 1 and 20")
 		}
 	}
-	if doc.Model != "" && !modelRe.MatchString(doc.Model) {
+	if doc.Model != "" && !validModelID(doc.Model) {
 		c.add("model", "must be a model ID")
 	}
 	if p := doc.Profile; p != nil {

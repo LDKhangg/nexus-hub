@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage"
@@ -32,24 +33,42 @@ func settingsCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 			return enc.Encode(map[string]any{"key": key, "value": def, "source": "default"})
 		}
 		return enc.Encode(map[string]any{"key": key, "value": v, "source": "db"})
-	case len(args) == 3 && args[0] == "set":
-		raw, err := settings.ParseCLIValue(args[1], args[2])
-		if err != nil {
-			return err
+	case len(args) >= 3 && len(args)%2 == 1 && args[0] == "set":
+		// One or more key value pairs, stored together in one transaction.
+		pairs := map[string]json.RawMessage{}
+		var order []string
+		for i := 1; i < len(args); i += 2 {
+			key := args[i]
+			if _, dup := pairs[key]; dup {
+				return fmt.Errorf("settings: key %q given twice", key)
+			}
+			raw, err := settings.ParseCLIValue(key, args[i+1])
+			if err != nil {
+				return err
+			}
+			pairs[key] = raw
+			order = append(order, key)
 		}
 		// Cross-key constraints are checked on the merged set before storing.
 		current, err := store.All(ctx)
 		if err != nil {
 			return errors.New("settings read failed")
 		}
-		current[args[1]] = raw
+		for k, v := range pairs {
+			current[k] = v
+		}
 		if _, err := settings.Load(ctx, mapStore(current)); err != nil {
 			return err
 		}
-		if err := store.Set(ctx, args[1], raw); err != nil {
+		if err := store.SetMany(ctx, pairs); err != nil {
 			return errors.New("settings write failed")
 		}
-		return enc.Encode(map[string]any{"key": args[1], "value": raw, "source": "db", "note": "restart nexus-hub to apply"})
+		for _, k := range order {
+			if err := enc.Encode(map[string]any{"key": k, "value": pairs[k], "source": "db", "note": "restart nexus-hub to apply"}); err != nil {
+				return err
+			}
+		}
+		return nil
 	case len(args) == 1 && args[0] == "list":
 		stored, err := store.All(ctx)
 		if err != nil {
@@ -69,7 +88,7 @@ func settingsCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 		}
 		return nil
 	}
-	return errors.New("usage: settings get <key> | set <key> <value> | list")
+	return errors.New("usage: settings get <key> | set <key> <value> [<key> <value> ...] | list")
 }
 
 type mapStore map[string]json.RawMessage

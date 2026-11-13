@@ -199,6 +199,7 @@ func buildBehaviorEngine(pool *pgxpool.Pool, s settings.Settings, store *storage
 	}, behavior.RunWorkerSettings{
 		Workers: int(s.BehaviorWorkers), PollInterval: s.BehaviorPollInterval,
 		DefaultModel: s.ActorModel, DefaultMaxTokens: int(s.BehaviorMaxTokens), MaxOutputTokens: int(s.MaxOutputTokens),
+		ModelFits: func(m string) bool { return settings.ModelFitsProvider(s.LLMProvider, m) },
 	})
 	return runs, engine, nil
 }

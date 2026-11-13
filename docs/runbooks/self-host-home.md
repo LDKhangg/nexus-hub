@@ -123,6 +123,7 @@ runs. Pick one with `llm_provider`:
 |---|---|---|
 | `anthropic` (default) | the Anthropic API | the `anthropic` credential (section 4) |
 | `claude_cli` | the Claude Code CLI already signed in on this machine (`claude -p`) | `claude_cli_path` |
+| `opencode_cli` | the opencode CLI already signed in on this machine (for example with OpenAI) | `opencode_cli_path`, `provider/model` model ids |
 
 Start with `claude_cli` while you build trust in the hub; no API key is
 needed. Sign in to Claude Code once as the same user the server runs as
@@ -170,6 +171,53 @@ systemctl --user restart nexus-hub
 ```
 
 To go back, set `llm_provider` to `claude_cli` again and restart.
+
+### opencode with OpenAI models
+
+The hub can also use [opencode](https://opencode.ai) (v2) signed in on this
+machine, for example with your OpenAI account. Sign in once as the same
+user the server runs as (`opencode auth login`, pick OpenAI). With opencode
+the model settings are `provider/model[#variant]` ids, so switch the
+provider and the three models in one command (the hub refuses a provider
+whose models do not fit and names them):
+
+```sh
+nh settings set llm_provider opencode_cli \
+  opencode_cli_path "$(readlink -f "$(command -v opencode)")" \
+  triage_model openai/gpt-6-luna actor_model openai/gpt-6-luna summary_model openai/gpt-6-luna
+nh settings set opencode_cli_timeout 120s     # optional: one call (5s..30m)
+nh settings set opencode_cli_concurrency 1    # optional: calls at once (1..4)
+systemctl --user restart nexus-hub            # the log line "llm provider: opencode_cli" confirms it
+nh llm check                                  # {"provider":"opencode_cli","model":"openai/gpt-6-luna","ok":true,…,"input_tokens":…}
+```
+
+`input_tokens` shows what the hub's agent prompt costs per call (a few
+hundred tokens). A behavior or profile `model` must also be a
+`provider/model` id while `opencode_cli` is the provider; a run with a
+Claude id then fails with `llm_unconfigured` (and the other way round).
+
+How the hub runs opencode: `opencode run --standalone --format json
+--model <id> --agent nexus-hub --title nexus-hub`, directly (no shell), in a
+fresh empty temp directory deleted afterwards, the prompt on stdin. The hub
+writes an `opencode.json` into that directory defining the agent
+`nexus-hub` with its system prompt, every permission denied and no MCP
+server. The child's `XDG_CONFIG_HOME` is a fresh empty directory, so your
+global opencode config, `AGENTS.md`, plugins and MCP servers are never
+loaded; `XDG_DATA_HOME` (where your sign-in lives) passes through when set.
+Each run's session is deleted afterwards (`opencode session delete`), so
+hub calls do not stay in your opencode history.
+
+Notes:
+
+- opencode v2 always offers its built-in `skill` tool; it is inert here
+  (skills are denied and none can load). As a fail-safe, **any tool call
+  in opencode's output fails the call** with `llm_error` (logged as
+  `cli_tool_use`) and its text is not used. The agent's real tools are
+  still run only by the hub.
+- opencode has no JSON-schema flag: the hub asks for one JSON object in the
+  prompt, checks it against the schema and asks once more with the error
+  when it does not fit; a second miss is `llm_error`.
+- A missing sign-in and an unknown model both show as `llm_unconfigured`.
 
 ## 5. ClickUp webhook
 
