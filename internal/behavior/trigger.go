@@ -53,8 +53,9 @@ type Event struct {
 	// Mentioned is true when the comment or chat message tags the owner,
 	// as read by the source parser or chat poller from trusted tag data.
 	Mentioned bool
-	// TaggedUserIDs are the ClickUp user IDs a comment tags, read by the
-	// source parser from the comment's tag parts (at most
+	// TaggedUserIDs are the ClickUp user IDs a comment or chat message
+	// tags, read by the source parser from the comment's tag parts or by
+	// the chat poller from the message's user mention markup (at most
 	// MaxTaggedUserIDs). MatchEvent sets Mentioned when the owner is
 	// among them.
 	TaggedUserIDs []string

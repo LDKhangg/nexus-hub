@@ -491,12 +491,19 @@ func renderTrace(t Trace, loc *time.Location, item, calls bool) string {
 }
 
 // chatTrigger renders the trusted identifiers of a chat-triggered run:
-// channel type, sender and message IDs and the pull requests. The message
+// channel type, sender and message IDs, the channel name (channel
+// messages), whether the owner is tagged, and the pull requests. The message
 // text is never stored, so it cannot be shown.
 func (w *traceText) chatTrigger(r TraceRun) {
 	td, err := DecodeTriggerData(r.Trigger)
 	if err == nil {
 		w.line("Chat: %s · người gửi %s · tin nhắn %s", orDash(td.ChannelType), orDash(td.SenderID), orDash(td.MessageID))
+		if td.ChannelName != "" {
+			w.line("Kênh: %s", td.ChannelName)
+		}
+		if td.Mentioned {
+			w.line("Nhắc tới: owner")
+		}
 	}
 	if len(r.PRs) > 0 {
 		w.line("PR: %s", strings.Join(r.PRs, ", "))
