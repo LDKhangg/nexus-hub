@@ -21,7 +21,7 @@ func (p pollVersions) EnabledVersions(context.Context, string) ([]behavior.Versi
 type pollSecrets struct{}
 func (pollSecrets) Resolve(context.Context, string, string) (string, error) { return "fake-token", nil }
 
-type pollState struct { state behavior.ChatPollState; fresh bool; advances []int64; errors []string; claims int }
+type pollState struct { state behavior.ChatPollState; fresh bool; advances []int64; errors []string; claimed bool }
 func (s *pollState) InitChatPoll(_ context.Context, ws, in, team string, now int64) (behavior.ChatPollState, bool, error) {
 	if s.state.TeamID == "" { s.state = behavior.ChatPollState{WorkspaceID: ws, IntegrationID: in, TeamID: team, CursorMS: now}; f := s.fresh; s.fresh = false; return s.state, f, nil }
 	return s.state, false, nil
@@ -30,13 +30,17 @@ func (s *pollState) GetChatPoll(context.Context, string, string) (behavior.ChatP
 func (s *pollState) AdvanceChatCursor(_ context.Context, _, _, _ string, cursor int64) (int64, error) { s.advances = append(s.advances, cursor); if cursor > s.state.CursorMS { s.state.CursorMS = cursor }; return s.state.CursorMS, nil }
 func (s *pollState) RecordChatPollError(_ context.Context, _, _, code string, now time.Time, base, max time.Duration) (behavior.ChatPollState, error) { s.errors = append(s.errors, code); s.state.ErrorStreak++; if code == CodeUnauthorized { s.state.UnauthorizedStreak++ } else { s.state.UnauthorizedStreak = 0 }; until := now.Add(base); s.state.BackoffUntil = &until; return s.state, nil }
 func (s *pollState) ResetChatPollErrors(context.Context, string, string) error { s.state.ErrorStreak = 0; s.state.BackoffUntil = nil; return nil }
-func (s *pollState) ClaimChatUnauthorizedNotice(context.Context, string, string, int, time.Time) (bool, error) { s.claims++; return s.claims == 1, nil }
+func (s *pollState) ClaimChatUnauthorizedNotice(_ context.Context, _, _ string, min int, _ time.Time) (bool, error) { if s.claimed || s.state.UnauthorizedStreak < min { return false, nil }; s.claimed = true; return true, nil }
 
 type pollRuns struct { events [][]behavior.Event; err error }
 func (r *pollRuns) StartChatRuns(_ context.Context, _ string, ev []behavior.Event) (int, error) { r.events = append(r.events, ev); return len(ev), r.err }
 type pollChat struct { channels clickupchat.Page[clickupchat.Channel]; messages clickupchat.Page[clickupchat.Message]; err error }
 func (f *pollChat) DMChannelsSince(context.Context, string, string, []string, int64, string) (clickupchat.Page[clickupchat.Channel], error) { if f.err != nil { return clickupchat.Page[clickupchat.Channel]{}, f.err }; return f.channels, nil }
 func (f *pollChat) Messages(context.Context, string, string, string, string) (clickupchat.Page[clickupchat.Message], error) { if f.err != nil { return clickupchat.Page[clickupchat.Message]{}, f.err }; return f.messages, nil }
+type ownerChatFake struct{}
+func (ownerChatFake) OwnerChat(context.Context, string, behavior.TriggerData) (behavior.ChatRef, error) { return behavior.ChatRef{WorkspaceID: "ws", IntegrationID: "tg", ChatID: 1}, nil }
+type senderFake struct{ sent []string }
+func (s *senderFake) SendMessage(_ context.Context, _ behavior.ChatRef, m behavior.OutMessage) (int64, error) { s.sent = append(s.sent, m.Text); return int64(len(s.sent)), nil }
 
 func pollVersion(t *testing.T) behavior.Version {
 	t.Helper()
@@ -77,6 +81,18 @@ func TestPollerPhase3dCursorRestartBackoffAndPrivacy(t *testing.T) {
 		if len(state.errors) != 1 || state.errors[0] != CodeUnavailable || state.state.BackoffUntil == nil { t.Fatalf("state=%#v", state) }
 		if strings.Contains(logs.String(), private) { t.Fatalf("private error logged: %s", logs.String()) }
 		if got := errorCode(&clickupchat.Error{Code: clickupchat.CodeUnauthorized}); got != CodeUnauthorized { t.Fatalf("unauthorized=%q", got) }
+	})
+
+	t.Run("TC-31/three unauthorized failures send one notice", func(t *testing.T) {
+		state := &pollState{state: behavior.ChatPollState{WorkspaceID: "ws", IntegrationID: "in", TeamID: "123"}}
+		sender := &senderFake{}
+		p := New(Deps{State: state, Chats: ownerChatFake{}, Messenger: sender}, Settings{Now: func() time.Time { return now }, Interval: 10 * time.Second})
+		p.fail(context.Background(), target, CodeUnauthorized)
+		p.fail(context.Background(), target, CodeUnauthorized)
+		if len(sender.sent) != 0 { t.Fatalf("early notices=%v", sender.sent) }
+		p.fail(context.Background(), target, CodeUnauthorized)
+		p.fail(context.Background(), target, CodeUnauthorized)
+		if len(sender.sent) != 1 || !strings.Contains(sender.sent[0], "3 lần") { t.Fatalf("notices=%v", sender.sent) }
 	})
 
 	t.Run("TC-28/run storage failure never advances cursor", func(t *testing.T) {
