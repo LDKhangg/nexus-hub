@@ -50,7 +50,7 @@ status=0
 timeout --kill-after=30 "${HANDOFF_TIMEOUT:-5400}" \
   opencode "${args[@]}" "$msg" </dev/null >"$events" 2>"$events.err" || status=$?
 
-sid=$(jq -r 'select(.sessionID != null) | .sessionID' "$events" 2>/dev/null | head -n1)
+sid=$(jq -rn 'first(inputs | select(.sessionID != null) | .sessionID) // empty' "$events" 2>/dev/null || true)
 # The report is the text of the last step that produced text.
 jq -rs '
   [ .[] | select(.type == "text") | .part.text // empty ] as $t
