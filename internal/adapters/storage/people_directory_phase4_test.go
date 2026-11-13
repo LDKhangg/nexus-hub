@@ -139,6 +139,10 @@ func TestPhase4PeopleDirectory(t *testing.T) {
 		if _, err := holder.Exec(ctx, `SELECT id FROM workspaces WHERE id=$1 FOR UPDATE`, workspaceA); err != nil {
 			t.Fatal(err)
 		}
+		var holderPID int
+		if err := holder.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPID); err != nil {
+			t.Fatal(err)
+		}
 		var wg sync.WaitGroup
 		errs := make(chan error, 2)
 		for i := 0; i < 2; i++ {
@@ -149,7 +153,13 @@ func TestPhase4PeopleDirectory(t *testing.T) {
 			}()
 		}
 		deadline := time.Now().Add(10 * time.Second)
-		for countSQL(t, ctx, pool, `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%locked_workspace%'`) < 2 {
+		// Both sightings must be blocked by the holder's workspace row lock,
+		// whichever statement takes it. The second waiter may queue behind
+		// the first on the tuple lock, so a waiter blocked by a waiter that
+		// the holder blocks also counts.
+		const blockedByHolder = `WITH w AS (SELECT pid, pg_blocking_pids(pid) AS b FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock')
+SELECT count(*) FROM w WHERE $1::int = ANY(w.b) OR EXISTS (SELECT 1 FROM w w2 WHERE w2.pid = ANY(w.b) AND $1::int = ANY(w2.b))`
+		for countSQL(t, ctx, pool, blockedByHolder, holderPID) < 2 {
 			if time.Now().After(deadline) {
 				t.Fatal("sightings did not reach the workspace lock")
 			}

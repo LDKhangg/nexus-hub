@@ -369,8 +369,10 @@ func TestPhase4ReviewRegressions(t *testing.T) {
 		if utf8.RuneCountInString(line) > 200 || !strings.Contains(line, "…") || !strings.HasSuffix(line, "+1") {
 			t.Fatalf("one huge item not cut: %q (%d runes)", line, utf8.RuneCountInString(line))
 		}
+		// An empty Report.UserID means the workspace owner; phase4Store has
+		// no OwnerUserID, so the renderer falls back to DefaultOwnerUserID.
 		normal := newPhase4Store()
-		normal.prefs[scopeKey("", "ws", "")] = Prefs{Style: StyleNormal}
+		normal.prefs[scopeKey(DefaultOwnerUserID, "ws", "")] = Prefs{Style: StyleNormal}
 		out, err = NewRenderer(normal, nil).Render(ctx, Report{Kind: KindNotify, WorkspaceID: "ws", Values: Values{Items: "• a\n• b"}})
 		if err != nil || !strings.Contains(out, "\n• a\n• b") {
 			t.Fatalf("normal style should list items one per line: %q err=%v", out, err)
