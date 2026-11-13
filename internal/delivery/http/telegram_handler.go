@@ -38,6 +38,12 @@ type TemplateReplyStager interface {
 	StageTemplateReply(ctx context.Context, workspaceID string, messageID int64, body string, now time.Time) (string, error)
 }
 
+// AssistantStager keeps the owner's plain free text in memory for the
+// Telegram assistant and returns a short opaque key for the worker.
+type AssistantStager interface {
+	StageAssistantText(workspaceID, text string, now time.Time) (string, error)
+}
+
 // TelegramHandler receives Telegram updates for the owner. It verifies the
 // secret token, keeps only the owner's updates, stores them once per
 // update_id and answers at once; all work runs later from storage.
@@ -56,6 +62,7 @@ type TelegramHandler struct {
 	inbox        behavior.InboxStore
 	answers      AnswerStager
 	templates    TemplateReplyStager
+	assistant    AssistantStager
 	ownerChatID  int64
 	ownerUserID  int64
 	now          func() time.Time
@@ -224,6 +231,13 @@ func (h *TelegramHandler) WithOwnerUser(userID int64) *TelegramHandler {
 	return h
 }
 
+// WithAssistant hands the owner's plain free text (not a reply) to the
+// Telegram assistant through stager. Nil keeps plain text without content.
+func (h *TelegramHandler) WithAssistant(stager AssistantStager) *TelegramHandler {
+	h.assistant = stager
+	return h
+}
+
 // isOwner applies the owner rule (see TelegramHandler).
 func (h *TelegramHandler) isOwner(chatID, fromID int64) bool {
 	owner := h.ownerChatID
@@ -290,7 +304,23 @@ func (h *TelegramHandler) normalize(ctx context.Context, workspaceID string, upd
 			return u, true, nil
 		}
 		u.Kind = behavior.UpdateText
-		if m.ReplyTo == nil || m.ReplyTo.MessageID <= 0 || text == "" {
+		if text == "" {
+			return u, true, nil
+		}
+		if m.ReplyTo == nil || m.ReplyTo.MessageID <= 0 {
+			if h.assistant == nil {
+				return u, true, nil
+			}
+			if utf8.RuneCountInString(text) > 4000 {
+				u.Note = behavior.NoteTextTooLong
+				return u, true, nil
+			}
+			// The text stays in memory for the worker, never in the update row.
+			key, err := h.assistant.StageAssistantText(workspaceID, text, h.now())
+			if err != nil {
+				return u, true, nil
+			}
+			u.Args = behavior.AssistantTextPrefix + key
 			return u, true, nil
 		}
 		if utf8.RuneCountInString(text) > 4000 {

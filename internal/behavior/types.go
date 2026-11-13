@@ -101,6 +101,9 @@ const (
 	ApprovalFeedbackReason ApprovalKind = "feedback_reason"
 	// ApprovalContactAlias waits for the owner's free-text name for an account.
 	ApprovalContactAlias ApprovalKind = "contact_alias"
+	// ApprovalAssistantAction is a write the Telegram assistant proposed;
+	// "Làm" runs it through the same handler as the slash command.
+	ApprovalAssistantAction ApprovalKind = "assistant_action"
 )
 
 // Decision is an approval's outcome.

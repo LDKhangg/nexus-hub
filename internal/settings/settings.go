@@ -48,6 +48,7 @@ type Settings struct {
 	OpencodeCLIPath                       string        // empty: not set
 	OpencodeCLITimeout                    time.Duration // one opencode call
 	OpencodeCLIConcurrency                int64         // opencode calls at once
+	TelegramAssistant                     bool          // owner free text goes to the LLM assistant
 }
 
 // Store reads every stored setting.
@@ -129,6 +130,7 @@ var specs = map[string]spec{
 	"opencode_cli_path":          {kind: kExecPath, def: "", set: func(s *Settings, v any) { s.OpencodeCLIPath = v.(string) }},
 	"opencode_cli_timeout":       {kind: kDuration, def: 120 * time.Second, min: 5, max: 1800, set: func(s *Settings, v any) { s.OpencodeCLITimeout = v.(time.Duration) }},
 	"opencode_cli_concurrency":   {kind: kInt, def: int64(1), min: 1, max: 4, set: func(s *Settings, v any) { s.OpencodeCLIConcurrency = v.(int64) }},
+	"telegram_assistant":         {kind: kBool, def: true, set: func(s *Settings, v any) { s.TelegramAssistant = v.(bool) }},
 }
 
 // modelKeys are the settings that hold a model id, in report order.

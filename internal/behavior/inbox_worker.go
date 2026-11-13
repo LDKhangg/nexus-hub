@@ -56,6 +56,8 @@ type InboxDeps struct {
 	Callbacks CallbackHandler
 	People    people.Directory
 	Reports   ReportSettings
+	// Assistant, when set, answers the owner's plain free text.
+	Assistant *Assistant
 }
 
 // InboxWorker processes stored Telegram updates: built-in commands,
@@ -434,6 +436,9 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 	if data.Kind.Decides() && (a.Decision != "" || !w.now().Before(a.ExpiresAt)) {
 		return msgStale, "stale", true
 	}
+	if a.Kind == ApprovalAssistantAction {
+		return w.assistantCallback(ctx, u, to, data, a, actor, corr)
+	}
 	hctx, cancel := context.WithTimeout(ctx, w.settings.HandlerTimeout)
 	defer cancel()
 	res, err := w.d.Callbacks.HandleCallback(hctx, CallbackAction{
@@ -457,6 +462,9 @@ func (w *InboxWorker) freeText(ctx context.Context, u InboundUpdate, to ChatRef,
 	nonce := strings.TrimSpace(u.Args)
 	if strings.HasPrefix(nonce, templateReplyPrefix) {
 		return w.reportTemplateReply(ctx, u, to)
+	}
+	if strings.HasPrefix(nonce, AssistantTextPrefix) {
+		return w.assistant(ctx, u, to, actor, corr)
 	}
 	if nonce == "" {
 		return w.reply(ctx, to, msgHint, "")

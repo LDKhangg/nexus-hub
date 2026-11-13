@@ -670,6 +670,26 @@ example, `?{link}{link}`. A template is limited to 1,000 characters and 12
 lines. Unknown placeholders and control characters are rejected. Failure and
 skipped-approval reports always retain a non-empty reason.
 
+### Talk to the bot
+
+You can also write to the bot in plain words. Nexus sends the message to the
+`triage_model` of your LLM provider, which picks one known action:
+
+```text
+lần chạy gần nhất ra sao?          → the trace of the latest run
+5 run gần đây                      → a short list of recent runs
+tìm liên hệ Lan                    → /contacts Lan
+đặt tên clickup:12345 là chị Lan   → asks first: "Làm" / "Huỷ"
+chuyển báo cáo sang detailed       → asks first: "Làm" / "Huỷ"
+```
+
+Reads (help, contacts, a trace, recent runs, report preferences, a template)
+answer at once. Writes (a contact name, the report style) run only after you
+press **Làm**, through the same code as `/alias` and `/prefs`. If the model is
+unsure, unavailable, or answers badly, the bot says so and points to `/help`;
+nothing runs. Your message is never stored or logged, and at most 6 messages a
+minute go to the model. Turn it off with `nh settings set telegram_assistant false`.
+
 ## Upkeep
 
 - Updates: `git pull`, rebuild both binaries, run `goose … up`, then

@@ -41,7 +41,8 @@ func (s *BehaviorStore) CreateApproval(ctx context.Context, workspaceID string, 
 	}
 	switch a.Kind {
 	case behavior.ApprovalItemAnswer, behavior.ApprovalPostDraft, behavior.ApprovalConfirmAction,
-		behavior.ApprovalFeedback, behavior.ApprovalFeedbackReason:
+		behavior.ApprovalFeedback, behavior.ApprovalFeedbackReason, behavior.ApprovalContactAlias,
+		behavior.ApprovalAssistantAction:
 	default:
 		return behavior.Approval{}, invalid("kind")
 	}

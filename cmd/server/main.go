@@ -101,6 +101,13 @@ func run() error {
 	// "not available" until it is wired.
 	reportSettings := reporting.NewPostgresStore(pool)
 	telegramHandler := httpdelivery.NewTelegramHandler(integrations, resolver, behaviors, behaviors, s.OwnerTelegramChatID, reportSettings).WithOwnerUser(s.OwnerTelegramUserID)
+	// The Telegram assistant (telegram_assistant): the owner's plain free
+	// text reaches the worker in memory only, then the triage model.
+	var assistant *behavior.Assistant
+	if s.TelegramAssistant {
+		assistant = &behavior.Assistant{Models: ag.provider, Model: s.TriageModel, Runs: behaviors, Inbox: behavior.NewAssistantInbox()}
+		telegramHandler.WithAssistant(assistant.Inbox)
+	}
 	commands, err := behavior.NewCommandRunner(behaviors, behaviors)
 	if err != nil {
 		return errors.New("behavior command runner startup failed")
@@ -113,9 +120,10 @@ func run() error {
 	inbox := behavior.NewInboxWorker(behavior.InboxDeps{
 		Inbox: behaviors, Approvals: behaviors, Defs: behaviors, Messenger: messenger,
 		Commands: commands, Undoer: engine, Callbacks: engine,
-		Tracer:  &behavior.TraceService{Store: behaviors, Profiles: behaviors, People: ag.people},
-		People:  ag.people,
-		Reports: reportSettings,
+		Tracer:    &behavior.TraceService{Store: behaviors, Profiles: behaviors, People: ag.people},
+		People:    ag.people,
+		Reports:   reportSettings,
+		Assistant: assistant,
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
 	workspaces, err := storage.NewWorkspaceRepository(pool)
 	if err != nil {
