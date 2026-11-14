@@ -544,7 +544,7 @@ func (s *BehaviorStore) ClaimRun(ctx context.Context, now time.Time, lease time.
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	run := mapRun(row, "")
+	run := mapRun(row, cand.BehaviorName)
 	run.ClaimToken = tok
 	return &run, nil
 }

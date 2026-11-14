@@ -2006,7 +2006,9 @@ func (q *Queries) LockClaimedBehaviorRun(ctx context.Context, arg LockClaimedBeh
 
 const lockDurableBehaviorRun = `-- name: LockDurableBehaviorRun :one
 
-SELECT r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot, r.run_actions, r.workflow_attempt_deadline FROM public.behavior_runs r
+SELECT r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot, r.run_actions, r.workflow_attempt_deadline, b.name AS behavior_name
+FROM public.behavior_runs r
+JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
 JOIN public.workflow_executions e ON e.workspace_id = r.workspace_id AND e.legacy_run_id = r.id
 WHERE r.workspace_id = $1 AND r.id = $2 AND e.id = $3
 FOR UPDATE OF r
@@ -2018,43 +2020,49 @@ type LockDurableBehaviorRunParams struct {
 	ExecutionID int64
 }
 
+type LockDurableBehaviorRunRow struct {
+	BehaviorRun  BehaviorRun
+	BehaviorName string
+}
+
 // Durable runs: a run executed as workflow steps. Every write is made in
 // the transaction that holds the workflow job fence; the run must be the
 // execution's legacy run, in the same workspace, and never legacy-claimed.
-func (q *Queries) LockDurableBehaviorRun(ctx context.Context, arg LockDurableBehaviorRunParams) (BehaviorRun, error) {
+func (q *Queries) LockDurableBehaviorRun(ctx context.Context, arg LockDurableBehaviorRunParams) (LockDurableBehaviorRunRow, error) {
 	row := q.db.QueryRow(ctx, lockDurableBehaviorRun, arg.WorkspaceID, arg.ID, arg.ExecutionID)
-	var i BehaviorRun
+	var i LockDurableBehaviorRunRow
 	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.BehaviorID,
-		&i.BehaviorVersionID,
-		&i.Version,
-		&i.TriggerKind,
-		&i.Trigger,
-		&i.Subject,
-		&i.Revision,
-		&i.Status,
-		&i.CorrelationID,
-		&i.Attempts,
-		&i.RunAt,
-		&i.LockedUntil,
-		&i.ClaimToken,
-		&i.InputTokens,
-		&i.OutputTokens,
-		&i.CacheReadTokens,
-		&i.CacheWriteTokens,
-		&i.Steps,
-		&i.ErrorCode,
-		&i.Snapshot,
-		&i.UndoneAt,
-		&i.StartedAt,
-		&i.FinishedAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.ContextSnapshot,
-		&i.RunActions,
-		&i.WorkflowAttemptDeadline,
+		&i.BehaviorRun.ID,
+		&i.BehaviorRun.WorkspaceID,
+		&i.BehaviorRun.BehaviorID,
+		&i.BehaviorRun.BehaviorVersionID,
+		&i.BehaviorRun.Version,
+		&i.BehaviorRun.TriggerKind,
+		&i.BehaviorRun.Trigger,
+		&i.BehaviorRun.Subject,
+		&i.BehaviorRun.Revision,
+		&i.BehaviorRun.Status,
+		&i.BehaviorRun.CorrelationID,
+		&i.BehaviorRun.Attempts,
+		&i.BehaviorRun.RunAt,
+		&i.BehaviorRun.LockedUntil,
+		&i.BehaviorRun.ClaimToken,
+		&i.BehaviorRun.InputTokens,
+		&i.BehaviorRun.OutputTokens,
+		&i.BehaviorRun.CacheReadTokens,
+		&i.BehaviorRun.CacheWriteTokens,
+		&i.BehaviorRun.Steps,
+		&i.BehaviorRun.ErrorCode,
+		&i.BehaviorRun.Snapshot,
+		&i.BehaviorRun.UndoneAt,
+		&i.BehaviorRun.StartedAt,
+		&i.BehaviorRun.FinishedAt,
+		&i.BehaviorRun.CreatedAt,
+		&i.BehaviorRun.UpdatedAt,
+		&i.BehaviorRun.ContextSnapshot,
+		&i.BehaviorRun.RunActions,
+		&i.BehaviorRun.WorkflowAttemptDeadline,
+		&i.BehaviorName,
 	)
 	return i, err
 }
@@ -2328,7 +2336,9 @@ func (q *Queries) SearchReusableDecisions(ctx context.Context, arg SearchReusabl
 }
 
 const selectBehaviorRunClaimCandidate = `-- name: SelectBehaviorRunClaimCandidate :one
-SELECT r.id, r.workspace_id FROM public.behavior_runs r
+SELECT r.id, r.workspace_id, b.name AS behavior_name
+FROM public.behavior_runs r
+JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
 WHERE ((r.status = 'pending' AND r.run_at <= $1::timestamptz)
     OR (r.status = 'running' AND r.locked_until <= $1::timestamptz))
   AND r.attempts < $2::int
@@ -2346,8 +2356,9 @@ type SelectBehaviorRunClaimCandidateParams struct {
 }
 
 type SelectBehaviorRunClaimCandidateRow struct {
-	ID          int64
-	WorkspaceID pgtype.UUID
+	ID           int64
+	WorkspaceID  pgtype.UUID
+	BehaviorName string
 }
 
 // A due pending run, or a running run whose lease ended. Runs of a
@@ -2357,7 +2368,7 @@ type SelectBehaviorRunClaimCandidateRow struct {
 func (q *Queries) SelectBehaviorRunClaimCandidate(ctx context.Context, arg SelectBehaviorRunClaimCandidateParams) (SelectBehaviorRunClaimCandidateRow, error) {
 	row := q.db.QueryRow(ctx, selectBehaviorRunClaimCandidate, arg.AtTime, arg.MaxAttempts)
 	var i SelectBehaviorRunClaimCandidateRow
-	err := row.Scan(&i.ID, &i.WorkspaceID)
+	err := row.Scan(&i.ID, &i.WorkspaceID, &i.BehaviorName)
 	return i, err
 }
 

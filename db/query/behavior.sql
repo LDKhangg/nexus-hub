@@ -97,7 +97,9 @@ WHERE r.status = 'running' AND r.locked_until <= sqlc.arg(at_time)::timestamptz 
 -- cut-over workspace and runs owned by a workflow execution are never
 -- candidates; the claim re-checks the workspace's runtime mode under its
 -- KEY SHARE lock (this filter only skips them cheaply).
-SELECT r.id, r.workspace_id FROM public.behavior_runs r
+SELECT r.id, r.workspace_id, b.name AS behavior_name
+FROM public.behavior_runs r
+JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
 WHERE ((r.status = 'pending' AND r.run_at <= sqlc.arg(at_time)::timestamptz)
     OR (r.status = 'running' AND r.locked_until <= sqlc.arg(at_time)::timestamptz))
   AND r.attempts < sqlc.arg(max_attempts)::int
@@ -453,7 +455,9 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND run_id = sqlc.arg(run_id) AND ms
 -- execution's legacy run, in the same workspace, and never legacy-claimed.
 
 -- name: LockDurableBehaviorRun :one
-SELECT r.* FROM public.behavior_runs r
+SELECT sqlc.embed(r), b.name AS behavior_name
+FROM public.behavior_runs r
+JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
 JOIN public.workflow_executions e ON e.workspace_id = r.workspace_id AND e.legacy_run_id = r.id
 WHERE r.workspace_id = sqlc.arg(workspace_id) AND r.id = sqlc.arg(id) AND e.id = sqlc.arg(execution_id)
 FOR UPDATE OF r;

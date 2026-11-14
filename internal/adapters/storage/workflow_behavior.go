@@ -24,11 +24,12 @@ import (
 var _ behavior.DurableRunStore = (*BehaviorStore)(nil)
 
 type durableRunTx struct {
-	q   *sqlc.Queries
-	ws  pgtype.UUID
-	job sqlc.Job
-	run sqlc.BehaviorRun
-	req workflow.JobCheckpointRequest
+	q            *sqlc.Queries
+	ws           pgtype.UUID
+	job          sqlc.Job
+	run          sqlc.BehaviorRun
+	behaviorName string
+	req          workflow.JobCheckpointRequest
 }
 
 func durableFenceRequest(f behavior.RunFence) workflow.JobCheckpointRequest {
@@ -72,7 +73,7 @@ func (s *BehaviorStore) withDurableRun(ctx context.Context, f behavior.RunFence,
 	if err != nil {
 		return err
 	}
-	run, err := q.LockDurableBehaviorRun(ctx, sqlc.LockDurableBehaviorRunParams{WorkspaceID: ws, ID: runID, ExecutionID: f.ExecutionID})
+	locked, err := q.LockDurableBehaviorRun(ctx, sqlc.LockDurableBehaviorRunParams{WorkspaceID: ws, ID: runID, ExecutionID: f.ExecutionID})
 	if isNoRows(err) {
 		return behavior.ErrWorkflowFence
 	}
@@ -82,11 +83,12 @@ func (s *BehaviorStore) withDurableRun(ctx context.Context, f behavior.RunFence,
 	// A legacy claim refuses durable writes, except that a new attempt
 	// (running=false) takes over a run imported by the cutover once its
 	// legacy lease has ended, like a legacy reclaim.
+	run := locked.BehaviorRun
 	legacyClaimLive := run.ClaimToken.Valid && (running || !run.LockedUntil.Valid || run.LockedUntil.Time.After(f.At))
 	if legacyClaimLive || !(run.Status == string(behavior.RunRunning) || !running && run.Status == string(behavior.RunPending)) {
 		return behavior.ErrConflict
 	}
-	if err := fn(&durableRunTx{q: q, ws: ws, job: job, run: run, req: req}); err != nil {
+	if err := fn(&durableRunTx{q: q, ws: ws, job: job, run: run, behaviorName: locked.BehaviorName, req: req}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -120,7 +122,7 @@ func (s *BehaviorStore) BeginDurableRunAttempt(ctx context.Context, f behavior.R
 		if err != nil {
 			return err
 		}
-		out = mapRun(row, "")
+		out = mapRun(row, t.behaviorName)
 		return nil
 	})
 	return out, err
