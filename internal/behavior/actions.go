@@ -917,7 +917,14 @@ func (e *Engine) ensureApproval(ctx context.Context, ws string, na NewApproval, 
 	if len(na.Options) == 0 {
 		na.Options = json.RawMessage(`[]`)
 	}
-	a, err := e.d.Store.CreateApproval(ctx, ws, na)
+	// A durable step binds a blocking approval to itself in the same
+	// transaction that creates it; every other approval has no wait.
+	var a Approval
+	if bind := approvalBinderFrom(ctx); bind != nil && blockingApproval(na.Kind) {
+		a, err = bind(ctx, na)
+	} else {
+		a, err = e.d.Store.CreateApproval(ctx, ws, na)
+	}
 	if errors.Is(err, ErrConflict) {
 		if a, ok, ferr := find(); ferr != nil || ok {
 			return a, ferr

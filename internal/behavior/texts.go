@@ -73,10 +73,13 @@ func (t texts) changeUnassign(task, user string) string {
 }
 
 // Replies and toasts.
-func (t texts) posted() string        { return t.pick("Đã đăng.", "Posted.") }
-func (t texts) answered() string      { return t.pick("Đã ghi câu trả lời.", "Answer recorded.") }
-func (t texts) skipped() string       { return t.pick("Đã bỏ qua.", "Skipped.") }
-func (t texts) canceled() string      { return t.pick("Đã huỷ.", "Canceled.") }
+func (t texts) posted() string   { return t.pick("Đã đăng.", "Posted.") }
+func (t texts) answered() string { return t.pick("Đã ghi câu trả lời.", "Answer recorded.") }
+func (t texts) skipped() string  { return t.pick("Đã bỏ qua.", "Skipped.") }
+func (t texts) canceled() string { return t.pick("Đã huỷ.", "Canceled.") }
+func (t texts) decisionRecorded() string {
+	return t.pick("Đã ghi nhận quyết định; Nexus sẽ thực hiện.", "Decision recorded; Nexus will apply it.")
+}
 func (t texts) thanks() string        { return t.pick("Đã ghi nhận.", "Noted.") }
 func (t texts) notApplicable() string { return t.pick("Không áp dụng.", "Not applicable.") }
 func (t texts) replyPrompt() string {

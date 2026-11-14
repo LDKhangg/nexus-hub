@@ -145,6 +145,10 @@ type WorkflowSteps struct {
 	runs DurableRunStore
 	auth ActionAuthorizer
 	now  func() time.Time
+	// waits and applier make blocking approvals durable waits; nil keeps
+	// unbound approvals (see EnableApprovalWaits).
+	waits   ApprovalWaitStore
+	applier DecisionApplier
 }
 
 // NewWorkflowSteps builds the behavior step executors over the run
@@ -411,6 +415,14 @@ func (s *WorkflowSteps) execute(ctx context.Context, sc workflow.StepContext, ph
 	}
 	st := newDurableState(run.ID, sc.Checkpoint)
 
+	// A step woken by a decision of its bound approvals applies the
+	// recorded decisions without another run attempt.
+	if cont, err := s.waitContinuation(ctx, sc, run, st); err != nil {
+		return workflow.StepResult{}, storageErr(ctx, err)
+	} else if cont {
+		return s.continueWaits(ctx, sc, fence, st)
+	}
+
 	// A run whose projection already ended: known completed work is not
 	// repeated (a skipped run, or a step retried after the run's end was
 	// recorded).
@@ -463,6 +475,9 @@ func (s *WorkflowSteps) execute(ctx context.Context, sc workflow.StepContext, ph
 	actx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	actx = withActionGate(actx, s.gate(fence))
+	if s.waits != nil {
+		actx = withApprovalBinder(actx, s.binder(fence))
+	}
 
 	rc := RunContext{Run: run}
 	rc.writes = durableWrites{s: s, fence: fence, st: st}
@@ -488,11 +503,12 @@ func (s *WorkflowSteps) execute(ctx context.Context, sc workflow.StepContext, ph
 	}
 	if out == nil {
 		if sc.Step.Key != finalStepKey(sc.Definition) {
-			return workflow.StepResult{Checkpoint: st.checkpoint(true)}, nil
+			return s.awaitDecisions(ctx, sc, fence, st, workflow.StepResult{Checkpoint: st.checkpoint(true)}, nil)
 		}
 		out = &runOutcome{status: RunDone, code: verdictEndCode(rc)}
 	}
-	return s.end(ctx, &rc, at, out, st)
+	res, err := s.end(ctx, &rc, at, out, st)
+	return s.awaitDecisions(ctx, sc, fence, st, res, err)
 }
 
 // verdictEndCode is the code of a verdict run that ended without a verdict

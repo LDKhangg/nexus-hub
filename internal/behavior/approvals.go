@@ -217,14 +217,38 @@ func (e *Engine) reject(ctx context.Context, a CallbackAction) (CallbackResult, 
 		return CallbackResult{}, err
 	}
 	t := textsFor(rc.Doc.Language)
-	if _, err := e.d.Store.Decide(ctx, a.WorkspaceID, ap.Nonce, DecisionRejected, "", a.Actor, e.now()); err != nil {
+	decided, err := e.d.Store.Decide(ctx, a.WorkspaceID, ap.Nonce, DecisionRejected, "", a.Actor, e.now())
+	if err != nil {
 		return CallbackResult{}, err
 	}
+	if decided.ExecutionID != 0 {
+		// The execution's fenced continuation records the outcome; the
+		// denied action never runs.
+		toast := t.skipped()
+		if ap.Kind == ApprovalConfirmAction {
+			toast = t.canceled()
+		}
+		log.Printf("behavior run %d item %d corr=%s: rejection recorded for execution %d", ap.RunID, ap.ItemID, rc.Run.CorrelationID, decided.ExecutionID)
+		return CallbackResult{Toast: toast, RemoveButtons: true}, nil
+	}
+	ap.WorkspaceID = a.WorkspaceID
+	return e.applyReject(ctx, rc, ap)
+}
+
+// applyReject records a rejection's per-item outcome: the item is skipped
+// (a draft or an ask) or the confirmation's changes are canceled. No
+// action of the item runs.
+func (e *Engine) applyReject(ctx context.Context, rc RunContext, ap Approval) (CallbackResult, error) {
+	t := textsFor(rc.Doc.Language)
+	if err := authorizeAction(ctx); err != nil {
+		return CallbackResult{}, err
+	}
+	var err error
 	switch ap.Kind {
 	case ApprovalPostDraft:
-		_, err = e.d.Store.TransitionItem(ctx, a.WorkspaceID, ap.ItemID, []ItemStatus{ItemDrafted}, ItemSkipped, nil)
+		_, err = e.d.Store.TransitionItem(ctx, ap.WorkspaceID, ap.ItemID, []ItemStatus{ItemDrafted}, ItemSkipped, nil)
 	case ApprovalItemAnswer:
-		_, err = e.d.Store.TransitionItem(ctx, a.WorkspaceID, ap.ItemID, []ItemStatus{ItemAsked, ItemDrafted}, ItemSkipped, nil)
+		_, err = e.d.Store.TransitionItem(ctx, ap.WorkspaceID, ap.ItemID, []ItemStatus{ItemAsked, ItemDrafted}, ItemSkipped, nil)
 	case ApprovalConfirmAction:
 		err = e.updateChanges(ctx, rc, ap, func(c change) actionOutcome {
 			return actionOutcome{Index: c.Index, Type: c.Type, Status: OutcomeCanceled}
@@ -289,18 +313,33 @@ func (e *Engine) answer(ctx context.Context, ap Approval, chat ChatRef, text, ac
 		return "", false, err
 	}
 	text = capRunes(strings.TrimSpace(text), 3999)
-	if _, err := e.d.Store.Decide(ctx, ap.WorkspaceID, ap.Nonce, DecisionAnswered, text, actor, e.now()); err != nil {
+	decided, err := e.d.Store.Decide(ctx, ap.WorkspaceID, ap.Nonce, DecisionAnswered, text, actor, e.now())
+	if err != nil {
 		return "", false, err
 	}
 	if removeButtons && ap.TelegramMessageID != 0 {
 		e.removeButtons(ctx, rc.Run, chat, ap.TelegramMessageID)
 	}
+	if decided.ExecutionID != 0 {
+		log.Printf("behavior run %d item %d corr=%s: answer recorded for execution %d", rc.Run.ID, ap.ItemID, rc.Run.CorrelationID, decided.ExecutionID)
+		return textsFor(rc.Doc.Language).decisionRecorded(), true, nil
+	}
+	return e.applyAnswer(ctx, rc, ap, chat, text)
+}
+
+// applyAnswer runs the behavior's ask actions for an answered ask once and
+// remembers the decision.
+func (e *Engine) applyAnswer(ctx context.Context, rc RunContext, ap Approval, chat ChatRef, text string) (string, bool, error) {
 	it, err := e.d.Store.GetItem(ctx, ap.WorkspaceID, ap.ItemID)
 	if err != nil {
 		return "", false, err
 	}
 	t := textsFor(rc.Doc.Language)
 	status, result := e.runDecided(ctx, rc, chat, it, ClassAsk, text)
+	// A durable continuation whose claim ended stores nothing more.
+	if err := authorizeAction(ctx); err != nil {
+		return "", false, err
+	}
 	if _, err := e.d.Store.TransitionItem(ctx, ap.WorkspaceID, it.ID, []ItemStatus{ItemAsked, ItemDrafted}, status, result); err != nil && !errors.Is(err, ErrConflict) {
 		return "", false, err
 	}
@@ -338,9 +377,19 @@ func (e *Engine) post(ctx context.Context, ap Approval, chat ChatRef, actor stri
 	if err != nil {
 		return "", false, err
 	}
-	if _, err := e.d.Store.Decide(ctx, ap.WorkspaceID, ap.Nonce, DecisionApproved, "", actor, e.now()); err != nil {
+	decided, err := e.d.Store.Decide(ctx, ap.WorkspaceID, ap.Nonce, DecisionApproved, "", actor, e.now())
+	if err != nil {
 		return "", false, err
 	}
+	if decided.ExecutionID != 0 {
+		log.Printf("behavior run %d item %d corr=%s: draft approval recorded for execution %d", rc.Run.ID, ap.ItemID, rc.Run.CorrelationID, decided.ExecutionID)
+		return textsFor(rc.Doc.Language).decisionRecorded(), true, nil
+	}
+	return e.applyPost(ctx, rc, ap, chat)
+}
+
+// applyPost runs the auto actions of an approved draft once.
+func (e *Engine) applyPost(ctx context.Context, rc RunContext, ap Approval, chat ChatRef) (string, bool, error) {
 	it, err := e.d.Store.GetItem(ctx, ap.WorkspaceID, ap.ItemID)
 	if err != nil {
 		return "", false, err
@@ -348,6 +397,10 @@ func (e *Engine) post(ctx context.Context, ap Approval, chat ChatRef, actor stri
 	t := textsFor(rc.Doc.Language)
 	answer := answerOf(it)
 	status, result := e.runDecided(ctx, rc, chat, it, ClassAuto, answer)
+	// A durable continuation whose claim ended stores nothing more.
+	if err := authorizeAction(ctx); err != nil {
+		return "", false, err
+	}
 	if _, err := e.d.Store.TransitionItem(ctx, ap.WorkspaceID, it.ID, []ItemStatus{ItemDrafted}, status, result); err != nil && !errors.Is(err, ErrConflict) {
 		return "", false, err
 	}
@@ -365,9 +418,20 @@ func (e *Engine) confirm(ctx context.Context, ap Approval, actor string) (string
 	if err != nil {
 		return "", err
 	}
-	if _, err := e.d.Store.Decide(ctx, ap.WorkspaceID, ap.Nonce, DecisionApproved, "", actor, e.now()); err != nil {
+	decided, err := e.d.Store.Decide(ctx, ap.WorkspaceID, ap.Nonce, DecisionApproved, "", actor, e.now())
+	if err != nil {
 		return "", err
 	}
+	if decided.ExecutionID != 0 {
+		log.Printf("behavior run %d item %d corr=%s: confirmation recorded for execution %d", rc.Run.ID, ap.ItemID, rc.Run.CorrelationID, decided.ExecutionID)
+		return textsFor(rc.Doc.Language).decisionRecorded(), nil
+	}
+	return e.applyConfirm(ctx, rc, ap)
+}
+
+// applyConfirm applies a confirmed change once, after a fresh read: a
+// change already made, or a target that moved on, is left alone.
+func (e *Engine) applyConfirm(ctx context.Context, rc RunContext, ap Approval) (string, error) {
 	t := textsFor(rc.Doc.Language)
 	var p confirmPayload
 	if json.Unmarshal(ap.Payload, &p) != nil || p.TaskID == "" {
@@ -387,8 +451,18 @@ func (e *Engine) confirm(ctx context.Context, ap Approval, actor string) (string
 		return t.writeFailed(code, rc.Run.ID), nil
 	}
 	var replies []string
+	// A durable continuation re-checks its claim before every write; once
+	// refused, the remaining changes stay awaiting and nothing more runs.
+	var gateErr error
 	err = e.updateChanges(ctx, rc, ap, func(c change) actionOutcome {
 		o := actionOutcome{Index: c.Index, Type: c.Type, Status: OutcomeOK}
+		if gateErr == nil {
+			gateErr = authorizeAction(ctx)
+		}
+		if gateErr != nil {
+			o.Status = OutcomeAwaitingConfirm
+			return o
+		}
 		ok := false
 		switch c.Type {
 		case ActionSetStatus:
@@ -432,6 +506,9 @@ func (e *Engine) confirm(ctx context.Context, ap Approval, actor string) (string
 		}
 		return o
 	})
+	if gateErr != nil {
+		return "", gateErr
+	}
 	if err != nil && !errors.Is(err, ErrConflict) {
 		log.Printf("behavior run %d item %d corr=%s: confirmation result not stored", rc.Run.ID, ap.ItemID, rc.Run.CorrelationID)
 	}
@@ -528,6 +605,41 @@ func (e *Engine) expired(ctx context.Context, a Approval) {
 			run = r
 		}
 	}
+	switch err := e.expireOutcome(ctx, a); {
+	case a.ExecutionID != 0:
+		// The execution's fenced continuation records the expired outcome.
+		log.Printf("behavior run %d item %d corr=%s: approval %d expired for execution %d", run.ID, a.ItemID, run.CorrelationID, a.ID, a.ExecutionID)
+	case err != nil && !errors.Is(err, ErrConflict):
+		log.Printf("behavior run %d item %d corr=%s: approval %d expired, item not updated", run.ID, a.ItemID, run.CorrelationID, a.ID)
+	default:
+		log.Printf("behavior run %d item %d corr=%s: approval %d expired", run.ID, a.ItemID, run.CorrelationID, a.ID)
+	}
+	if a.TelegramMessageID == 0 || a.Kind == ApprovalFeedback || a.Kind == ApprovalFeedbackReason {
+		return
+	}
+	chat, err := e.d.Chats.OwnerChat(ctx, a.WorkspaceID, TriggerData{})
+	if err != nil {
+		return
+	}
+	e.removeButtons(ctx, run, chat, a.TelegramMessageID)
+}
+
+// expireOutcome records the legacy per-item outcome of an expired approval
+// without a wait; a bound approval's outcome is the continuation's.
+func (e *Engine) expireOutcome(ctx context.Context, a Approval) error {
+	if a.ExecutionID != 0 {
+		return nil
+	}
+	return e.applyExpired(ctx, a)
+}
+
+// applyExpired records an expired approval's per-item outcome: the waiting
+// item expires, or the confirmation's changes are marked expired. No
+// action of the item runs.
+func (e *Engine) applyExpired(ctx context.Context, a Approval) error {
+	if err := authorizeAction(ctx); err != nil {
+		return err
+	}
 	var err error
 	switch a.Kind {
 	case ApprovalItemAnswer:
@@ -545,19 +657,7 @@ func (e *Engine) expired(ctx context.Context, a Approval) {
 			_, err = e.d.Store.TransitionItem(ctx, a.WorkspaceID, it.ID, []ItemStatus{it.Status}, it.Status, res.encode())
 		}
 	}
-	if err != nil && !errors.Is(err, ErrConflict) {
-		log.Printf("behavior run %d item %d corr=%s: approval %d expired, item not updated", run.ID, a.ItemID, run.CorrelationID, a.ID)
-	} else {
-		log.Printf("behavior run %d item %d corr=%s: approval %d expired", run.ID, a.ItemID, run.CorrelationID, a.ID)
-	}
-	if a.TelegramMessageID == 0 || a.Kind == ApprovalFeedback || a.Kind == ApprovalFeedbackReason {
-		return
-	}
-	chat, err := e.d.Chats.OwnerChat(ctx, a.WorkspaceID, TriggerData{})
-	if err != nil {
-		return
-	}
-	e.removeButtons(ctx, run, chat, a.TelegramMessageID)
+	return err
 }
 
 // --- Undoer ---

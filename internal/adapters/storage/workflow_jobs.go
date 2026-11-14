@@ -379,6 +379,11 @@ func (s *WorkflowStore) WaitJob(ctx context.Context, req workflow.JobResultReque
 	if _, err := transitionWorkflowJobExecution(ctx, j, req.WaitState, workflow.ReasonStepWaiting); err != nil {
 		return err
 	}
+	// A decision recorded while the step ran is not lost: the step is
+	// queued again at once instead of waiting for it.
+	if _, _, err := wakeWaitingStepTx(ctx, j.q, j.ws, j.job.ExecutionID, j.job.StepKey, req.At, ReasonSignalReceived, ""); err != nil {
+		return err
+	}
 	return j.tx.Commit(ctx)
 }
 
@@ -455,6 +460,17 @@ func reconcileTransition(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, e
 	if !workflow.CanTransition(from, to) {
 		return sqlc.WorkflowExecution{}, fmt.Errorf("%w: %s to %s", errReconcileIllegalTransition, from, to)
 	}
+	return transitionExecutionTx(ctx, q, ws, execution, to, stepKey, attempt, reason, "")
+}
+
+// transitionExecutionTx moves a locked execution to state to when the
+// transition matrix allows it and appends the transition event.
+func transitionExecutionTx(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, execution sqlc.WorkflowExecution,
+	to workflow.State, stepKey string, attempt int, reason workflow.ReasonCode, idempotencyKey string) (sqlc.WorkflowExecution, error) {
+	from := workflow.State(execution.State)
+	if !workflow.CanTransition(from, to) {
+		return sqlc.WorkflowExecution{}, fmt.Errorf("%w: %s to %s", errReconcileIllegalTransition, from, to)
+	}
 	row, err := q.UpdateWorkflowExecutionState(ctx, sqlc.UpdateWorkflowExecutionStateParams{
 		WorkspaceID: ws, ID: execution.ID, FromState: execution.State, ToState: string(to), ReasonCode: workflowText(string(reason)),
 	})
@@ -462,7 +478,7 @@ func reconcileTransition(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, e
 		return sqlc.WorkflowExecution{}, err
 	}
 	if err := insertWorkflowEvent(ctx, q, ws, execution.ID, workflow.EventTransition, from, to,
-		stepKey, attempt, reason, "", workflow.Usage{}); err != nil {
+		stepKey, attempt, reason, idempotencyKey, workflow.Usage{}); err != nil {
 		return sqlc.WorkflowExecution{}, err
 	}
 	return row, nil
@@ -687,6 +703,11 @@ func (s *WorkflowStore) ReconcileJobs(ctx context.Context, at time.Time) error {
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
+	}
+	// Signal repair runs after the job pass committed, even when some job
+	// records failed, so one bad record never blocks waking other steps.
+	if err := s.ReconcileSignals(ctx, at); err != nil {
+		itemErrs = append(itemErrs, err)
 	}
 	return errors.Join(itemErrs...)
 }

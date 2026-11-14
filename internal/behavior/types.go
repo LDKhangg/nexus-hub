@@ -317,6 +317,10 @@ type Approval struct {
 	// PendingAnswer is a staged free-text reply not yet handed on.
 	PendingAnswer string
 	CreatedAt     time.Time
+	// ExecutionID is the workflow execution whose step waits on this
+	// approval (set by Decide, ExpireDue and the wait store); 0 for an
+	// approval without a wait, decided on the legacy route.
+	ExecutionID int64
 }
 
 // InboundUpdate is a normalized Telegram update. Only a short command and

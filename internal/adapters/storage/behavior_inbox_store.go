@@ -39,33 +39,11 @@ func (s *BehaviorStore) CreateApproval(ctx context.Context, workspaceID string, 
 	if err != nil {
 		return behavior.Approval{}, err
 	}
-	switch a.Kind {
-	case behavior.ApprovalItemAnswer, behavior.ApprovalPostDraft, behavior.ApprovalConfirmAction,
-		behavior.ApprovalFeedback, behavior.ApprovalFeedbackReason, behavior.ApprovalContactAlias,
-		behavior.ApprovalAssistantAction:
-	default:
-		return behavior.Approval{}, invalid("kind")
-	}
-	switch {
-	case !approvalNonceRe.MatchString(a.Nonce):
-		return behavior.Approval{}, invalid("nonce")
-	case a.ExpiresAt.IsZero():
-		return behavior.Approval{}, invalid("expires_at")
-	case a.ItemID != 0 && a.RunID == 0:
-		return behavior.Approval{}, invalid("run_id")
-	}
-	payload, err := objectJSON(a.Payload, "payload")
+	params, err := createApprovalParams(ws, a)
 	if err != nil {
 		return behavior.Approval{}, err
 	}
-	options, err := jsonKind(a.Options, "[]", '[', "options")
-	if err != nil {
-		return behavior.Approval{}, err
-	}
-	row, err := s.q.CreateApproval(ctx, sqlc.CreateApprovalParams{
-		WorkspaceID: ws, Kind: string(a.Kind), RunID: optInt8(a.RunID), ItemID: optInt8(a.ItemID), Action: a.Action,
-		Resource: a.Resource, Payload: payload, Options: options, Nonce: a.Nonce, ExpiresAt: ts(a.ExpiresAt),
-	})
+	row, err := s.q.CreateApproval(ctx, params)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return behavior.Approval{}, behavior.ErrConflict
@@ -73,6 +51,37 @@ func (s *BehaviorStore) CreateApproval(ctx context.Context, workspaceID string, 
 		return behavior.Approval{}, err
 	}
 	return mapApproval(row), nil
+}
+
+// createApprovalParams validates a new approval.
+func createApprovalParams(ws pgtype.UUID, a behavior.NewApproval) (sqlc.CreateApprovalParams, error) {
+	switch a.Kind {
+	case behavior.ApprovalItemAnswer, behavior.ApprovalPostDraft, behavior.ApprovalConfirmAction,
+		behavior.ApprovalFeedback, behavior.ApprovalFeedbackReason, behavior.ApprovalContactAlias,
+		behavior.ApprovalAssistantAction:
+	default:
+		return sqlc.CreateApprovalParams{}, invalid("kind")
+	}
+	switch {
+	case !approvalNonceRe.MatchString(a.Nonce):
+		return sqlc.CreateApprovalParams{}, invalid("nonce")
+	case a.ExpiresAt.IsZero():
+		return sqlc.CreateApprovalParams{}, invalid("expires_at")
+	case a.ItemID != 0 && a.RunID == 0:
+		return sqlc.CreateApprovalParams{}, invalid("run_id")
+	}
+	payload, err := objectJSON(a.Payload, "payload")
+	if err != nil {
+		return sqlc.CreateApprovalParams{}, err
+	}
+	options, err := jsonKind(a.Options, "[]", '[', "options")
+	if err != nil {
+		return sqlc.CreateApprovalParams{}, err
+	}
+	return sqlc.CreateApprovalParams{
+		WorkspaceID: ws, Kind: string(a.Kind), RunID: optInt8(a.RunID), ItemID: optInt8(a.ItemID), Action: a.Action,
+		Resource: a.Resource, Payload: payload, Options: options, Nonce: a.Nonce, ExpiresAt: ts(a.ExpiresAt),
+	}, nil
 }
 
 func (s *BehaviorStore) GetApproval(ctx context.Context, workspaceID string, id int64) (behavior.Approval, error) {
@@ -115,11 +124,13 @@ func (s *BehaviorStore) Decide(ctx context.Context, workspaceID, nonce string, d
 	if utf8.RuneCountInString(answer) > 4000 {
 		return behavior.Approval{}, invalid("answer")
 	}
-	row, err := s.q.DecideApproval(ctx, sqlc.DecideApprovalParams{
+	// The decision and, for an approval bound to an execution wait, its
+	// signal commit together.
+	decided, err := s.decideApprovalTx(ctx, sqlc.DecideApprovalParams{
 		Decision: string(d), Answer: optText(answer), DecidedBy: actor, WorkspaceID: ws, Nonce: nonce, AtTime: ts(now),
-	})
+	}, now)
 	if err == nil {
-		return mapApproval(row), nil
+		return decided, nil
 	}
 	if !isNoRows(err) {
 		return behavior.Approval{}, err
@@ -135,15 +146,7 @@ func (s *BehaviorStore) Decide(ctx context.Context, workspaceID, nonce string, d
 }
 
 func (s *BehaviorStore) ExpireDue(ctx context.Context, now time.Time, limit int) ([]behavior.Approval, error) {
-	rows, err := s.q.ExpireApprovals(ctx, sqlc.ExpireApprovalsParams{AtTime: ts(now), MaxRows: int32(clamp(limit, 1, 1000))})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]behavior.Approval, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, mapApproval(r))
-	}
-	return out, nil
+	return s.expireApprovalsTx(ctx, now, limit)
 }
 
 func (s *BehaviorStore) SetApprovalMessage(ctx context.Context, workspaceID string, id, messageID int64) error {

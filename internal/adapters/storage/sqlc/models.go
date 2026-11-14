@@ -531,6 +531,32 @@ type WorkflowExecution struct {
 	UpdatedAt         pgtype.Timestamptz
 }
 
+// One authorized decision per wait; consumed_at is set when the fenced continuation applied it.
+type WorkflowSignal struct {
+	ID            int64
+	WorkspaceID   pgtype.UUID
+	SignalID      string
+	ExecutionID   int64
+	StepKey       string
+	WaitID        int64
+	ReferenceKind string
+	ReferenceID   int64
+	Decision      string
+	ConsumedAt    pgtype.Timestamptz
+	CreatedAt     pgtype.Timestamptz
+}
+
+// A blocking approval or user-input wait of one execution step; only bound approvals change execution state.
+type WorkflowWait struct {
+	ID          int64
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+	StepKey     string
+	ApprovalID  int64
+	WaitKind    string
+	CreatedAt   pgtype.Timestamptz
+}
+
 type Workspace struct {
 	ID          pgtype.UUID
 	DisplayName string

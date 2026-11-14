@@ -463,16 +463,6 @@ func (s *WorkflowStore) RecordCheckpoint(ctx context.Context, req workflow.Check
 	return step, nil
 }
 
-// Signal persistence and eligibility are introduced with the approval bridge.
-func (s *WorkflowStore) HandleSignal(context.Context, workflow.Signal) error {
-	return workflow.ErrNotEligible
-}
-
-// Resume cannot manufacture a signal; P5 adds the persisted eligibility path.
-func (s *WorkflowStore) ResumeExecution(context.Context, workflow.Command) (workflow.Execution, error) {
-	return workflow.Execution{}, workflow.ErrNotEligible
-}
-
 // workflowDependsOn returns a non-nil slice so a root step stores an empty
 // text[] instead of SQL NULL in the NOT NULL depends_on column.
 func workflowDependsOn(deps []string) []string {
