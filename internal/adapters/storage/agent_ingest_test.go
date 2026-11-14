@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -140,6 +141,84 @@ func TestAgentIngest_DuplicateCallback(t *testing.T) {
 	}
 	if countRows(t, ctx, pool, "message_logs") != 1 || countRows(t, ctx, pool, "agent_jobs") != 1 {
 		t.Fatal("duplicate created work")
+	}
+}
+
+// TC-C21 (REQ-13, REQ-15): disabled and invalid agent sources retain the
+// legacy notice route without creating agent or workflow work or leaking the
+// rejected configuration through callback results.
+func TestAgentWorkflowDisabledOrInvalidSourceDoesNotExecute(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate string
+	}{
+		{name: "disabled"},
+		{name: "invalid", mutate: `UPDATE integrations SET config=jsonb_set(config,'{agent}','{"enabled":true,"tools":{"enabled":["SECRET-UNKNOWN-TOOL"]}}'::jsonb) WHERE id=$1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, pool, r := newAgentDB(t, false)
+			if tc.mutate != "" {
+				mustExec(t, ctx, pool, tc.mutate, integrationA)
+			}
+			res, err := r.Accept(ctx, []domain.NormalizedEvent{noticeEvent("fallback-1", "task-1")})
+			if err != nil || res.Accepted != 1 {
+				t.Fatalf("fallback result=%+v err=%v", res, err)
+			}
+			if countRows(t, ctx, pool, "notification_outbox") != 1 || countRows(t, ctx, pool, "agent_jobs") != 0 || countRows(t, ctx, pool, "workflow_executions") != 0 {
+				t.Fatal("fallback created agent/workflow work or lost the legacy notice")
+			}
+			if strings.Contains(fmt.Sprint(res), "SECRET-UNKNOWN-TOOL") || strings.Contains(fmt.Sprint(err), "SECRET-UNKNOWN-TOOL") {
+				t.Fatal("invalid agent configuration leaked")
+			}
+		})
+	}
+}
+
+// TC-C22 (REQ-13): concurrent and post-completion delivery of one external
+// callback creates one logical message and batch; owner text remains context
+// only and cannot create a second execution, report or outbound action.
+func TestAgentWorkflowDuplicateWebhookDoesNotExecuteTwice(t *testing.T) {
+	ctx, pool, r := newAgentDB(t, true)
+	e := noticeEvent("duplicate-external-id", "task-1")
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := r.Accept(ctx, []domain.NormalizedEvent{e})
+			results <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Fatalf("concurrent callback: %v", err)
+		}
+	}
+	if countRows(t, ctx, pool, "message_logs") != 1 || countRows(t, ctx, pool, "agent_jobs") != 1 {
+		t.Fatal("concurrent duplicate created more than one message or batch")
+	}
+	owner := noticeEvent("owner-context", "task-1")
+	owner.SenderID = ownSender
+	if _, err := r.Accept(ctx, []domain.NormalizedEvent{owner}); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, ctx, pool, `UPDATE agent_jobs SET status='done'`)
+	res, err := r.Accept(ctx, []domain.NormalizedEvent{e})
+	if err != nil || res.Duplicates != 1 || res.Accepted != 0 {
+		t.Fatalf("post-completion duplicate result=%+v err=%v", res, err)
+	}
+	if countRows(t, ctx, pool, "message_logs") != 2 || countRows(t, ctx, pool, "agent_jobs") != 1 || countRows(t, ctx, pool, "workflow_executions") != 0 || countRows(t, ctx, pool, "notification_outbox") != 0 {
+		t.Fatal("duplicate or owner context created execution, report, notice or another batch")
+	}
+	roles := scalar[string](t, ctx, pool, `SELECT string_agg(sender_role,',' ORDER BY id) FROM message_logs`)
+	if roles != "external_user,human_owner" {
+		t.Fatalf("message ordering/roles=%q", roles)
 	}
 }
 
