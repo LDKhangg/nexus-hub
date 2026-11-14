@@ -226,6 +226,44 @@ type DecisionMemory struct {
 	ForgottenAt pgtype.Timestamptz
 }
 
+type ExecutionEvent struct {
+	ID               int64
+	WorkspaceID      pgtype.UUID
+	ExecutionID      int64
+	Sequence         int64
+	Kind             string
+	FromState        pgtype.Text
+	ToState          pgtype.Text
+	StepKey          pgtype.Text
+	Attempt          int32
+	ReasonCode       pgtype.Text
+	IdempotencyKey   pgtype.Text
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	CreatedAt        pgtype.Timestamptz
+}
+
+type ExecutionStep struct {
+	ID               int64
+	WorkspaceID      pgtype.UUID
+	ExecutionID      int64
+	StepKey          string
+	Position         int32
+	Kind             string
+	DependsOn        []string
+	State            string
+	Attempts         int32
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	Checkpoint       []byte
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
+}
+
 type HubThread struct {
 	ID            pgtype.UUID
 	WorkspaceID   pgtype.UUID
@@ -447,6 +485,31 @@ type UserProfile struct {
 	Budgets      []byte
 	CreatedAt    pgtype.Timestamptz
 	UpdatedAt    pgtype.Timestamptz
+}
+
+type WorkflowExecution struct {
+	ID                int64
+	WorkspaceID       pgtype.UUID
+	BehaviorVersionID int64
+	TriggerKey        string
+	CorrelationID     pgtype.UUID
+	State             string
+	ReasonCode        pgtype.Text
+	Definition        []byte
+	SourceKind        string
+	SourceID          string
+	Subject           string
+	Revision          string
+	OperationKey      string
+	LegacyRunID       pgtype.Int8
+	LegacyJobID       pgtype.Int8
+	ParentExecutionID pgtype.Int8
+	DeadlineAt        pgtype.Timestamptz
+	CancelledAt       pgtype.Timestamptz
+	StartedAt         pgtype.Timestamptz
+	FinishedAt        pgtype.Timestamptz
+	CreatedAt         pgtype.Timestamptz
+	UpdatedAt         pgtype.Timestamptz
 }
 
 type Workspace struct {
