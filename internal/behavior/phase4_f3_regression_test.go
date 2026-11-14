@@ -218,7 +218,8 @@ func TestPhase4F3AssistantQueue(t *testing.T) {
 	// dropped, the model is not called, and the queue accepts work again once
 	// a job is taken.
 	t.Run("TC-R5b full queue replies busy", func(t *testing.T) {
-		e := newP4Env(decisionJSON(t, "answer", nil, "ok", 0.9))
+		model := &d5ToolModel{responses: []*domain.ToolResponse{{Text: "ok", Stop: domain.StopEndTurn}}}
+		e := d5ToolEnv(model)
 		for i := int64(0); i < assistantQueueSize; i++ {
 			key, _ := e.inbox.StageAssistantText(p4WS, "tin nhắn", e.clock)
 			if out := e.w.dispatch(context.Background(), e.update(100+i, UpdateText, "", AssistantTextPrefix+key), "corr"); out.code != "assistant_queued" {
@@ -233,8 +234,8 @@ func TestPhase4F3AssistantQueue(t *testing.T) {
 		if out.code != "assistant_queue_full" || e.msg.last(t).Text != msgAssistantOverloaded || msgAssistantOverloaded != "Mình đang bận, thử lại sau nhé." {
 			t.Fatalf("ninth: %+v text=%q", out, e.msg.last(t).Text)
 		}
-		if e.llm.calls() != 0 || len(e.w.assistantJobs) != assistantQueueSize {
-			t.Fatalf("calls=%d queued=%d", e.llm.calls(), len(e.w.assistantJobs))
+		if model.calls() != 0 || len(e.w.assistantJobs) != assistantQueueSize {
+			t.Fatalf("calls=%d queued=%d", model.calls(), len(e.w.assistantJobs))
 		}
 		if _, ok := e.inbox.take(p4WS, key, e.clock); ok {
 			t.Fatal("rejected text was kept in the inbox")
@@ -294,7 +295,7 @@ func TestPhase4F3AssistantQueue(t *testing.T) {
 	// than the delay, counted from queueing, and before the answer.
 	t.Run("TC-R5d working notice only after the delay", func(t *testing.T) {
 		// Quick answer: no notice.
-		e := newP4Env(decisionJSON(t, "answer", nil, "nhanh", 0.9))
+		e := d5ToolEnv(&d5ToolModel{responses: []*domain.ToolResponse{{Text: "nhanh", Stop: domain.StopEndTurn}}})
 		e.w.assistantNoticeAfter = assistantNoticeAfter
 		if assistantNoticeAfter != 3*time.Second {
 			t.Fatalf("notice delay=%v, want 3s", assistantNoticeAfter)
@@ -308,16 +309,15 @@ func TestPhase4F3AssistantQueue(t *testing.T) {
 
 		// Slow answer: the notice comes after the delay, then the answer.
 		const delay = 80 * time.Millisecond
-		e = newP4Env(decisionJSON(t, "answer", nil, "chậm", 0.9))
+		slow := &d5ToolModel{responses: []*domain.ToolResponse{{Text: "chậm", Stop: domain.StopEndTurn}}, entered: make(chan struct{}, 4), release: make(chan struct{})}
+		e = d5ToolEnv(slow)
 		e.w.assistantNoticeAfter = delay
-		e.llm.entered = make(chan struct{}, 4)
-		e.llm.release = make(chan struct{})
 		e.msg.sentCh = make(chan OutMessage, 16)
 		start := time.Now()
 		job := e.queueJob(t, 77, "chào")
 		result := make(chan outcome, 1)
 		go func() { result <- e.w.assistantJob(context.Background(), job) }()
-		waitSignal(t, e.llm.entered, "the model call")
+		waitSignal(t, slow.entered, "the model call")
 		select {
 		case m := <-e.msg.sentCh:
 			if m.Text != msgAssistantWorking || msgAssistantWorking != "Đang xử lý…" {
@@ -329,7 +329,7 @@ func TestPhase4F3AssistantQueue(t *testing.T) {
 		case <-time.After(p4Safety):
 			t.Fatal("no working notice for a slow answer")
 		}
-		close(e.llm.release)
+		close(slow.release)
 		select {
 		case out := <-result:
 			if out.code != "assistant_answer" {
@@ -344,9 +344,9 @@ func TestPhase4F3AssistantQueue(t *testing.T) {
 
 		// A job that waited in the queue longer than the delay gets the
 		// notice as soon as its model call is slow at all.
-		e = newP4Env(decisionJSON(t, "answer", nil, "muộn", 0.9))
+		queued := &d5ToolModel{responses: []*domain.ToolResponse{{Text: "muộn", Stop: domain.StopEndTurn}}, release: make(chan struct{})}
+		e = d5ToolEnv(queued)
 		e.w.assistantNoticeAfter = assistantNoticeAfter
-		e.llm.release = make(chan struct{})
 		e.msg.sentCh = make(chan OutMessage, 16)
 		job = e.queueJob(t, 77, "chào")
 		job.queued = time.Now().Add(-time.Minute)
@@ -355,7 +355,7 @@ func TestPhase4F3AssistantQueue(t *testing.T) {
 		if m := waitSent(t, e.msg.sentCh, ""); m.Text != msgAssistantWorking {
 			t.Fatalf("queued job first message=%q", m.Text)
 		}
-		close(e.llm.release)
+		close(queued.release)
 		if out := <-result; out.code != "assistant_answer" {
 			t.Fatalf("queued job: %+v", out)
 		}
@@ -401,15 +401,15 @@ func TestPhase4F3AssistantQueue(t *testing.T) {
 func TestPhase4F3ConfirmToast(t *testing.T) {
 	propose := func(t *testing.T, e *p4Env) string {
 		t.Helper()
-		if out := e.say(t, "đặt tên clickup:12345 là chị Lan"); out.code != "assistant_alias" {
+		if out := e.say(t, "đặt tên clickup:12345 là chị Lan"); out.code != "assistant_answer" {
 			t.Fatalf("propose: %+v", out)
 		}
-		doData, _ := buttons(t, e.msg.last(t))
+		doData, _ := buttons(t, proposalMessage(t, e.msg))
 		return doData
 	}
 
 	t.Run("TC-R7 Làm on a forgotten contact says not done", func(t *testing.T) {
-		e := newP4Env(decisionJSON(t, "alias", map[string]any{"ref": "clickup:12345", "name": "chị Lan"}, "", 0.95))
+		e := d5ToolEnv(d5ProposalModel(toolContactAlias, `{"ref":"clickup:12345","name":"chị Lan"}`))
 		e.dir.aliasErr = fmt.Errorf("contact forgotten: %w", ErrNotFound)
 		doData := propose(t, e)
 		out := e.press(doData)
@@ -425,7 +425,7 @@ func TestPhase4F3ConfirmToast(t *testing.T) {
 	})
 
 	t.Run("TC-R7 Làm with a failing handler says not done", func(t *testing.T) {
-		e := newP4Env(decisionJSON(t, "alias", map[string]any{"ref": "clickup:12345", "name": "chị Lan"}, "", 0.95))
+		e := d5ToolEnv(d5ProposalModel(toolContactAlias, `{"ref":"clickup:12345","name":"chị Lan"}`))
 		e.dir.aliasErr = errors.New("db down")
 		out := e.press(propose(t, e))
 		if e.msg.lastToast(t) != msgAssistantNotDone || out.code != "handler_failed" || e.msg.last(t).Text != msgFailed {
@@ -434,7 +434,7 @@ func TestPhase4F3ConfirmToast(t *testing.T) {
 	})
 
 	t.Run("TC-R7 Làm that ran but whose reply was lost says done", func(t *testing.T) {
-		e := newP4Env(decisionJSON(t, "alias", map[string]any{"ref": "clickup:12345", "name": "chị Lan"}, "", 0.95))
+		e := d5ToolEnv(d5ProposalModel(toolContactAlias, `{"ref":"clickup:12345","name":"chị Lan"}`))
 		doData := propose(t, e)
 		e.msg.mu.Lock()
 		e.msg.sendErr = errors.New("telegram down")
@@ -446,9 +446,9 @@ func TestPhase4F3ConfirmToast(t *testing.T) {
 	})
 
 	t.Run("TC-R7 Làm on prefs says done", func(t *testing.T) {
-		e := newP4Env(decisionJSON(t, "prefs_style", map[string]any{"style": "detailed"}, "", 0.9))
+		e := d5ToolEnv(d5ProposalModel(toolReportStyle, `{"style":"detailed"}`))
 		e.say(t, "chi tiết hơn")
-		doData, _ := buttons(t, e.msg.last(t))
+		doData, _ := buttons(t, proposalMessage(t, e.msg))
 		if out := e.press(doData); e.msg.lastToast(t) != msgAssistantDone || out.code != "" || e.rep.setPrefsCount() != 1 {
 			t.Fatalf("toast=%q out=%+v writes=%d", e.msg.lastToast(t), out, e.rep.setPrefsCount())
 		}
