@@ -982,11 +982,13 @@ func (e *Engine) sendOnce(ctx context.Context, run Run, key string, chat ChatRef
 		}
 		return 0, err
 	}
-	e.bindWorkflowMessage(context.WithoutCancel(ctx), chat, id, workflowExecutionID(ctx), key)
 	if err := e.d.Store.SetMessageID(ctx, ws, runID, key, id); err != nil {
 		log.Printf("behavior run %d corr=%s: message %s sent, id not stored", runID, run.CorrelationID, key)
 		return id, err
 	}
+	bindCtx, bindCancel := context.WithTimeout(context.WithoutCancel(ctx), e.s.RequestTimeout)
+	e.bindWorkflowMessage(bindCtx, chat, id, workflowExecutionID(ctx), key)
+	bindCancel()
 	log.Printf("behavior run %d corr=%s: message %s sent", runID, run.CorrelationID, key)
 	return id, nil
 }

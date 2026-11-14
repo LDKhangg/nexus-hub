@@ -93,12 +93,17 @@ func (w *ActionWorker) processNext(ctx context.Context) error {
 	sendCtx, cancel := context.WithTimeout(ctx, w.settings.RequestTimeout)
 	id, err := w.sender.SendText(sendCtx, a.WorkspaceID, target.BotTokenRef, target.ChatID, target.MessageThreadID, a.Text)
 	cancel()
+	if err == nil {
+		if err := w.store.MarkSent(ctx, *a, id); err != nil {
+			return err
+		}
+		bindCtx, bindCancel := context.WithTimeout(context.WithoutCancel(ctx), w.settings.RequestTimeout)
+		w.bindWorkflowMessage(bindCtx, *a, target.ChatID, id)
+		bindCancel()
+		return nil
+	}
 	if ctx.Err() != nil {
 		return ctx.Err()
-	}
-	if err == nil {
-		w.bindWorkflowMessage(context.WithoutCancel(ctx), *a, target.ChatID, id)
-		return w.store.MarkSent(ctx, *a, id)
 	}
 	code, retry := "delivery_unknown", true
 	var after time.Duration

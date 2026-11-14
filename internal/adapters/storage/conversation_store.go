@@ -249,13 +249,13 @@ func (s *ConversationStore) AppendInstruction(ctx context.Context, request workf
 	if err != nil {
 		return workflow.Instruction{}, conversationError(err)
 	}
-	if workflow.State(execution.State).IsTerminal() {
-		return workflow.Instruction{}, workflow.ErrNotEligible
-	}
 	existing, err := q.GetInstructionByTelegramUpdate(ctx, sqlc.GetInstructionByTelegramUpdateParams{
 		WorkspaceID: ws, TelegramUpdateID: request.TelegramUpdateID,
 	})
 	if err == nil {
+		if existing.ExecutionID != request.ExecutionID {
+			return workflow.Instruction{}, workflow.ErrConflict
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return workflow.Instruction{}, err
 		}
@@ -263,6 +263,9 @@ func (s *ConversationStore) AppendInstruction(ctx context.Context, request workf
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return workflow.Instruction{}, conversationError(err)
+	}
+	if workflow.State(execution.State).IsTerminal() {
+		return workflow.Instruction{}, workflow.ErrNotEligible
 	}
 	row, err := q.InsertWorkflowInstruction(ctx, sqlc.InsertWorkflowInstructionParams{
 		WorkspaceID: ws, ExecutionID: request.ExecutionID, Text: text,
@@ -275,6 +278,9 @@ func (s *ConversationStore) AppendInstruction(ctx context.Context, request workf
 	}
 	if err != nil {
 		return workflow.Instruction{}, conversationError(err)
+	}
+	if row.ExecutionID != request.ExecutionID {
+		return workflow.Instruction{}, workflow.ErrConflict
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return workflow.Instruction{}, fmt.Errorf("commit instruction: %w", err)
