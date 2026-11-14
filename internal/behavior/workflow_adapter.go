@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
 )
 
@@ -50,6 +51,41 @@ const (
 	CodeStorageUnavailable = "storage_unavailable"
 	CodeAttemptsExhausted  = "attempts_exhausted"
 )
+
+// KnownWorkflowReasons returns every safe behavior code that a durable run
+// step can expose as a workflow retry or failure reason.
+func KnownWorkflowReasons() []workflow.ReasonCode {
+	return []workflow.ReasonCode{
+		CodeWorkflowReference,
+		CodeRunMissing,
+		CodeRunFailed,
+		CodeRunStateConflict,
+		CodeStorageUnavailable,
+		CodeAttemptsExhausted,
+		CodeVersionMissing,
+		CodeVersionInvalid,
+		CodeTriggerInvalid,
+		CodePolicyUnavailable,
+		CodePrecheckFailed,
+		CodeAssigneeMismatch,
+		CodeListMismatch,
+		CodeReadTransient,
+		CodeLLMUnconfigured,
+		CodeLLMError,
+		CodeLLMRefused,
+		CodeInvalidOutput,
+		CodeTokenBudget,
+		CodeStepBudget,
+		CodeDispatchFailed,
+		CodeRunTimeout,
+		CodeRunActionFailed,
+		CodeRunActionTransient,
+		CodeRunActionsUnavailable,
+		CodeTriggerTextUnavailable,
+		domain.LLMCodeUnavailable,
+		domain.LLMCodeTimeout,
+	}
+}
 
 // ErrWorkflowFence is returned when the workflow job claim no longer
 // authorizes a durable run write or action (another claimant, lease end,

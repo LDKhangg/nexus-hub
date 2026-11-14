@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage"
+	"github.com/LDKhangg/nexus-hub/internal/agent"
+	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -58,19 +60,29 @@ func workflowStepState(s workflow.StepState) string {
 	}
 }
 
-func workflowReason(r workflow.ReasonCode) string {
-	switch r {
-	case workflow.ReasonAccepted, workflow.ReasonCancelled, workflow.ReasonDeadlineExceeded,
-		workflow.ReasonAttemptsExhausted, workflow.ReasonNonRetryable, workflow.ReasonSideEffectUncertain,
-		workflow.ReasonManualRetry, workflow.ReasonCheckpoint, workflow.ReasonStepSucceeded,
-		workflow.ReasonStepRetry, workflow.ReasonStepWaiting, workflow.ReasonLeaseExpired,
-		workflow.ReasonInconsistentState:
-		return string(r)
-	case "":
-		return ""
-	default:
-		return "unknown"
+var knownWorkflowReasons = func() map[workflow.ReasonCode]struct{} {
+	reasons := make(map[workflow.ReasonCode]struct{})
+	for _, source := range [][]workflow.ReasonCode{
+		workflow.KnownReasons(),
+		agent.KnownWorkflowReasons(),
+		behavior.KnownWorkflowReasons(),
+		storage.KnownSignalReasons(),
+	} {
+		for _, reason := range source {
+			reasons[reason] = struct{}{}
+		}
 	}
+	return reasons
+}()
+
+func workflowReason(r workflow.ReasonCode) string {
+	if r == "" {
+		return ""
+	}
+	if _, ok := knownWorkflowReasons[r]; ok {
+		return string(r)
+	}
+	return "unknown"
 }
 
 func workflowEventKind(k workflow.EventKind) string {

@@ -73,6 +73,25 @@ const (
 	CodeAgentDisabled      = "agent_disabled"
 )
 
+// KnownWorkflowReasons returns every safe agent code that a durable pipeline
+// step can expose as a workflow retry or failure reason.
+func KnownWorkflowReasons() []workflow.ReasonCode {
+	return []workflow.ReasonCode{
+		CodeWorkflowReference,
+		CodeBatchMissing,
+		CodeBatchConflict,
+		CodeCursorMoved,
+		CodeStorageUnavailable,
+		CodeAttemptsExhausted,
+		CodeAgentDisabled,
+		CodeLLMUnconfigured,
+		CodeLLMRefused,
+		CodeLLMError,
+		CodeInvalidDecision,
+		CodeTokenBudget,
+	}
+}
+
 // Agent job statuses.
 const (
 	BatchPending    = "pending"

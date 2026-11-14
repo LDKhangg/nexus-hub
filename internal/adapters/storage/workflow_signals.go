@@ -47,6 +47,11 @@ const (
 	ReasonResumed        workflow.ReasonCode = "resumed"
 )
 
+// KnownSignalReasons returns every storage-owned workflow signal reason.
+func KnownSignalReasons() []workflow.ReasonCode {
+	return []workflow.ReasonCode{ReasonSignalReceived, ReasonResumed}
+}
+
 // SignalReferenceApproval is the only signal reference kind: an approval ID.
 const SignalReferenceApproval = "approval"
 

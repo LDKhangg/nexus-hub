@@ -40,8 +40,10 @@ type ReasonCode string
 
 const ReasonAccepted ReasonCode = "accepted"
 const ReasonCancelled ReasonCode = "cancelled"
+const ReasonCompleted ReasonCode = "completed"
 const ReasonDeadlineExceeded ReasonCode = "deadline_exceeded"
 const ReasonAttemptsExhausted ReasonCode = "attempts_exhausted"
+const ReasonFailed ReasonCode = "failed"
 const ReasonNonRetryable ReasonCode = "non_retryable"
 const ReasonSideEffectUncertain ReasonCode = "side_effect_uncertain"
 const ReasonManualRetry ReasonCode = "manual_retry"
@@ -51,6 +53,29 @@ const ReasonStepRetry ReasonCode = "step_retry"
 const ReasonStepWaiting ReasonCode = "step_waiting"
 const ReasonLeaseExpired ReasonCode = "lease_expired"
 const ReasonInconsistentState ReasonCode = "inconsistent_state"
+
+// KnownReasons returns every reason code defined by the workflow lifecycle.
+// Executor- and adapter-owned reason codes are registered by their owning
+// packages instead of being accepted by shape.
+func KnownReasons() []ReasonCode {
+	return []ReasonCode{
+		ReasonAccepted,
+		ReasonCancelled,
+		ReasonCompleted,
+		ReasonDeadlineExceeded,
+		ReasonAttemptsExhausted,
+		ReasonFailed,
+		ReasonNonRetryable,
+		ReasonSideEffectUncertain,
+		ReasonManualRetry,
+		ReasonCheckpoint,
+		ReasonStepSucceeded,
+		ReasonStepRetry,
+		ReasonStepWaiting,
+		ReasonLeaseExpired,
+		ReasonInconsistentState,
+	}
+}
 
 // EventKind identifies an immutable execution-history record.
 type EventKind string

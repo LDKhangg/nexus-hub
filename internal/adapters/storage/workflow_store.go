@@ -283,7 +283,14 @@ func (s *WorkflowStore) TransitionExecution(ctx context.Context, req workflow.Tr
 	if req.To.IsTerminal() {
 		reason := req.Reason
 		if reason == "" {
-			reason = workflow.ReasonCode(strings.ToLower(string(req.To)))
+			switch req.To {
+			case workflow.StateCompleted:
+				reason = workflow.ReasonCompleted
+			case workflow.StateFailed:
+				reason = workflow.ReasonFailed
+			case workflow.StateCancelled:
+				reason = workflow.ReasonCancelled
+			}
 		}
 		if err := terminateExecutionWork(ctx, q, ws, row.ID, req.To, reason, time.Now()); err != nil {
 			return workflow.Execution{}, err
