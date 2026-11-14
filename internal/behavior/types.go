@@ -222,12 +222,15 @@ type Run struct {
 	// RunActions holds the outcomes of the run's run-level actions
 	// (RunActionsResult); empty until the first one finished.
 	RunActions json.RawMessage
-	UndoneAt   *time.Time
-	RunAt      time.Time
-	StartedAt  *time.Time
-	FinishedAt *time.Time
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	// WorkflowAttemptDeadline is the deadline of the current attempt of a
+	// run executed as durable workflow steps; nil otherwise.
+	WorkflowAttemptDeadline *time.Time
+	UndoneAt                *time.Time
+	RunAt                   time.Time
+	StartedAt               *time.Time
+	FinishedAt              *time.Time
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
 }
 
 // Citation points at a source fragment.

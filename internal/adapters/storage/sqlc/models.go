@@ -146,6 +146,8 @@ type BehaviorRun struct {
 	ContextSnapshot []byte
 	// Outcomes of the run-level actions: types, identifiers and codes only, never message text.
 	RunActions []byte
+	// Deadline of the current attempt of a run executed by durable workflow steps; NULL otherwise.
+	WorkflowAttemptDeadline pgtype.Timestamptz
 }
 
 // Published behavior versions are immutable; a trigger rejects UPDATE.

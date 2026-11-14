@@ -435,7 +435,8 @@ func mapRun(r sqlc.BehaviorRun, name string) behavior.Run {
 			CacheWriteTokens: int(r.CacheWriteTokens), Steps: int(r.Steps),
 		},
 		ErrorCode: r.ErrorCode.String, Snapshot: r.Snapshot, Context: r.ContextSnapshot, RunActions: r.RunActions, UndoneAt: tsPtr(r.UndoneAt), RunAt: r.RunAt.Time,
-		StartedAt: tsPtr(r.StartedAt), FinishedAt: tsPtr(r.FinishedAt), CreatedAt: r.CreatedAt.Time, UpdatedAt: r.UpdatedAt.Time,
+		WorkflowAttemptDeadline: tsPtr(r.WorkflowAttemptDeadline),
+		StartedAt:               tsPtr(r.StartedAt), FinishedAt: tsPtr(r.FinishedAt), CreatedAt: r.CreatedAt.Time, UpdatedAt: r.UpdatedAt.Time,
 	}
 }
 

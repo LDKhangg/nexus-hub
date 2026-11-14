@@ -422,3 +422,48 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND run_id = sqlc.arg(run_id) AND ms
 DELETE FROM public.behavior_messages
 WHERE workspace_id = sqlc.arg(workspace_id) AND run_id = sqlc.arg(run_id) AND msg_key = sqlc.arg(msg_key)
   AND telegram_message_id IS NULL;
+
+-- Durable runs: a run executed as workflow steps. Every write is made in
+-- the transaction that holds the workflow job fence; the run must be the
+-- execution's legacy run, in the same workspace, and never legacy-claimed.
+
+-- name: LockDurableBehaviorRun :one
+SELECT r.* FROM public.behavior_runs r
+JOIN public.workflow_executions e ON e.workspace_id = r.workspace_id AND e.legacy_run_id = r.id
+WHERE r.workspace_id = sqlc.arg(workspace_id) AND r.id = sqlc.arg(id) AND e.id = sqlc.arg(execution_id)
+FOR UPDATE OF r;
+
+-- name: BeginDurableBehaviorRunAttempt :one
+UPDATE public.behavior_runs SET status = 'running', attempts = attempts + 1,
+  workflow_attempt_deadline = sqlc.arg(deadline)::timestamptz,
+  started_at = COALESCE(started_at, now()), updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id)
+  AND claim_token IS NULL AND status IN ('pending','running')
+RETURNING *;
+
+-- name: SetDurableBehaviorRunContext :execrows
+UPDATE public.behavior_runs SET context_snapshot = sqlc.arg(snapshot), updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'running' AND claim_token IS NULL;
+
+-- name: AddDurableBehaviorRunUsage :execrows
+UPDATE public.behavior_runs SET input_tokens = input_tokens + sqlc.arg(input)::int,
+  output_tokens = output_tokens + sqlc.arg(output)::int,
+  cache_read_tokens = cache_read_tokens + sqlc.arg(cache_read)::int,
+  cache_write_tokens = cache_write_tokens + sqlc.arg(cache_write)::int,
+  steps = steps + sqlc.arg(steps)::int, updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'running' AND claim_token IS NULL;
+
+-- name: SetDurableBehaviorRunActions :execrows
+UPDATE public.behavior_runs SET run_actions = sqlc.arg(result), updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'running' AND claim_token IS NULL;
+
+-- name: RetryDurableBehaviorRun :execrows
+-- Records why the attempt is retried; the run stays running (the workflow
+-- job owns the schedule).
+UPDATE public.behavior_runs SET error_code = sqlc.arg(code)::text, workflow_attempt_deadline = NULL, updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'running' AND claim_token IS NULL;
+
+-- name: FinishDurableBehaviorRun :execrows
+UPDATE public.behavior_runs SET status = sqlc.arg(status)::text, error_code = sqlc.narg(code),
+  workflow_attempt_deadline = NULL, finished_at = now(), updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'running' AND claim_token IS NULL;

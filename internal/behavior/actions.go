@@ -671,6 +671,10 @@ func (e *Engine) execute(ctx context.Context, rc RunContext, env writeEnv, chat 
 			}
 			checked, outside = true, h
 		}
+		// A durable step re-checks its workflow claim before each write.
+		if err := authorizeAction(ctx); err != nil {
+			return "", nil, err
+		}
 		var out tools.CallResult
 		switch a.Type {
 		case ActionClickUpComment:
@@ -770,6 +774,9 @@ func (e *Engine) planChange(ctx context.Context, rc RunContext, env writeEnv, i 
 // requestConfirm creates the item's confirm_action approval (one per item,
 // listing every change) and sends it with "Xác nhận" / "Huỷ".
 func (e *Engine) requestConfirm(ctx context.Context, rc RunContext, env writeEnv, chat ChatRef, it Item, changes []change) error {
+	if err := authorizeAction(ctx); err != nil {
+		return err
+	}
 	payload, _ := json.Marshal(confirmPayload{TaskID: env.taskID, Changes: changes})
 	types := make([]string, 0, len(changes))
 	for _, c := range changes {
@@ -943,6 +950,9 @@ func (e *Engine) feedbackRow(t texts, nonce string) []Button {
 // the message ID (0 when an earlier send's outcome is unknown).
 func (e *Engine) sendOnce(ctx context.Context, run Run, key string, chat ChatRef, m OutMessage) (int64, error) {
 	ws, runID := run.WorkspaceID, run.ID
+	if err := authorizeAction(ctx); err != nil {
+		return 0, err
+	}
 	claimed, id, err := e.d.Store.ClaimMessage(ctx, ws, runID, key)
 	if err != nil || !claimed {
 		return id, err
@@ -1160,6 +1170,13 @@ func (e *Engine) Dispatch(ctx context.Context, rc RunContext, items []Item) erro
 	t := textsFor(rc.Doc.Language)
 	var autos, notifies []Item
 	for _, it := range items {
+		// Only a drafted item is written or sent; a durable step re-checks
+		// its workflow claim before each one.
+		if it.Status == ItemDrafted {
+			if err := authorizeAction(ctx); err != nil {
+				return err
+			}
+		}
 		switch it.Class {
 		case ClassAuto:
 			if rc.Doc.DryRun {
@@ -1196,6 +1213,9 @@ func (e *Engine) Dispatch(ctx context.Context, rc RunContext, items []Item) erro
 		}
 	}
 	// Digest and FYI follow the profile's quiet hours and digest mode.
+	if err := authorizeAction(ctx); err != nil {
+		return err
+	}
 	if err := e.inform(ctx, rc, chat, DigestKeyNotify, t.digestHead(), notifies, false); err != nil {
 		return err
 	}

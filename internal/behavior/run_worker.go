@@ -282,6 +282,47 @@ type runOutcome struct {
 	code   string
 }
 
+// runWrites is the fenced write side of one run attempt: the legacy run
+// claim (RunExecStore and the run's claim token) or, for a run executed as
+// durable workflow steps, the workflow job fence.
+type runWrites interface {
+	setContext(ctx context.Context, snapshot json.RawMessage) error
+	addUsage(ctx context.Context, u Usage) error
+	addItems(ctx context.Context, items []NewItem) ([]Item, error)
+	setRunActions(ctx context.Context, result json.RawMessage) error
+}
+
+// legacyWrites writes under the run's own claim token.
+type legacyWrites struct {
+	runs RunExecStore
+	run  Run
+}
+
+func (l legacyWrites) setContext(ctx context.Context, snapshot json.RawMessage) error {
+	return l.runs.SetRunContext(ctx, l.run.ID, l.run.ClaimToken, snapshot)
+}
+
+func (l legacyWrites) addUsage(ctx context.Context, u Usage) error {
+	return l.runs.AddUsage(ctx, l.run.ID, l.run.ClaimToken, u)
+}
+
+func (l legacyWrites) addItems(ctx context.Context, items []NewItem) ([]Item, error) {
+	return l.runs.AddRunItems(ctx, l.run.WorkspaceID, l.run.ID, l.run.ClaimToken, items)
+}
+
+func (l legacyWrites) setRunActions(ctx context.Context, result json.RawMessage) error {
+	return l.runs.SetRunActions(ctx, l.run.ID, l.run.ClaimToken, result)
+}
+
+// writesFor returns rc's write side; a run context without one (a legacy
+// claimed run) writes under its claim token.
+func (w *RunWorker) writesFor(rc *RunContext) runWrites {
+	if rc.writes != nil {
+		return rc.writes
+	}
+	return legacyWrites{runs: w.d.Runs, run: rc.Run}
+}
+
 // maxSnapshotJSONBytes keeps the encoded snapshot under the storage limit
 // (1 MiB) even when escaping inflates the text.
 const maxSnapshotJSONBytes = 900 << 10
@@ -360,6 +401,53 @@ func (w *RunWorker) end(ctx context.Context, rc RunContext, out *runOutcome) err
 // attempt runs one attempt. A returned error is a storage failure or a
 // cancellation; every other end is an outcome.
 func (w *RunWorker) attempt(ctx context.Context, rc *RunContext) (*runOutcome, error) {
+	if out, err := w.prepareRun(ctx, rc); out != nil || err != nil {
+		return out, err
+	}
+	run := rc.Run
+
+	// A behavior without a model step reads nothing, calls no model and
+	// stores no items: only its run-level actions run.
+	if !rc.Doc.HasModelStep() {
+		return w.runActions(ctx, *rc)
+	}
+
+	// Items stored by an earlier attempt: only the hand-off is left.
+	items, err := w.d.Runs.ListItems(ctx, run.WorkspaceID, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) > 0 {
+		return w.dispatch(ctx, *rc, items)
+	}
+	if modelStepEnded(rc) {
+		return w.dispatch(ctx, *rc, nil)
+	}
+
+	out, viaNoVerdict, err := w.collectContext(ctx, rc)
+	if err != nil {
+		return out, err
+	}
+	if out != nil {
+		if viaNoVerdict {
+			return w.noVerdict(ctx, rc, out)
+		}
+		return out, nil
+	}
+
+	stored, out, err := w.modelPhase(ctx, rc)
+	if err != nil {
+		return nil, err
+	}
+	if out != nil {
+		return w.noVerdict(ctx, rc, out)
+	}
+	return w.dispatch(ctx, *rc, stored)
+}
+
+// prepareRun resolves the run's pinned version, profile defaults, trigger
+// data and stored context into rc. A non-nil outcome ends the run.
+func (w *RunWorker) prepareRun(ctx context.Context, rc *RunContext) (*runOutcome, error) {
 	run := rc.Run
 	v, err := w.d.Defs.GetVersionByID(ctx, run.WorkspaceID, run.VersionID)
 	if errors.Is(err, ErrNotFound) {
@@ -386,58 +474,54 @@ func (w *RunWorker) attempt(ctx context.Context, rc *RunContext) (*runOutcome, e
 	if snap, err := DecodeContextSnapshot(run.Context); err == nil {
 		rc.Context = snap
 	}
+	return nil, nil
+}
 
-	// A behavior without a model step reads nothing, calls no model and
-	// stores no items: only its run-level actions run.
-	if !rc.Doc.HasModelStep() {
-		return w.runActions(ctx, *rc)
+// modelStepEnded reports whether a verdict run's model step already ended
+// without a verdict, or its run-level actions started: it never asks the
+// model again, and the actions keep the verdict they ran with.
+func modelStepEnded(rc *RunContext) bool {
+	if rc.Doc.Verdict == nil {
+		return false
 	}
+	res := DecodeRunActions(rc.Run.RunActions)
+	return res.Verdict != nil && (!res.Verdict.Available() || len(res.Actions) > 0)
+}
 
-	// Items stored by an earlier attempt: only the hand-off is left.
-	items, err := w.d.Runs.ListItems(ctx, run.WorkspaceID, run.ID)
-	if err != nil {
-		return nil, err
-	}
-	if len(items) > 0 {
-		return w.dispatch(ctx, *rc, items)
-	}
-	// A verdict run whose model step already ended without a verdict, or
-	// whose run-level actions started, never asks the model again: the
-	// actions keep the verdict they ran with.
-	if rc.Doc.Verdict != nil {
-		if res := DecodeRunActions(run.RunActions); res.Verdict != nil && (!res.Verdict.Available() || len(res.Actions) > 0) {
-			return w.dispatch(ctx, *rc, nil)
-		}
-	}
-
+// collectContext runs the pre-checks, reads the triggering message or
+// comment and the behavior's reads, and stores the redacted snapshot. A
+// non-nil outcome ends the context step; viaNoVerdict says it is a model
+// step failure that a verdict behavior turns into an unavailable verdict.
+func (w *RunWorker) collectContext(ctx context.Context, rc *RunContext) (out *runOutcome, viaNoVerdict bool, err error) {
+	run, trig := rc.Run, rc.Trigger
 	cfg, err := w.d.Policies.RunPolicy(ctx, run.WorkspaceID, trig.IntegrationID)
 	if err != nil {
-		return runFail(CodePolicyUnavailable), nil
+		return runFail(CodePolicyUnavailable), false, nil
 	}
 	caller := w.caller(run, rc.Doc, cfg, trig.NeedsAssigneeCheck || trig.NeedsListCheck)
 	col := newCollector(caller, run.Subject, grantedRepos(cfg.Tools))
 	if out := w.precheck(ctx, col, rc.Doc, trig); out != nil {
-		return out, ctx.Err()
+		return out, false, ctx.Err()
 	}
 	if out := w.readTriggerMessage(ctx, col, cfg.ClickUpTokenRef, run, trig, rc.Doc.Verdict != nil); out != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, false, ctx.Err()
 		}
-		return w.noVerdict(ctx, rc, out)
+		return out, true, nil
 	}
 	if out := w.readTriggerComment(ctx, col, cfg.ClickUpTokenRef, cfg.ClickUpTeamID, run, trig, rc.Doc.Verdict != nil); out != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, false, ctx.Err()
 		}
-		return w.noVerdict(ctx, rc, out)
+		return out, true, nil
 	}
 	snap, err := col.collect(ctx, rc.Doc.Reads)
 	var re *readError
 	if errors.As(err, &re) {
-		return w.noVerdict(ctx, rc, runRetry(CodeReadTransient))
+		return runRetry(CodeReadTransient), true, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// The executor already redacts tool output; redact again so nothing
 	// secret-shaped is stored or sent even if a tool skipped it.
@@ -448,32 +532,35 @@ func (w *RunWorker) attempt(ctx context.Context, rc *RunContext) (*runOutcome, e
 	}
 	raw, err := fitSnapshot(&snap, maxSnapshotJSONBytes)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	rc.Context = snap
-	if err := w.d.Runs.SetRunContext(ctx, run.ID, run.ClaimToken, raw); err != nil {
-		return nil, err
+	if err := w.writesFor(rc).setContext(ctx, raw); err != nil {
+		return nil, false, err
 	}
+	return nil, false, nil
+}
 
+// modelPhase asks the model, stores the verdict (verdict behaviors) and
+// then every classified item. A non-nil outcome is a model step failure
+// (see noVerdict).
+func (w *RunWorker) modelPhase(ctx context.Context, rc *RunContext) ([]Item, *runOutcome, error) {
 	modelItems, verdict, out, err := w.askModel(ctx, rc)
-	if err != nil {
-		return nil, err
-	}
-	if out != nil {
-		return w.noVerdict(ctx, rc, out)
+	if err != nil || out != nil {
+		return nil, out, err
 	}
 	if rc.Doc.Verdict != nil {
 		// Stored before the items, so every later attempt and every
 		// run-level action sees the same verdict.
 		if err := w.saveVerdict(ctx, rc, w.runVerdict(rc, verdict)); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	stored, err := w.d.Runs.AddRunItems(ctx, run.WorkspaceID, run.ID, run.ClaimToken, w.classify(rc, modelItems))
+	stored, err := w.writesFor(rc).addItems(ctx, w.classify(rc, modelItems))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return w.dispatch(ctx, *rc, stored)
+	return stored, nil, nil
 }
 
 // readTriggerMessage adds the triggering message of a chat-triggered run
@@ -549,7 +636,7 @@ func (w *RunWorker) noVerdict(ctx context.Context, rc *RunContext, out *runOutco
 	if rc.Doc.Verdict == nil || out.status == RunSkipped {
 		return out, nil
 	}
-	if out.retry && rc.Run.Attempts < MaxRunAttempts {
+	if out.retry && !rc.finalAttempt() {
 		return out, nil
 	}
 	if err := ctx.Err(); err != nil {
@@ -575,7 +662,7 @@ func (w *RunWorker) saveVerdict(ctx context.Context, rc *RunContext, v *RunVerdi
 	res := DecodeRunActions(rc.Run.RunActions)
 	res.Verdict = v
 	raw := res.encode()
-	if err := w.d.Runs.SetRunActions(ctx, rc.Run.ID, rc.Run.ClaimToken, raw); err != nil {
+	if err := w.writesFor(rc).setRunActions(ctx, raw); err != nil {
 		return err
 	}
 	rc.Run.RunActions = raw
@@ -650,11 +737,11 @@ func (w *RunWorker) runActions(ctx context.Context, rc RunContext) (*runOutcome,
 	if w.d.RunActions == nil {
 		return runFail(CodeRunActionsUnavailable), nil
 	}
-	run := rc.Run
+	writes := w.writesFor(&rc)
 	save := func(ctx context.Context, result json.RawMessage) error {
 		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runActionSaveTimeout)
 		defer cancel()
-		return w.d.Runs.SetRunActions(sctx, run.ID, run.ClaimToken, result)
+		return writes.setRunActions(sctx, result)
 	}
 	end, err := w.d.RunActions.RunActions(ctx, rc, save)
 	if err != nil {
@@ -904,7 +991,7 @@ func (w *RunWorker) askModel(ctx context.Context, rc *RunContext) ([]ModelItem, 
 			InputTokens: int(resp.Usage.Input), OutputTokens: int(resp.Usage.Output),
 			CacheReadTokens: int(resp.Usage.CacheRead), CacheWriteTokens: int(resp.Usage.CacheWrite), Steps: 1,
 		}
-		if err := w.d.Runs.AddUsage(ctx, run.ID, run.ClaimToken, u); err != nil {
+		if err := w.writesFor(rc).addUsage(ctx, u); err != nil {
 			return nil, nil, nil, err
 		}
 		used.InputTokens += u.InputTokens

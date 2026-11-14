@@ -21,6 +21,15 @@ const (
 
 	StepKindApproval = "approval"
 
+	// Behavior run step kinds, executed by the behavior workflow adapter.
+	StepKindBehaviorContext = "behavior.context"
+
+	StepKindBehaviorModel = "behavior.model"
+
+	StepKindBehaviorDispatch = "behavior.dispatch"
+
+	StepKindBehaviorRunActions = "behavior.run_actions"
+
 	CapabilityInProcess = "in_process"
 
 	NotificationHandlerTelegram = "telegram.message"
@@ -28,7 +37,10 @@ const (
 	ApprovalHandlerBehavior = "behavior.action"
 )
 
-var registeredStepKinds = map[string]bool{StepKindCollectContext: true, StepKindModel: true, StepKindActions: true, StepKindNotify: true, StepKindApproval: true}
+var registeredStepKinds = map[string]bool{
+	StepKindCollectContext: true, StepKindModel: true, StepKindActions: true, StepKindNotify: true, StepKindApproval: true,
+	StepKindBehaviorContext: true, StepKindBehaviorModel: true, StepKindBehaviorDispatch: true, StepKindBehaviorRunActions: true,
+}
 
 // Definition is the immutable orchestration configuration pinned to a
 // published behavior version.

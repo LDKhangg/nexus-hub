@@ -193,6 +193,12 @@ type StepContext struct {
 
 	ClaimToken string
 
+	// JobID and Attempt identify the claimed job; together with ClaimToken
+	// they form the fence an executor presents before its own writes.
+	JobID int64
+
+	Attempt int
+
 	Checkpoint *Checkpoint
 }
 

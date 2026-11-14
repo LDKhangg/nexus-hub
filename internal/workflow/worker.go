@@ -228,7 +228,7 @@ func (w *Worker) execute(ctx context.Context, job *Job) error {
 	}()
 	result, executeErr := executor.Execute(execCtx, StepContext{
 		Execution: job.Execution, Definition: job.Execution.Definition, Step: job.Step,
-		ClaimToken: job.ClaimToken, Checkpoint: job.Step.Checkpoint,
+		ClaimToken: job.ClaimToken, JobID: job.ID, Attempt: job.Attempts, Checkpoint: job.Step.Checkpoint,
 	})
 	if executeErr != nil {
 		if ctx.Err() != nil {
