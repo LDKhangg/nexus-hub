@@ -39,7 +39,7 @@ func cliDefinition(keys ...string) workflow.Definition {
 	d := workflow.Definition{
 		Retry:         workflow.RetryPolicy{MaxAttempts: 1},
 		StepTimeout:   time.Minute,
-		LeaseDuration: time.Minute,
+		LeaseDuration: 2 * time.Minute,
 	}
 	for i, key := range keys {
 		step := workflow.StepDefinition{Key: key, Kind: workflow.StepKindModel, DependsOn: []string{}}
