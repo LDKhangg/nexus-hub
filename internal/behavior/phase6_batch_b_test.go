@@ -18,7 +18,11 @@ type phase6BReader struct {
 
 func (f *phase6BReader) ListExecutions(_ context.Context, q workflow.ExecutionQuery) ([]workflow.ExecutionView, int64, error) {
 	f.query = q
-	return append([]workflow.ExecutionView(nil), f.list...), int64(len(f.list)), nil
+	items := f.list
+	if q.Limit > 0 && len(items) > q.Limit {
+		items = items[:q.Limit]
+	}
+	return append([]workflow.ExecutionView(nil), items...), int64(len(f.list)), nil
 }
 func (f *phase6BReader) GetExecutionDetail(_ context.Context, ws string, id int64) (workflow.ExecutionDetail, error) {
 	d, ok := f.details[id]
