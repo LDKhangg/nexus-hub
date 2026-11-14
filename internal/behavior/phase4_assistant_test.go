@@ -740,9 +740,24 @@ func TestPhase4TelegramAssistant(t *testing.T) {
 				t.Fatalf("input %s: %+v approvals=%d", input, out, e.ap.count())
 			}
 		}
-		e = d5ToolEnv(d5ProposalModel(toolRunTrace, `{"run":41,"item":";rm -rf"}`))
-		if out := e.say(t, injected); out.code != "assistant_answer" || len(e.tracer.reqs) != 0 {
-			t.Fatalf("trace ref with spaces ran: %+v", out)
+		traceModel := d5ProposalModel(toolRunTrace, `{"run":"41 ;rm -rf"}`)
+		e = d5ToolEnv(traceModel)
+		if out := e.say(t, injected); out.code != "assistant_answer" || len(e.tracer.reqs) != 0 || len(traceModel.reqs) != 2 {
+			t.Fatalf("trace ref with spaces: out=%+v traces=%+v model_calls=%d", out, e.tracer.reqs, len(traceModel.reqs))
+		}
+		traceResults := traceModel.reqs[1].Turns[len(traceModel.reqs[1].Turns)-1].Results
+		if len(traceResults) != 1 || !traceResults[0].IsError {
+			t.Fatalf("invalid trace ref was not returned as a tool error: %+v", traceResults)
+		}
+
+		const hostileItem = ";rm -rf"
+		e = d5ToolEnv(d5ProposalModel(toolRunTrace, `{"run":41,"item":"`+hostileItem+`"}`))
+		if out := e.say(t, injected); out.code != "assistant_answer" || len(e.tracer.reqs) != 1 {
+			t.Fatalf("hostile trace item: out=%+v traces=%+v", out, e.tracer.reqs)
+		}
+		trace := e.tracer.reqs[0]
+		if trace.WorkspaceID != p4WS || trace.Ref != "41" || trace.Item != hostileItem || e.ap.count() != 0 || len(e.dir.aliasCalls()) != 0 || e.rep.setPrefsCount() != 0 {
+			t.Fatalf("hostile item escaped scoped trace data: trace=%+v approvals=%d aliases=%v prefs=%d", trace, e.ap.count(), e.dir.aliasCalls(), e.rep.setPrefsCount())
 		}
 		// A forged "Làm" for an approval of another kind cannot be used to
 		// run an assistant write.
