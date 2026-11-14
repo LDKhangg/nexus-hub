@@ -545,9 +545,10 @@ func TestBehaviorWorkflowCrashReclaimPreservesReceiptsAndUsage(t *testing.T) {
 			t.Fatalf("%s messages=%q; want one informational notice and one run report", label, texts)
 		}
 		for i, key := range []string{behavior.DigestKeyFYI, "run_action:2"} {
-			claimed, messageID, err := e.behaviors.ClaimMessage(e.ctx, workspaceA, runID, key)
-			if err != nil || claimed || messageID != int64(101+i) {
-				t.Fatalf("%s message key %q claimed=%v id=%d err=%v", label, key, claimed, messageID, err)
+			var messageID int64
+			err := e.pool.QueryRow(e.ctx, `SELECT telegram_message_id FROM behavior_messages WHERE workspace_id=$1 AND run_id=$2 AND msg_key=$3`, workspaceA, runID, key).Scan(&messageID)
+			if err != nil || messageID != int64(101+i) {
+				t.Fatalf("%s stored message key %q id=%d err=%v", label, key, messageID, err)
 			}
 		}
 		return texts

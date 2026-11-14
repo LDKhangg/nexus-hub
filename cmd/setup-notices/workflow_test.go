@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage"
+	"github.com/LDKhangg/nexus-hub/internal/agent"
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
 	"github.com/google/uuid"
@@ -183,6 +184,87 @@ func TestWorkflowCLITimelineAndDeadLetter(t *testing.T) {
 	dead, _ := objectItems(t, f.must("workflow", "dead-letter", "--workspace-id", f.ws, "--execution-id", fmt.Sprint(ex.ID)), "dead_letters")
 	if len(dead) != 1 || dead[0].(map[string]any)["dead_letter_reason"] != "attempts_exhausted" {
 		t.Fatalf("dead letters=%v", dead)
+	}
+}
+
+// R1: every registered reason keeps its stable machine code across the
+// operator views, while an unregistered stored value is reduced to unknown
+// and cannot expose caller-controlled text.
+func TestWorkflowCLIReasonCodesAndUnknownFallback(t *testing.T) {
+	f := newWorkflowCLIFixture(t)
+
+	assertFailedReason := func(name string, reason workflow.ReasonCode, want, forbidden string) {
+		t.Helper()
+		ex := f.start(t, name, workflow.References{}, "model")
+		job := f.claim(t)
+		if job.ExecutionID != ex.ID {
+			t.Fatalf("%s claimed execution=%d want=%d", name, job.ExecutionID, ex.ID)
+		}
+		if err := f.store.FailJob(f.ctx, jobResult(job, reason, nil)); err != nil {
+			t.Fatal(err)
+		}
+		outputs := map[string]string{
+			"show":        f.must("workflow", "show", fmt.Sprint(ex.ID), "--workspace-id", f.ws),
+			"dead-letter": f.must("workflow", "dead-letter", "--workspace-id", f.ws, "--execution-id", fmt.Sprint(ex.ID)),
+			"history":     f.must("workflow", "history", fmt.Sprint(ex.ID), "--workspace-id", f.ws),
+		}
+		for view, out := range outputs {
+			if !strings.Contains(out, `"`+want+`"`) {
+				t.Fatalf("%s %s missing reason %q: %s", name, view, want, out)
+			}
+			if forbidden != "" && strings.Contains(out, forbidden) {
+				t.Fatalf("%s %s leaked caller text %q: %s", name, view, forbidden, out)
+			}
+		}
+	}
+
+	assertFailedReason("behavior-reason", workflow.ReasonCode(behavior.CodeRunMissing), behavior.CodeRunMissing, "")
+	assertFailedReason("agent-reason", workflow.ReasonCode(agent.CodeInvalidDecision), agent.CodeInvalidDecision, "")
+	const callerText = "caller-private-reason-text"
+	assertFailedReason("unknown-reason", workflow.ReasonCode(callerText), "unknown", callerText)
+
+	signalled := f.start(t, "signal-reasons", workflow.References{}, "model")
+	transitions := []workflow.TransitionRequest{
+		{WorkspaceID: f.ws, ExecutionID: signalled.ID, From: workflow.StateQueued, To: workflow.StateRunning, Reason: storage.ReasonSignalReceived, IdempotencyKey: "signal-received"},
+		{WorkspaceID: f.ws, ExecutionID: signalled.ID, From: workflow.StateRunning, To: workflow.StateQueued, Reason: storage.ReasonResumed, IdempotencyKey: "signal-resumed"},
+	}
+	for _, req := range transitions {
+		if _, err := f.store.TransitionExecution(f.ctx, req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	signalShow := f.must("workflow", "show", fmt.Sprint(signalled.ID), "--workspace-id", f.ws)
+	signalHistory := f.must("workflow", "history", fmt.Sprint(signalled.ID), "--workspace-id", f.ws)
+	if !strings.Contains(signalShow, `"reason":"resumed"`) || !strings.Contains(signalHistory, `"reason":"signal_received"`) || !strings.Contains(signalHistory, `"reason":"resumed"`) {
+		t.Fatalf("signal reasons missing: show=%s history=%s", signalShow, signalHistory)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		state  workflow.State
+		reason workflow.ReasonCode
+	}{
+		{"completed", workflow.StateCompleted, workflow.ReasonCompleted},
+		{"failed", workflow.StateFailed, workflow.ReasonFailed},
+		{"cancelled", workflow.StateCancelled, workflow.ReasonCancelled},
+	} {
+		ex := f.start(t, "terminal-"+tc.name, workflow.References{}, "model")
+		from := workflow.StateQueued
+		if tc.state == workflow.StateCompleted {
+			if _, err := f.store.TransitionExecution(f.ctx, workflow.TransitionRequest{WorkspaceID: f.ws, ExecutionID: ex.ID, From: from, To: workflow.StateRunning, Reason: workflow.ReasonAccepted, IdempotencyKey: "start-" + tc.name}); err != nil {
+				t.Fatal(err)
+			}
+			from = workflow.StateRunning
+		}
+		if _, err := f.store.TransitionExecution(f.ctx, workflow.TransitionRequest{WorkspaceID: f.ws, ExecutionID: ex.ID, From: from, To: tc.state, Reason: tc.reason, IdempotencyKey: "finish-" + tc.name}); err != nil {
+			t.Fatal(err)
+		}
+		show := f.must("workflow", "show", fmt.Sprint(ex.ID), "--workspace-id", f.ws)
+		history := f.must("workflow", "history", fmt.Sprint(ex.ID), "--workspace-id", f.ws)
+		want := `"reason":"` + tc.name + `"`
+		if !strings.Contains(show, want) || !strings.Contains(history, want) {
+			t.Fatalf("terminal %s missing %s: show=%s history=%s", tc.name, want, show, history)
+		}
 	}
 }
 

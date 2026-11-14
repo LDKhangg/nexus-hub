@@ -295,7 +295,9 @@ func TestWorkflowCutoverNoDualClaimers(t *testing.T) {
 func TestWorkflowCutoverPostApplyIngestUsesDurableExecution(t *testing.T) {
 	e := newWFEnv(t)
 	doc := wfDoc("post-cutover-ingest")
-	doc.Triggers = []behavior.TriggerDoc{{Type: behavior.TriggerChatMessage}}
+	doc.Triggers = []behavior.TriggerDoc{{Type: behavior.TriggerChatMessage, Filter: behavior.FilterDoc{
+		From: behavior.FromAny, Channel: behavior.StringList{behavior.ChannelDM},
+	}}}
 	e.publishEnabled(workspaceA, doc)
 	before := e.legacyRun(workspaceA, doc.Name, "task:before")
 	claimed := e.legacyClaim(5 * time.Minute)
@@ -317,7 +319,7 @@ func TestWorkflowCutoverPostApplyIngestUsesDurableExecution(t *testing.T) {
 	messageID := "post-cutover-message-1"
 	event := behavior.Event{
 		Type: behavior.TriggerChatMessage, Key: behavior.ChatSubject(messageID), MessageID: messageID,
-		IntegrationID: "clickup-source", ChannelID: "dm-1", ChannelType: "dm", TeamID: "team-1",
+		IntegrationID: "clickup-source", ChannelID: "dm-1", ChannelType: "dm", TeamID: "team-1", SenderID: "user-1",
 	}
 	created, err := e.behaviors.StartChatRuns(e.ctx, workspaceA, []behavior.Event{event})
 	if err != nil || created != 1 {
