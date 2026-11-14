@@ -234,6 +234,14 @@ func (w *Worker) execute(ctx context.Context, job *Job) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// An executor's explicit uncertainty wins over the timer: the side
+		// effect may have happened, so the step must never be retried
+		// automatically or through a manual retry child.
+		var stepErr *StepError
+		isStepErr := errors.As(executeErr, &stepErr)
+		if isStepErr && stepErr.Uncertain {
+			return w.fail(ctx, job, ReasonSideEffectUncertain, result.Checkpoint, result.Usage)
+		}
 		select {
 		case <-timedOut:
 			if deadlineFailure {
@@ -242,11 +250,7 @@ func (w *Worker) execute(ctx context.Context, job *Job) error {
 			return w.retryOrFail(ctx, job, ReasonDeadlineExceeded, result.Checkpoint, result.Usage)
 		default:
 		}
-		var stepErr *StepError
-		if errors.As(executeErr, &stepErr) {
-			if stepErr.Uncertain {
-				return w.fail(ctx, job, ReasonSideEffectUncertain, result.Checkpoint, result.Usage)
-			}
+		if isStepErr {
 			code := normalizedReason(stepErr.Code, ReasonNonRetryable)
 			if stepErr.Retryable {
 				return w.retryOrFail(ctx, job, code, result.Checkpoint, result.Usage)

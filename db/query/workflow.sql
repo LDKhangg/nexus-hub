@@ -97,7 +97,11 @@ INSERT INTO public.workflow_executions (
   source_kind, source_id, subject, revision, operation_key, legacy_run_id, legacy_job_id, parent_execution_id, deadline_at)
 SELECT p.workspace_id, p.behavior_version_id, 'retry:' || p.id::text, p.correlation_id, 'RECEIVED', 'manual_retry', p.definition,
   p.source_kind, p.source_id, p.subject, p.revision, p.operation_key, p.legacy_run_id, p.legacy_job_id, p.id,
-  CASE WHEN p.deadline_at IS NULL THEN NULL ELSE now() + (p.deadline_at - p.created_at) END
+  -- A retry child gets a fresh deadline from its own start: the earlier of
+  -- the parent's relative deadline and the pinned definition's execution
+  -- deadline (LEAST ignores NULL).
+  LEAST(CASE WHEN p.deadline_at IS NULL THEN NULL ELSE now() + (p.deadline_at - p.created_at) END,
+        now() + sqlc.narg(execution_deadline_us)::bigint * interval '1 microsecond')
 FROM public.workflow_executions p
 WHERE p.workspace_id = sqlc.arg(workspace_id) AND p.id = sqlc.arg(parent_execution_id) AND p.state = 'FAILED'
 ON CONFLICT (parent_execution_id) DO NOTHING
@@ -134,7 +138,9 @@ WHERE j.status = 'pending' AND j.due_at <= sqlc.arg(at_time)::timestamptz
   AND e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','COMPLETED','FAILED','CANCELLED')
   AND (e.deadline_at IS NULL OR e.deadline_at > sqlc.arg(at_time)::timestamptz)
 ORDER BY CASE WHEN j.status = 'processing' THEN 0 ELSE 1 END, j.due_at, j.id
-FOR UPDATE OF j SKIP LOCKED
+-- Lock the job and its execution together without waiting, so a claim never
+-- holds a job while blocking on an execution (lock order: execution, job).
+FOR UPDATE OF j, e SKIP LOCKED
 LIMIT 1;
 
 -- name: ClaimWorkflowJobByID :one
@@ -233,7 +239,7 @@ JOIN public.workflow_executions e ON e.workspace_id = j.workspace_id AND e.id = 
 WHERE j.status = 'processing' AND j.lease_expires_at <= sqlc.arg(at_time)::timestamptz
   AND e.state NOT IN ('COMPLETED','FAILED','CANCELLED')
 ORDER BY j.lease_expires_at, j.id
-FOR UPDATE OF j SKIP LOCKED
+FOR UPDATE OF j, e SKIP LOCKED
 LIMIT 100;
 
 -- name: ResetExpiredWorkflowJob :one
@@ -243,13 +249,15 @@ SET status = 'pending', due_at = sqlc.arg(due_at), claim_token = NULL, lease_exp
 WHERE id = sqlc.arg(id) AND workspace_id = sqlc.arg(workspace_id) AND status = 'processing'
 RETURNING *;
 
--- name: DeadLetterWorkflowJobByID :one
+-- name: TerminateActiveWorkflowJobs :execrows
+-- Ends the execution's active job when the execution becomes terminal outside
+-- the job-result path. Clearing claim_token and lease keeps a stale worker
+-- fenced out; dead_letter with the reason is the terminal job vocabulary.
 UPDATE public.jobs
 SET status = 'dead_letter', claim_token = NULL, lease_expires_at = NULL,
     last_error_code = sqlc.arg(reason), dead_letter_reason = sqlc.arg(reason), updated_at = sqlc.arg(at_time)
-WHERE id = sqlc.arg(id) AND workspace_id = sqlc.arg(workspace_id)
-  AND status IN ('pending','processing')
-RETURNING *;
+WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id)
+  AND status IN ('pending','processing');
 
 -- name: GetWorkflowJob :one
 SELECT * FROM public.jobs WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id);

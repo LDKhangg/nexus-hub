@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -257,12 +258,17 @@ func (s *WorkflowStore) beginJobResult(ctx context.Context, req workflow.JobResu
 		return nil, err
 	}
 	q := sqlc.New(tx)
-	job, err := lockWorkflowFence(ctx, q, ws, token, req.JobCheckpointRequest)
+	// Lock order everywhere is execution, then job: the reconciler and
+	// operator commands hold the execution before touching its job.
+	execution, err := q.LockWorkflowExecution(ctx, sqlc.LockWorkflowExecutionParams{WorkspaceID: ws, ID: req.ExecutionID})
 	if err != nil {
 		tx.Rollback(ctx)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, workflow.ErrStaleClaim
+		}
 		return nil, err
 	}
-	execution, err := q.LockWorkflowExecution(ctx, sqlc.LockWorkflowExecutionParams{WorkspaceID: ws, ID: job.ExecutionID})
+	job, err := lockWorkflowFence(ctx, q, ws, token, req.JobCheckpointRequest)
 	if err != nil {
 		tx.Rollback(ctx)
 		return nil, err
@@ -436,11 +442,18 @@ func (s *WorkflowStore) FailJob(ctx context.Context, req workflow.JobResultReque
 	return j.tx.Commit(ctx)
 }
 
+// errReconcileIllegalTransition marks a repair the transition matrix forbids;
+// the reconciler never fakes an intermediate state to reach its target.
+var errReconcileIllegalTransition = errors.New("workflow: reconcile transition not allowed")
+
 func reconcileTransition(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, execution sqlc.WorkflowExecution,
 	to workflow.State, stepKey string, attempt int, reason workflow.ReasonCode) (sqlc.WorkflowExecution, error) {
 	from := workflow.State(execution.State)
 	if from == to {
 		return execution, nil
+	}
+	if !workflow.CanTransition(from, to) {
+		return sqlc.WorkflowExecution{}, fmt.Errorf("%w: %s to %s", errReconcileIllegalTransition, from, to)
 	}
 	row, err := q.UpdateWorkflowExecutionState(ctx, sqlc.UpdateWorkflowExecutionStateParams{
 		WorkspaceID: ws, ID: execution.ID, FromState: execution.State, ToState: string(to), ReasonCode: workflowText(string(reason)),
@@ -469,8 +482,11 @@ func reconcileDelay(definition workflow.Definition, attempts int) (time.Duration
 	return definition.Retry.Delays[index], true
 }
 
+// failReconcileExecution fails the execution and, in the same transaction,
+// marks the given step failed, cancels unfinished steps and dead-letters any
+// active job so no live queue row or valid claim remains.
 func failReconcileExecution(ctx context.Context, q *sqlc.Queries, execution sqlc.WorkflowExecution,
-	job *sqlc.Job, stepKey string, attempt int, at time.Time, reason workflow.ReasonCode) error {
+	stepKey string, attempt int, at time.Time, reason workflow.ReasonCode) error {
 	ws := execution.WorkspaceID
 	if stepKey != "" {
 		if _, err := q.SetExecutionStepState(ctx, sqlc.SetExecutionStepStateParams{
@@ -479,22 +495,157 @@ func failReconcileExecution(ctx context.Context, q *sqlc.Queries, execution sqlc
 			return err
 		}
 	}
-	if job != nil {
-		if _, err := q.DeadLetterWorkflowJobByID(ctx, sqlc.DeadLetterWorkflowJobByIDParams{
-			Reason: workflowText(string(reason)), AtTime: ts(at), ID: job.ID, WorkspaceID: ws,
-		}); err != nil {
-			return err
-		}
-	}
-	if _, err := q.CancelExecutionSteps(ctx, sqlc.CancelExecutionStepsParams{WorkspaceID: ws, ExecutionID: execution.ID}); err != nil {
+	if err := terminateExecutionWork(ctx, q, ws, execution.ID, reason, at); err != nil {
 		return err
 	}
 	_, err := reconcileTransition(ctx, q, ws, execution, workflow.StateFailed, stepKey, attempt, reason)
 	return err
 }
 
+// reconcileItem runs one repair inside a savepoint so a bad record rolls back
+// only its own changes. A savepoint failure is fatal for the whole pass.
+func reconcileItem(ctx context.Context, tx pgx.Tx, repair func(*sqlc.Queries) error) (itemErr, fatal error) {
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := repair(sqlc.New(sp)); err != nil {
+		if rollbackErr := sp.Rollback(ctx); rollbackErr != nil {
+			return nil, errors.Join(err, rollbackErr)
+		}
+		return err, nil
+	}
+	if err := sp.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// reconcileExpiredJob recovers one job whose lease expired. The job and its
+// execution are already locked by ListExpiredWorkflowJobs.
+func reconcileExpiredJob(ctx context.Context, q *sqlc.Queries, job sqlc.Job, at time.Time) error {
+	executionRow, err := q.LockWorkflowExecution(ctx, sqlc.LockWorkflowExecutionParams{WorkspaceID: job.WorkspaceID, ID: job.ExecutionID})
+	if err != nil {
+		return err
+	}
+	execution, err := mapWorkflowExecution(executionRow)
+	if err != nil {
+		return err
+	}
+	if execution.Deadline != nil && !execution.Deadline.After(at) {
+		return failReconcileExecution(ctx, q, executionRow, job.StepKey, int(job.Attempts), at, workflow.ReasonDeadlineExceeded)
+	}
+	delay, retry := reconcileDelay(execution.Definition, int(job.Attempts))
+	if !retry {
+		return failReconcileExecution(ctx, q, executionRow, job.StepKey, int(job.Attempts), at, workflow.ReasonAttemptsExhausted)
+	}
+	if !workflow.CanTransition(workflow.State(executionRow.State), workflow.StateQueued) {
+		return fmt.Errorf("%w: %s to %s", errReconcileIllegalTransition, executionRow.State, workflow.StateQueued)
+	}
+	if _, err := q.SetExecutionStepState(ctx, sqlc.SetExecutionStepStateParams{
+		State: string(workflow.StepPending), AtTime: ts(at), WorkspaceID: job.WorkspaceID,
+		ExecutionID: job.ExecutionID, StepKey: job.StepKey,
+	}); err != nil {
+		return err
+	}
+	if _, err := q.ResetExpiredWorkflowJob(ctx, sqlc.ResetExpiredWorkflowJobParams{
+		DueAt: ts(at.Add(delay)), ErrorCode: workflowText(string(workflow.ReasonLeaseExpired)), AtTime: ts(at),
+		ID: job.ID, WorkspaceID: job.WorkspaceID,
+	}); err != nil {
+		return err
+	}
+	_, err = reconcileTransition(ctx, q, job.WorkspaceID, executionRow, workflow.StateQueued,
+		job.StepKey, int(job.Attempts), workflow.ReasonLeaseExpired)
+	return err
+}
+
+// reconcileExecution repairs one nonterminal execution that is past its
+// deadline or has neither a live queue row nor a durable wait. The execution
+// is already locked by ListReconcileWorkflowExecutions; its job is locked
+// second, matching the execution-then-job order of every other path.
+func reconcileExecution(ctx context.Context, q *sqlc.Queries, executionRow sqlc.WorkflowExecution, at time.Time) error {
+	execution, err := mapWorkflowExecution(executionRow)
+	if err != nil {
+		return err
+	}
+	activeJob, activeErr := q.GetActiveWorkflowJobForExecution(ctx, sqlc.GetActiveWorkflowJobForExecutionParams{
+		WorkspaceID: executionRow.WorkspaceID, ExecutionID: executionRow.ID,
+	})
+	if activeErr != nil && !errors.Is(activeErr, pgx.ErrNoRows) {
+		return activeErr
+	}
+	if execution.Deadline != nil && !execution.Deadline.After(at) {
+		return failReconcileExecution(ctx, q, executionRow, activeJob.StepKey, int(activeJob.Attempts), at, workflow.ReasonDeadlineExceeded)
+	}
+	if activeErr == nil {
+		return nil
+	}
+	step, stepErr := q.FindReconcileExecutionStep(ctx, sqlc.FindReconcileExecutionStepParams{
+		WorkspaceID: executionRow.WorkspaceID, ExecutionID: executionRow.ID,
+	})
+	if errors.Is(stepErr, pgx.ErrNoRows) {
+		unfinished, countErr := q.CountUnfinishedExecutionSteps(ctx, sqlc.CountUnfinishedExecutionStepsParams{
+			WorkspaceID: executionRow.WorkspaceID, ExecutionID: executionRow.ID,
+		})
+		if countErr != nil {
+			return countErr
+		}
+		if unfinished != 0 {
+			return failReconcileExecution(ctx, q, executionRow, "", 0, at, workflow.ReasonNonRetryable)
+		}
+		if workflow.CanTransition(workflow.State(executionRow.State), workflow.StateCompleted) {
+			_, err := reconcileTransition(ctx, q, executionRow.WorkspaceID, executionRow,
+				workflow.StateCompleted, "", 0, workflow.ReasonStepSucceeded)
+			return err
+		}
+		// Every step succeeded but the execution never reached an active
+		// state (for example QUEUED): completing it would skip the matrix,
+		// so fail it with a reason that records the inconsistency.
+		return failReconcileExecution(ctx, q, executionRow, "", 0, at, workflow.ReasonInconsistentState)
+	}
+	if stepErr != nil {
+		return stepErr
+	}
+	if !workflow.CanTransition(workflow.State(executionRow.State), workflow.StateQueued) {
+		return fmt.Errorf("%w: %s to %s", errReconcileIllegalTransition, executionRow.State, workflow.StateQueued)
+	}
+	dueAt := at
+	if workflow.StepState(step.State) != workflow.StepRunning && int(step.Attempts) >= execution.Definition.Retry.MaxAttempts {
+		// A pending step whose job was lost after its last allowed attempt
+		// cannot be claimed again; fail instead of restarting the count.
+		return failReconcileExecution(ctx, q, executionRow, step.StepKey, int(step.Attempts), at, workflow.ReasonAttemptsExhausted)
+	}
+	if workflow.StepState(step.State) == workflow.StepRunning {
+		delay, retry := reconcileDelay(execution.Definition, int(step.Attempts))
+		if !retry {
+			return failReconcileExecution(ctx, q, executionRow, step.StepKey, int(step.Attempts), at, workflow.ReasonAttemptsExhausted)
+		}
+		dueAt = at.Add(delay)
+		if _, err := q.SetExecutionStepState(ctx, sqlc.SetExecutionStepStateParams{
+			State: string(workflow.StepPending), AtTime: ts(at), WorkspaceID: executionRow.WorkspaceID,
+			ExecutionID: executionRow.ID, StepKey: step.StepKey,
+		}); err != nil {
+			return err
+		}
+	}
+	if _, err := q.InsertWorkflowJob(ctx, sqlc.InsertWorkflowJobParams{
+		WorkspaceID: executionRow.WorkspaceID, ExecutionID: executionRow.ID, StepKey: step.StepKey,
+		DueAt: ts(dueAt), MaxAttempts: int32(execution.Definition.Retry.MaxAttempts),
+		// The recreated job continues the step's attempt numbering so the
+		// claim fence (job attempts == step attempts) and max_attempts hold.
+		Attempts: step.Attempts,
+	}); err != nil {
+		return err
+	}
+	_, err = reconcileTransition(ctx, q, executionRow.WorkspaceID, executionRow,
+		workflow.StateQueued, step.StepKey, int(step.Attempts), workflow.ReasonLeaseExpired)
+	return err
+}
+
 // ReconcileJobs recovers expired claims and repairs nonterminal executions
-// that have neither a live queue row nor a durable wait.
+// that have neither a live queue row nor a durable wait. Each record is
+// repaired in its own savepoint: a failing record is rolled back and
+// reported, the rest of the pass still commits.
 func (s *WorkflowStore) ReconcileJobs(ctx context.Context, at time.Time) error {
 	if at.IsZero() {
 		return workflowInvalid("reconcile time")
@@ -505,148 +656,39 @@ func (s *WorkflowStore) ReconcileJobs(ctx context.Context, at time.Time) error {
 	}
 	defer tx.Rollback(ctx)
 	q := sqlc.New(tx)
+	var itemErrs []error
 	expired, err := q.ListExpiredWorkflowJobs(ctx, ts(at))
 	if err != nil {
 		return err
 	}
 	for i := range expired {
 		job := expired[i]
-		executionRow, err := q.LockWorkflowExecution(ctx, sqlc.LockWorkflowExecutionParams{WorkspaceID: job.WorkspaceID, ID: job.ExecutionID})
-		if err != nil {
-			return err
+		itemErr, fatal := reconcileItem(ctx, tx, func(q *sqlc.Queries) error { return reconcileExpiredJob(ctx, q, job, at) })
+		if fatal != nil {
+			return fatal
 		}
-		execution, err := mapWorkflowExecution(executionRow)
-		if err != nil {
-			return err
-		}
-		if execution.Deadline != nil && !execution.Deadline.After(at) {
-			if err := failReconcileExecution(ctx, q, executionRow, &job, job.StepKey, int(job.Attempts), at, workflow.ReasonDeadlineExceeded); err != nil {
-				return err
-			}
-			continue
-		}
-		delay, retry := reconcileDelay(execution.Definition, int(job.Attempts))
-		if !retry {
-			if err := failReconcileExecution(ctx, q, executionRow, &job, job.StepKey, int(job.Attempts), at, workflow.ReasonAttemptsExhausted); err != nil {
-				return err
-			}
-			continue
-		}
-		if _, err := q.SetExecutionStepState(ctx, sqlc.SetExecutionStepStateParams{
-			State: string(workflow.StepPending), AtTime: ts(at), WorkspaceID: job.WorkspaceID,
-			ExecutionID: job.ExecutionID, StepKey: job.StepKey,
-		}); err != nil {
-			return err
-		}
-		if _, err := q.ResetExpiredWorkflowJob(ctx, sqlc.ResetExpiredWorkflowJobParams{
-			DueAt: ts(at.Add(delay)), ErrorCode: workflowText(string(workflow.ReasonLeaseExpired)), AtTime: ts(at),
-			ID: job.ID, WorkspaceID: job.WorkspaceID,
-		}); err != nil {
-			return err
-		}
-		if _, err := reconcileTransition(ctx, q, job.WorkspaceID, executionRow, workflow.StateQueued,
-			job.StepKey, int(job.Attempts), workflow.ReasonLeaseExpired); err != nil {
-			return err
+		if itemErr != nil {
+			itemErrs = append(itemErrs, fmt.Errorf("reconcile execution %d: %w", job.ExecutionID, itemErr))
 		}
 	}
-
 	executions, err := q.ListReconcileWorkflowExecutions(ctx, ts(at))
 	if err != nil {
 		return err
 	}
 	for i := range executions {
 		executionRow := executions[i]
-		execution, err := mapWorkflowExecution(executionRow)
-		if err != nil {
-			return err
+		itemErr, fatal := reconcileItem(ctx, tx, func(q *sqlc.Queries) error { return reconcileExecution(ctx, q, executionRow, at) })
+		if fatal != nil {
+			return fatal
 		}
-		activeJob, activeErr := q.GetActiveWorkflowJobForExecution(ctx, sqlc.GetActiveWorkflowJobForExecutionParams{
-			WorkspaceID: executionRow.WorkspaceID, ExecutionID: executionRow.ID,
-		})
-		if activeErr != nil && !errors.Is(activeErr, pgx.ErrNoRows) {
-			return activeErr
-		}
-		if execution.Deadline != nil && !execution.Deadline.After(at) {
-			var job *sqlc.Job
-			if activeErr == nil {
-				job = &activeJob
-			}
-			if err := failReconcileExecution(ctx, q, executionRow, job, activeJob.StepKey, int(activeJob.Attempts), at, workflow.ReasonDeadlineExceeded); err != nil {
-				return err
-			}
-			continue
-		}
-		if activeErr == nil {
-			continue
-		}
-		step, stepErr := q.FindReconcileExecutionStep(ctx, sqlc.FindReconcileExecutionStepParams{
-			WorkspaceID: executionRow.WorkspaceID, ExecutionID: executionRow.ID,
-		})
-		if errors.Is(stepErr, pgx.ErrNoRows) {
-			unfinished, countErr := q.CountUnfinishedExecutionSteps(ctx, sqlc.CountUnfinishedExecutionStepsParams{
-				WorkspaceID: executionRow.WorkspaceID, ExecutionID: executionRow.ID,
-			})
-			if countErr != nil {
-				return countErr
-			}
-			if unfinished == 0 {
-				if _, err := reconcileTransition(ctx, q, executionRow.WorkspaceID, executionRow,
-					workflow.StateCompleted, "", 0, workflow.ReasonStepSucceeded); err != nil {
-					return err
-				}
-				continue
-			}
-			if err := failReconcileExecution(ctx, q, executionRow, nil, "", 0, at, workflow.ReasonNonRetryable); err != nil {
-				return err
-			}
-			continue
-		}
-		if stepErr != nil {
-			return stepErr
-		}
-		dueAt := at
-		if workflow.StepState(step.State) != workflow.StepRunning && int(step.Attempts) >= execution.Definition.Retry.MaxAttempts {
-			// A pending step whose job was lost after its last allowed
-			// attempt cannot be claimed again; fail instead of restarting
-			// the attempt count.
-			if err := failReconcileExecution(ctx, q, executionRow, nil, step.StepKey,
-				int(step.Attempts), at, workflow.ReasonAttemptsExhausted); err != nil {
-				return err
-			}
-			continue
-		}
-		if workflow.StepState(step.State) == workflow.StepRunning {
-			delay, retry := reconcileDelay(execution.Definition, int(step.Attempts))
-			if !retry {
-				if err := failReconcileExecution(ctx, q, executionRow, nil, step.StepKey,
-					int(step.Attempts), at, workflow.ReasonAttemptsExhausted); err != nil {
-					return err
-				}
-				continue
-			}
-			dueAt = at.Add(delay)
-			if _, err := q.SetExecutionStepState(ctx, sqlc.SetExecutionStepStateParams{
-				State: string(workflow.StepPending), AtTime: ts(at), WorkspaceID: executionRow.WorkspaceID,
-				ExecutionID: executionRow.ID, StepKey: step.StepKey,
-			}); err != nil {
-				return err
-			}
-		}
-		if _, err := q.InsertWorkflowJob(ctx, sqlc.InsertWorkflowJobParams{
-			WorkspaceID: executionRow.WorkspaceID, ExecutionID: executionRow.ID, StepKey: step.StepKey,
-			DueAt: ts(dueAt), MaxAttempts: int32(execution.Definition.Retry.MaxAttempts),
-			// The recreated job continues the step's attempt numbering so the
-			// claim fence (job attempts == step attempts) and max_attempts hold.
-			Attempts: step.Attempts,
-		}); err != nil {
-			return err
-		}
-		if _, err := reconcileTransition(ctx, q, executionRow.WorkspaceID, executionRow,
-			workflow.StateQueued, step.StepKey, int(step.Attempts), workflow.ReasonLeaseExpired); err != nil {
-			return err
+		if itemErr != nil {
+			itemErrs = append(itemErrs, fmt.Errorf("reconcile execution %d: %w", executionRow.ID, itemErr))
 		}
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	return errors.Join(itemErrs...)
 }
 
 // isCheckpointSizeViolation reports the execution_steps checkpoint CHECK

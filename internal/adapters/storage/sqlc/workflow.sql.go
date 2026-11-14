@@ -136,49 +136,6 @@ func (q *Queries) CountUnsafeRetrySteps(ctx context.Context, arg CountUnsafeRetr
 	return count, err
 }
 
-const deadLetterWorkflowJobByID = `-- name: DeadLetterWorkflowJobByID :one
-UPDATE public.jobs
-SET status = 'dead_letter', claim_token = NULL, lease_expires_at = NULL,
-    last_error_code = $1, dead_letter_reason = $1, updated_at = $2
-WHERE id = $3 AND workspace_id = $4
-  AND status IN ('pending','processing')
-RETURNING id, workspace_id, execution_id, step_key, status, due_at, attempts, max_attempts, claim_token, lease_expires_at, last_error_code, dead_letter_reason, created_at, updated_at
-`
-
-type DeadLetterWorkflowJobByIDParams struct {
-	Reason      pgtype.Text
-	AtTime      pgtype.Timestamptz
-	ID          int64
-	WorkspaceID pgtype.UUID
-}
-
-func (q *Queries) DeadLetterWorkflowJobByID(ctx context.Context, arg DeadLetterWorkflowJobByIDParams) (Job, error) {
-	row := q.db.QueryRow(ctx, deadLetterWorkflowJobByID,
-		arg.Reason,
-		arg.AtTime,
-		arg.ID,
-		arg.WorkspaceID,
-	)
-	var i Job
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.ExecutionID,
-		&i.StepKey,
-		&i.Status,
-		&i.DueAt,
-		&i.Attempts,
-		&i.MaxAttempts,
-		&i.ClaimToken,
-		&i.LeaseExpiresAt,
-		&i.LastErrorCode,
-		&i.DeadLetterReason,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
 const findReadyExecutionStep = `-- name: FindReadyExecutionStep :one
 SELECT s.id, s.workspace_id, s.execution_id, s.step_key, s.position, s.kind, s.depends_on, s.state, s.attempts, s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_write_tokens, s.checkpoint, s.created_at, s.updated_at FROM public.execution_steps s
 WHERE s.workspace_id = $1 AND s.execution_id = $2
@@ -690,20 +647,25 @@ INSERT INTO public.workflow_executions (
   source_kind, source_id, subject, revision, operation_key, legacy_run_id, legacy_job_id, parent_execution_id, deadline_at)
 SELECT p.workspace_id, p.behavior_version_id, 'retry:' || p.id::text, p.correlation_id, 'RECEIVED', 'manual_retry', p.definition,
   p.source_kind, p.source_id, p.subject, p.revision, p.operation_key, p.legacy_run_id, p.legacy_job_id, p.id,
-  CASE WHEN p.deadline_at IS NULL THEN NULL ELSE now() + (p.deadline_at - p.created_at) END
+  -- A retry child gets a fresh deadline from its own start: the earlier of
+  -- the parent's relative deadline and the pinned definition's execution
+  -- deadline (LEAST ignores NULL).
+  LEAST(CASE WHEN p.deadline_at IS NULL THEN NULL ELSE now() + (p.deadline_at - p.created_at) END,
+        now() + $1::bigint * interval '1 microsecond')
 FROM public.workflow_executions p
-WHERE p.workspace_id = $1 AND p.id = $2 AND p.state = 'FAILED'
+WHERE p.workspace_id = $2 AND p.id = $3 AND p.state = 'FAILED'
 ON CONFLICT (parent_execution_id) DO NOTHING
 RETURNING id, workspace_id, behavior_version_id, trigger_key, correlation_id, state, reason_code, definition, source_kind, source_id, subject, revision, operation_key, legacy_run_id, legacy_job_id, parent_execution_id, deadline_at, cancelled_at, started_at, finished_at, created_at, updated_at
 `
 
 type InsertRetryExecutionParams struct {
-	WorkspaceID       pgtype.UUID
-	ParentExecutionID int64
+	ExecutionDeadlineUs pgtype.Int8
+	WorkspaceID         pgtype.UUID
+	ParentExecutionID   int64
 }
 
 func (q *Queries) InsertRetryExecution(ctx context.Context, arg InsertRetryExecutionParams) (WorkflowExecution, error) {
-	row := q.db.QueryRow(ctx, insertRetryExecution, arg.WorkspaceID, arg.ParentExecutionID)
+	row := q.db.QueryRow(ctx, insertRetryExecution, arg.ExecutionDeadlineUs, arg.WorkspaceID, arg.ParentExecutionID)
 	var i WorkflowExecution
 	err := row.Scan(
 		&i.ID,
@@ -907,7 +869,7 @@ JOIN public.workflow_executions e ON e.workspace_id = j.workspace_id AND e.id = 
 WHERE j.status = 'processing' AND j.lease_expires_at <= $1::timestamptz
   AND e.state NOT IN ('COMPLETED','FAILED','CANCELLED')
 ORDER BY j.lease_expires_at, j.id
-FOR UPDATE OF j SKIP LOCKED
+FOR UPDATE OF j, e SKIP LOCKED
 LIMIT 100
 `
 
@@ -1293,10 +1255,12 @@ WHERE j.status = 'pending' AND j.due_at <= $1::timestamptz
   AND e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','COMPLETED','FAILED','CANCELLED')
   AND (e.deadline_at IS NULL OR e.deadline_at > $1::timestamptz)
 ORDER BY CASE WHEN j.status = 'processing' THEN 0 ELSE 1 END, j.due_at, j.id
-FOR UPDATE OF j SKIP LOCKED
+FOR UPDATE OF j, e SKIP LOCKED
 LIMIT 1
 `
 
+// Lock the job and its execution together without waiting, so a claim never
+// holds a job while blocking on an execution (lock order: execution, job).
 func (q *Queries) SelectDueWorkflowJob(ctx context.Context, atTime pgtype.Timestamptz) (Job, error) {
 	row := q.db.QueryRow(ctx, selectDueWorkflowJob, atTime)
 	var i Job
@@ -1407,6 +1371,37 @@ func (q *Queries) StartExecutionStepAttempt(ctx context.Context, arg StartExecut
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const terminateActiveWorkflowJobs = `-- name: TerminateActiveWorkflowJobs :execrows
+UPDATE public.jobs
+SET status = 'dead_letter', claim_token = NULL, lease_expires_at = NULL,
+    last_error_code = $1, dead_letter_reason = $1, updated_at = $2
+WHERE workspace_id = $3 AND execution_id = $4
+  AND status IN ('pending','processing')
+`
+
+type TerminateActiveWorkflowJobsParams struct {
+	Reason      pgtype.Text
+	AtTime      pgtype.Timestamptz
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+}
+
+// Ends the execution's active job when the execution becomes terminal outside
+// the job-result path. Clearing claim_token and lease keeps a stale worker
+// fenced out; dead_letter with the reason is the terminal job vocabulary.
+func (q *Queries) TerminateActiveWorkflowJobs(ctx context.Context, arg TerminateActiveWorkflowJobsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, terminateActiveWorkflowJobs,
+		arg.Reason,
+		arg.AtTime,
+		arg.WorkspaceID,
+		arg.ExecutionID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const updateExecutionStepProgress = `-- name: UpdateExecutionStepProgress :one

@@ -145,18 +145,21 @@ func (s *WorkflowStore) StartExecutionTx(ctx context.Context, tx pgx.Tx, req wor
 	if err != nil {
 		return workflow.Execution{}, err
 	}
+	at := req.At
+	if at.IsZero() {
+		at = time.Now()
+	}
+	deadline := pgtype.Timestamptz{}
+	if value := startDeadline(req, at); value != nil {
+		deadline = ts(*value)
+	}
 	q := sqlc.New(tx)
 	row, err := q.InsertWorkflowExecution(ctx, sqlc.InsertWorkflowExecutionParams{
 		WorkspaceID: ws, BehaviorVersionID: req.VersionID, TriggerKey: req.TriggerKey, CorrelationID: correlation,
 		Definition: definition, SourceKind: req.References.SourceKind, SourceID: req.References.SourceID,
 		Subject: req.References.Subject, Revision: req.References.Revision, OperationKey: req.References.OperationKey,
 		LegacyRunID: workflowInt8(req.References.LegacyRunID), LegacyJobID: workflowInt8(req.References.LegacyJobID),
-		DeadlineAt: func() pgtype.Timestamptz {
-			if req.Deadline == nil {
-				return pgtype.Timestamptz{}
-			}
-			return ts(*req.Deadline)
-		}(),
+		DeadlineAt: deadline,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		existing, getErr := q.GetWorkflowExecutionByTrigger(ctx, sqlc.GetWorkflowExecutionByTriggerParams{WorkspaceID: ws, TriggerKey: req.TriggerKey})
@@ -186,7 +189,7 @@ func (s *WorkflowStore) StartExecutionTx(ctx context.Context, tx pgx.Tx, req wor
 		return workflow.Execution{}, err
 	}
 	if _, err := q.InsertWorkflowJob(ctx, sqlc.InsertWorkflowJobParams{
-		WorkspaceID: ws, ExecutionID: row.ID, StepKey: ready.StepKey, DueAt: ts(time.Now()), MaxAttempts: int32(req.Definition.Retry.MaxAttempts),
+		WorkspaceID: ws, ExecutionID: row.ID, StepKey: ready.StepKey, DueAt: ts(at), MaxAttempts: int32(req.Definition.Retry.MaxAttempts),
 		Attempts: ready.Attempts,
 	}); err != nil {
 		return workflow.Execution{}, err
@@ -205,7 +208,41 @@ func (s *WorkflowStore) StartExecutionTx(ctx context.Context, tx pgx.Tx, req wor
 	return mapWorkflowExecution(queued)
 }
 
-// TransitionExecution atomically changes lifecycle state and appends history.
+// startDeadline is the earlier of the explicit request deadline and the
+// pinned definition's execution deadline measured from at.
+func startDeadline(req workflow.StartRequest, at time.Time) *time.Time {
+	var deadline *time.Time
+	if req.Deadline != nil {
+		value := *req.Deadline
+		deadline = &value
+	}
+	if req.Definition.ExecutionDeadline > 0 {
+		value := at.Add(req.Definition.ExecutionDeadline)
+		if deadline == nil || value.Before(*deadline) {
+			deadline = &value
+		}
+	}
+	return deadline
+}
+
+// terminateExecutionWork ends the execution's unfinished steps and active job
+// when it becomes terminal outside the job-result path, so no live queue row
+// remains and a stale worker's claim token no longer matches.
+func terminateExecutionWork(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, executionID int64, reason workflow.ReasonCode, at time.Time) error {
+	if _, err := q.CancelExecutionSteps(ctx, sqlc.CancelExecutionStepsParams{WorkspaceID: ws, ExecutionID: executionID}); err != nil {
+		return err
+	}
+	_, err := q.TerminateActiveWorkflowJobs(ctx, sqlc.TerminateActiveWorkflowJobsParams{
+		Reason: workflowText(string(reason)), AtTime: ts(at), WorkspaceID: ws, ExecutionID: executionID,
+	})
+	return err
+}
+
+// TransitionExecution is an administrative path: it atomically changes
+// lifecycle state and appends history after checking workflow.CanTransition
+// and the expected from-state. It holds no job fence, so workers must use the
+// JobStore methods instead. A terminal target also ends the execution's
+// unfinished steps and active job in the same transaction.
 func (s *WorkflowStore) TransitionExecution(ctx context.Context, req workflow.TransitionRequest) (workflow.Execution, error) {
 	ws, err := parseDBID(req.WorkspaceID)
 	if err != nil || req.ExecutionID <= 0 || !workflow.CanTransition(req.From, req.To) {
@@ -235,6 +272,15 @@ func (s *WorkflowStore) TransitionExecution(ctx context.Context, req workflow.Tr
 	})
 	if err != nil {
 		return workflow.Execution{}, workflow.ErrConflict
+	}
+	if req.To.IsTerminal() {
+		reason := req.Reason
+		if reason == "" {
+			reason = workflow.ReasonCode(strings.ToLower(string(req.To)))
+		}
+		if err := terminateExecutionWork(ctx, q, ws, row.ID, reason, time.Now()); err != nil {
+			return workflow.Execution{}, err
+		}
 	}
 	if err := insertWorkflowEvent(ctx, q, ws, row.ID, workflow.EventTransition, req.From, req.To, req.StepKey, req.Attempt, req.Reason, req.IdempotencyKey, workflow.Usage{}); err != nil {
 		if isUniqueViolation(err) {
@@ -279,7 +325,7 @@ func (s *WorkflowStore) CancelExecution(ctx context.Context, command workflow.Co
 	if err != nil {
 		return workflow.Execution{}, workflow.ErrConflict
 	}
-	if _, err := q.CancelExecutionSteps(ctx, sqlc.CancelExecutionStepsParams{WorkspaceID: ws, ExecutionID: command.ExecutionID}); err != nil {
+	if err := terminateExecutionWork(ctx, q, ws, command.ExecutionID, workflow.ReasonCancelled, time.Now()); err != nil {
 		return workflow.Execution{}, err
 	}
 	if err := insertWorkflowEvent(ctx, q, ws, row.ID, workflow.EventTransition, state, workflow.StateCancelled, "", 0,
@@ -333,7 +379,17 @@ func (s *WorkflowStore) RetryExecution(ctx context.Context, command workflow.Com
 	if unsafe != 0 {
 		return workflow.Execution{}, workflow.ErrUnsafeRetry
 	}
-	child, err = q.InsertRetryExecution(ctx, sqlc.InsertRetryExecutionParams{WorkspaceID: ws, ParentExecutionID: parent.ID})
+	var pinned workflow.Definition
+	if err := json.Unmarshal(parent.Definition, &pinned); err != nil {
+		return workflow.Execution{}, fmt.Errorf("decode workflow definition: %w", err)
+	}
+	var executionDeadline pgtype.Int8
+	if pinned.ExecutionDeadline > 0 {
+		executionDeadline = pgtype.Int8{Int64: pinned.ExecutionDeadline.Microseconds(), Valid: true}
+	}
+	child, err = q.InsertRetryExecution(ctx, sqlc.InsertRetryExecutionParams{
+		WorkspaceID: ws, ParentExecutionID: parent.ID, ExecutionDeadlineUs: executionDeadline,
+	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) || isUniqueViolation(err) {
 			existing, getErr := q.GetRetryChild(ctx, sqlc.GetRetryChildParams{WorkspaceID: ws, ParentExecutionID: workflowInt8(parent.ID)})

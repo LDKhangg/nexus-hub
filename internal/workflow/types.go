@@ -154,7 +154,14 @@ type StartRequest struct {
 
 	References References
 
+	// Deadline is an explicit execution deadline. When the definition sets
+	// ExecutionDeadline, the stored deadline is the earlier of Deadline and
+	// At + ExecutionDeadline.
 	Deadline *time.Time
+
+	// At is the start time used for the first job's due time and the
+	// definition deadline; zero means the store's current time.
+	At time.Time
 }
 
 // Command identifies an idempotent operator command.

@@ -50,6 +50,7 @@ const ReasonStepSucceeded ReasonCode = "step_succeeded"
 const ReasonStepRetry ReasonCode = "step_retry"
 const ReasonStepWaiting ReasonCode = "step_waiting"
 const ReasonLeaseExpired ReasonCode = "lease_expired"
+const ReasonInconsistentState ReasonCode = "inconsistent_state"
 
 // EventKind identifies an immutable execution-history record.
 type EventKind string

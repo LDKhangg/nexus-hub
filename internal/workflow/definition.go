@@ -11,6 +11,10 @@ import (
 const (
 	MaxSteps = 64
 
+	// MaxStepKeyBytes matches the step_key octet_length bound in the
+	// execution_steps, execution_events and jobs tables.
+	MaxStepKeyBytes = 200
+
 	StepKindCollectContext = "collect_context"
 
 	StepKindModel = "model"
@@ -123,6 +127,8 @@ func ValidateDefinition(d Definition, supportedCapabilities []string) error {
 		path := fmt.Sprintf("steps[%d]", i)
 		if strings.TrimSpace(step.Key) == "" {
 			add(path+".key", "must not be empty")
+		} else if len(step.Key) > MaxStepKeyBytes {
+			add(path+".key", "must be at most %d bytes", MaxStepKeyBytes)
 		} else if _, exists := keys[step.Key]; exists {
 			add(path+".key", "duplicate step key")
 		} else {
