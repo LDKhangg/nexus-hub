@@ -583,6 +583,19 @@ func (s *WorkflowStore) ResumeExecution(ctx context.Context, command workflow.Co
 	if err != nil {
 		return workflow.Execution{}, err
 	}
+	if command.WaitID > 0 {
+		waits, err := q.ListStepWaits(ctx, sqlc.ListStepWaitsParams{WorkspaceID: ws, ExecutionID: command.ExecutionID, StepKey: step.StepKey})
+		if err != nil {
+			return workflow.Execution{}, err
+		}
+		var newest int64
+		for _, wait := range waits {
+			newest = max(newest, wait.WaitID)
+		}
+		if newest != command.WaitID {
+			return workflow.Execution{}, workflow.ErrNotEligible
+		}
+	}
 	if err := repairMissingSignalsTx(ctx, q, ws, command.ExecutionID); err != nil {
 		return workflow.Execution{}, err
 	}
