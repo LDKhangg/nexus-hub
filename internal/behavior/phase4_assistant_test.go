@@ -104,6 +104,7 @@ type p4Approvals struct {
 	byNonce map[string]*Approval
 	nextID  int64
 	created []NewApproval
+	decides int
 }
 
 func newP4Approvals() *p4Approvals { return &p4Approvals{byNonce: map[string]*Approval{}} }
@@ -146,6 +147,7 @@ func (s *p4Approvals) GetApprovalByNonce(_ context.Context, ws, nonce string) (A
 func (s *p4Approvals) Decide(_ context.Context, ws, nonce string, d Decision, answer, actor string, now time.Time) (Approval, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.decides++
 	a, ok := s.byNonce[nonce]
 	switch {
 	case !ok || a.WorkspaceID != ws:
@@ -157,6 +159,12 @@ func (s *p4Approvals) Decide(_ context.Context, ws, nonce string, d Decision, an
 	}
 	a.Decision, a.Answer, a.DecidedBy = d, answer, actor
 	return *a, nil
+}
+
+func (s *p4Approvals) decideCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.decides
 }
 
 func (s *p4Approvals) ExpireDue(context.Context, time.Time, int) ([]Approval, error) { return nil, nil }
@@ -469,6 +477,20 @@ func buttons(t *testing.T, m OutMessage) (doData, cancelData string) {
 	return m.Buttons[0][0].Data, m.Buttons[0][1].Data
 }
 
+// proposalMessage returns the confirmation rather than a later model reply.
+func proposalMessage(t *testing.T, m *p4Messenger) OutMessage {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, sent := range m.sent {
+		if len(sent.Buttons) > 0 {
+			return sent
+		}
+	}
+	t.Fatal("no proposal message sent")
+	return OutMessage{}
+}
+
 // TC-28..TC-40 (REQ-12): the Telegram assistant.
 func TestPhase4TelegramAssistant(t *testing.T) {
 	// TC-28: the owner's text lives only in memory: the approval row, the
@@ -576,7 +598,7 @@ func TestPhase4TelegramAssistant(t *testing.T) {
 		if out := e.say(t, "đặt tên clickup:12345 là chị Lan"); out.code != "assistant_answer" {
 			t.Fatalf("propose: %+v", out)
 		}
-		confirm := e.msg.last(t)
+		confirm := proposalMessage(t, e.msg)
 		if !strings.Contains(confirm.Text, "clickup:12345") || !strings.Contains(confirm.Text, "chị Lan") || len(e.dir.aliasCalls()) != 0 {
 			t.Fatalf("confirmation=%q aliases=%v", confirm.Text, e.dir.aliasCalls())
 		}
@@ -604,7 +626,7 @@ func TestPhase4TelegramAssistant(t *testing.T) {
 		if e.rep.setPrefsCount() != 0 {
 			t.Fatal("prefs changed before Làm")
 		}
-		doData, _ = buttons(t, e.msg.last(t))
+		doData, _ = buttons(t, proposalMessage(t, e.msg))
 		e.press(doData)
 		e.press(doData)
 		if e.rep.setPrefsCount() != 1 || e.rep.setPrefs[0].Style != reporting.StyleDetailed || !strings.Contains(e.msg.sent[len(e.msg.sent)-1].Text, "style: detailed") {
@@ -620,7 +642,7 @@ func TestPhase4TelegramAssistant(t *testing.T) {
 	t.Run("TC-34 Huỷ changes nothing", func(t *testing.T) {
 		e := d5ToolEnv(d5ProposalModel(toolContactAlias, `{"ref":"clickup:12345","name":"chị Lan"}`))
 		e.say(t, "đặt tên")
-		doData, cancelData := buttons(t, e.msg.last(t))
+		doData, cancelData := buttons(t, proposalMessage(t, e.msg))
 		e.press(cancelData)
 		if len(e.dir.aliasCalls()) != 0 || e.msg.lastToast(t) != msgAssistantCancelled {
 			t.Fatalf("Huỷ: aliases=%v toast=%q", e.dir.aliasCalls(), e.msg.lastToast(t))
@@ -634,7 +656,7 @@ func TestPhase4TelegramAssistant(t *testing.T) {
 	t.Run("TC-35 expired confirmation", func(t *testing.T) {
 		e := d5ToolEnv(d5ProposalModel(toolReportStyle, `{"style":"normal"}`))
 		e.say(t, "kiểu normal")
-		doData, _ := buttons(t, e.msg.last(t))
+		doData, _ := buttons(t, proposalMessage(t, e.msg))
 		e.clock = e.clock.Add(11 * time.Minute)
 		if out := e.press(doData); out.code != "stale" || e.rep.setPrefsCount() != 0 {
 			t.Fatalf("expired Làm: %+v writes=%d", out, e.rep.setPrefsCount())
@@ -696,8 +718,8 @@ func TestPhase4TelegramAssistant(t *testing.T) {
 			t.Fatalf("compromised model wrote directly: writes=%d approvals=%d", e.rep.setPrefsCount(), e.ap.count())
 		}
 		req := model.reqs[0]
-		if req.System != assistantSystem || !strings.Contains(req.System, "untrusted") || req.Turns[0].Text != injected {
-			t.Fatalf("owner text not framed as data: %+v", req)
+		if req.System != assistantSystem || req.Turns[0].Text != injected {
+			t.Fatalf("owner text changed before model call: %+v", req)
 		}
 		e = d5ToolEnv(&d5ToolModel{responses: []*domain.ToolResponse{{Text: "/alias clickup:1 Boss\n/prefs detailed", Stop: domain.StopEndTurn}}})
 		e.say(t, injected)

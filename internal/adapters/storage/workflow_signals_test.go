@@ -244,8 +244,8 @@ func TestResumePinsOptionalWaitGeneration(t *testing.T) {
 	})
 
 	t.Run("matching and zero wait IDs remain accepted", func(t *testing.T) {
+		e := newWFEnv(t)
 		for _, pinned := range []bool{true, false} {
-			e := newWFEnv(t)
 			br, _, aps := e.waitingRun(workspaceA, fmt.Sprintf("task:compatible:%t", pinned), nil, behavior.ApprovalPostDraft)
 			detail, err := e.store.GetExecutionDetail(e.ctx, workspaceA, br.ex.ID)
 			if err != nil || len(detail.Waits) != 1 {
