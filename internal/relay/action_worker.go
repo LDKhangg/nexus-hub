@@ -3,10 +3,13 @@ package relay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
+	"strconv"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
+	"github.com/LDKhangg/nexus-hub/internal/workflow"
 )
 
 // MaxActionAttempts matches the notice outbox.
@@ -21,6 +24,7 @@ type OutboundAction struct {
 	Attempts                   int
 	WorkspaceID, IntegrationID string
 	Text                       string
+	ExecutionID                int64
 }
 
 // ActionStore is the outbound_actions queue (storage.ActionStore).
@@ -43,16 +47,22 @@ type ActionWorker struct {
 	sender   TextSender
 	settings WorkerSettings
 	now      func() time.Time
+
+	conversations workflow.ConversationStore
 }
 
-func NewActionWorker(store ActionStore, sender TextSender, settings WorkerSettings) *ActionWorker {
+func NewActionWorker(store ActionStore, sender TextSender, settings WorkerSettings, conversations ...workflow.ConversationStore) *ActionWorker {
 	if settings.PollInterval <= 0 {
 		settings.PollInterval = time.Second
 	}
 	if settings.RequestTimeout <= 0 {
 		settings.RequestTimeout = 10 * time.Second
 	}
-	return &ActionWorker{store: store, sender: sender, settings: settings, now: time.Now}
+	w := &ActionWorker{store: store, sender: sender, settings: settings, now: time.Now}
+	if len(conversations) > 0 {
+		w.conversations = conversations[0]
+	}
+	return w
 }
 
 func (w *ActionWorker) Run(ctx context.Context) error {
@@ -87,6 +97,7 @@ func (w *ActionWorker) processNext(ctx context.Context) error {
 		return ctx.Err()
 	}
 	if err == nil {
+		w.bindWorkflowMessage(context.WithoutCancel(ctx), *a, target.ChatID, id)
 		return w.store.MarkSent(ctx, *a, id)
 	}
 	code, retry := "delivery_unknown", true
@@ -104,4 +115,29 @@ func (w *ActionWorker) processNext(ctx context.Context) error {
 		delay = after
 	}
 	return w.store.MarkRetry(ctx, *a, w.now().Add(delay), code)
+}
+
+func (w *ActionWorker) bindWorkflowMessage(ctx context.Context, a OutboundAction, chatID string, messageID int64) {
+	if w.conversations == nil || a.ExecutionID <= 0 || messageID <= 0 {
+		return
+	}
+	chat, err := strconv.ParseInt(chatID, 10, 64)
+	if err != nil || chat == 0 {
+		log.Print("action worker workflow binding failed (invalid_chat)")
+		return
+	}
+	conversation, err := w.conversations.EnsureConversation(ctx, workflow.Conversation{
+		WorkspaceID: a.WorkspaceID, IntegrationID: a.IntegrationID, ChatID: chat,
+	})
+	if err != nil {
+		log.Print("action worker workflow binding failed (ensure_conversation)")
+	} else if err := w.conversations.BindWorkflow(ctx, a.WorkspaceID, conversation.ID, a.ExecutionID, "report"); err != nil {
+		log.Print("action worker workflow binding failed (bind_conversation)")
+	}
+	if err := w.conversations.BindResource(ctx, workflow.ResourceBinding{
+		WorkspaceID: a.WorkspaceID, ExecutionID: a.ExecutionID, Kind: "telegram.message",
+		ExternalID: fmt.Sprintf("%d:%d", chat, messageID),
+	}); err != nil {
+		log.Print("action worker workflow binding failed (bind_resource)")
+	}
 }

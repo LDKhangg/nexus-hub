@@ -44,6 +44,8 @@ type agentServices struct {
 	limits       tools.Limits
 	people       *storage.PeopleRepository
 	store        *storage.AgentStore
+
+	conversations workflow.ConversationStore
 	// provider returns the workspace's default LLM provider.
 	provider func(ctx context.Context, ws string) (domain.LLMProvider, error)
 }
@@ -133,6 +135,10 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 	if err != nil {
 		return agentServices{}, errors.New("action store startup failed")
 	}
+	conversations, err := storage.NewConversationStore(pool)
+	if err != nil {
+		return agentServices{}, errors.New("conversation store startup failed")
+	}
 	llmHTTP := netguard.Client(0, netguard.DefaultHosts) // the SDK applies its own request timeouts
 	// The provider comes from llm_provider: the Anthropic API (key from the
 	// workspace credential) or a CLI signed in on the host. Only the
@@ -171,8 +177,8 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		PollInterval: s.AgentPollInterval, Limits: limits, AllowDangerous: s.AllowDangerous,
 		MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
 	})
-	worker := relay.NewActionWorker(actions, sender, relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
-	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, people: directory, store: store}, nil
+	worker := relay.NewActionWorker(actions, sender, relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout}, conversations)
+	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, people: directory, store: store, conversations: conversations}, nil
 }
 
 // buildBehaviorEngine wires the behavior run executor and the action
@@ -200,6 +206,8 @@ func buildBehaviorEngine(pool *pgxpool.Pool, s settings.Settings, store *storage
 		Redactor:  redactor,
 		Reports:   reporting.NewRenderer(reporting.NewPostgresStore(pool), ag.people),
 		People:    ag.people,
+
+		Conversations: ag.conversations,
 	}, behavior.ActionSettings{OwnerClickUpUserID: s.OwnerClickUpUserID, RequestTimeout: s.NoticeRequestTimeout})
 	if err != nil {
 		return nil, nil, errors.New("behavior action engine startup failed")

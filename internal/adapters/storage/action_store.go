@@ -45,10 +45,11 @@ func (s *ActionStore) Claim(ctx context.Context, now time.Time) (*relay.Outbound
 		return nil, err
 	}
 	var payload struct {
-		Text string `json:"text"`
+		Text        string `json:"text"`
+		ExecutionID int64  `json:"execution_id"`
 	}
 	_ = json.Unmarshal(row.Payload, &payload)
-	return &relay.OutboundAction{ID: row.ID, ClaimToken: tok.String(), Attempts: int(row.Attempts), WorkspaceID: row.WorkspaceID.String(), IntegrationID: row.IntegrationID.String(), Text: payload.Text}, nil
+	return &relay.OutboundAction{ID: row.ID, ClaimToken: tok.String(), Attempts: int(row.Attempts), WorkspaceID: row.WorkspaceID.String(), IntegrationID: row.IntegrationID.String(), Text: payload.Text, ExecutionID: payload.ExecutionID}, nil
 }
 
 func (s *ActionStore) token(a relay.OutboundAction) (pgtype.UUID, error) {

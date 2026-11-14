@@ -143,7 +143,8 @@ func (s *WorkflowSteps) continuationContext(ctx context.Context, sc workflow.Ste
 	if t := sc.Definition.StepTimeout; t > 0 {
 		actx, cancel = context.WithTimeout(ctx, t-stepMargin(t))
 	}
-	return withApprovalBinder(withActionGate(actx, s.gate(fence)), s.binder(fence)), cancel
+	actx = withWorkflowExecution(withActionGate(actx, s.gate(fence)), fence.ExecutionID)
+	return withApprovalBinder(actx, s.binder(fence)), cancel
 }
 
 // settleWaits applies every recorded, unapplied decision of the step's

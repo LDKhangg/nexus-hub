@@ -22,6 +22,7 @@ type Report struct {
 	Values      Values
 	Reaction    string
 	TraceHint   string
+	WorkflowRef string
 }
 
 // Renderer applies preferences, current contact names and owner templates.
@@ -100,6 +101,9 @@ func (r *Renderer) Render(ctx context.Context, report Report) (string, error) {
 	}
 	if v.Behavior == "" {
 		v.Behavior = report.Behavior
+	}
+	if v.WorkflowRef == "" {
+		v.WorkflowRef = report.WorkflowRef
 	}
 	if v.Outcome == "" {
 		v.Outcome = defaultOutcome(report.Kind, v, language)
@@ -208,9 +212,16 @@ func renderDefault(report Report, v Values, prefs Prefs, language string) string
 				lines = append(lines, "Behavior: "+cleanValue(v.Behavior)+" · run "+cleanValue(v.RunID))
 			}
 			if prefs.ShowTraceHint && report.TraceHint != "" {
-				lines = append(lines, cleanValue(report.TraceHint))
+				hint := report.TraceHint
+				if v.WorkflowRef != "" {
+					hint += " · " + v.WorkflowRef
+				}
+				lines = append(lines, cleanValue(hint))
 			}
 		}
+	}
+	if prefs.ShowTraceHint && report.TraceHint != "" && v.WorkflowRef != "" && prefs.Style != StyleDetailed {
+		lines = append(lines, cleanValue(report.TraceHint+" · "+v.WorkflowRef))
 	}
 	reason := ""
 	if v.Reason != "" && needsReason(report.Kind) {

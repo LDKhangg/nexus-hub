@@ -854,6 +854,7 @@ func (r *batchRun) report(ctx context.Context) (workflow.StepResult, error) {
 		res.Text = o.investigateText(jc, d, r.inv.ReportText, r.inv.ToolsLine, r.inv.TotalInputTokens, r.inv.TotalOutputTokens)
 	}
 	res.Text = o.withUnseenNote(jc, res.Text, r.tri.Unseen)
+	res.Text = appendWorkflowRef(res.Text, r.fence.ExecutionID)
 	r.st.add(CheckpointReport, BatchDone, AgentOperationKey(r.batch.ID))
 	wctx, cancel := r.writeCtx()
 	defer cancel()
@@ -905,10 +906,18 @@ func (r *batchRun) fallback(_ context.Context, jc JobContext, code string, throu
 	r.st.add(CheckpointReport, BatchFailed, AgentOperationKey(r.batch.ID))
 	wctx, cancel := r.writeCtx()
 	defer cancel()
-	if err := r.s.store.CommitBatchFallback(wctx, r.f(), r.batch.ID, code, r.s.o.fallbackText(jc, code), through, r.st.checkpoint(true)); err != nil {
+	text := appendWorkflowRef(r.s.o.fallbackText(jc, code), r.fence.ExecutionID)
+	if err := r.s.store.CommitBatchFallback(wctx, r.f(), r.batch.ID, code, text, through, r.st.checkpoint(true)); err != nil {
 		return workflow.StepResult{}, storageErr(r.stepCtx, err)
 	}
 	return r.st.result()
+}
+
+func appendWorkflowRef(text string, executionID int64) string {
+	if text == "" || executionID <= 0 {
+		return text
+	}
+	return text + "\n" + workflow.FormatRef(executionID)
 }
 
 // capBytes cuts s to at most n bytes on a rune boundary.

@@ -144,9 +144,11 @@ func RunOperationKey(runID int64) string { return "behavior_run:" + strconv.Form
 // and the run as legacy reference. def is NormalizeWorkflow of the pinned
 // version.
 func WorkflowStartRequest(run Run, def workflow.Definition) workflow.StartRequest {
+	resources := workflowResources(run)
 	return workflow.StartRequest{
 		WorkspaceID: run.WorkspaceID, VersionID: run.VersionID, TriggerKey: RunOperationKey(run.ID),
 		CorrelationID: run.CorrelationID, Definition: def,
+		ResourceReferences: resources,
 		References: workflow.References{
 			SourceKind: WorkflowSourceRun, SourceID: strconv.FormatInt(run.ID, 10),
 			Subject: run.Subject, Revision: run.Revision, OperationKey: RunOperationKey(run.ID), LegacyRunID: run.ID,
@@ -154,9 +156,47 @@ func WorkflowStartRequest(run Run, def workflow.Definition) workflow.StartReques
 	}
 }
 
+func workflowResources(run Run) []workflow.ResourceReference {
+	trigger, err := DecodeTriggerData(run.Trigger)
+	if err != nil {
+		return nil
+	}
+	resources := make([]workflow.ResourceReference, 0, 3+len(trigger.PRs))
+	if trigger.TaskID != "" {
+		resources = append(resources, workflow.ResourceReference{Kind: "clickup.task", ExternalID: trigger.TaskID})
+	}
+	if trigger.CommentID != "" {
+		resources = append(resources, workflow.ResourceReference{Kind: "clickup.comment", ExternalID: trigger.CommentID})
+	}
+	if trigger.MessageID != "" {
+		resources = append(resources, workflow.ResourceReference{Kind: "clickup.chat_message", ExternalID: trigger.MessageID})
+	}
+	for _, pr := range trigger.PRs {
+		resources = append(resources, workflow.ResourceReference{Kind: "github.pr", ExternalID: pr.String()})
+	}
+	return resources
+}
+
 // --- action gate ---
 
 type actionGateKey struct{}
+type workflowExecutionKey struct{}
+
+func withWorkflowExecution(ctx context.Context, executionID int64) context.Context {
+	return context.WithValue(ctx, workflowExecutionKey{}, executionID)
+}
+
+func workflowExecutionID(ctx context.Context) int64 {
+	id, _ := ctx.Value(workflowExecutionKey{}).(int64)
+	return id
+}
+
+func workflowRef(ctx context.Context) string {
+	if id := workflowExecutionID(ctx); id > 0 {
+		return workflow.FormatRef(id)
+	}
+	return ""
+}
 
 // withActionGate makes every external write of the action library under ctx
 // re-check gate first. A legacy run has no gate.
@@ -510,7 +550,7 @@ func (s *WorkflowSteps) execute(ctx context.Context, sc workflow.StepContext, ph
 	}
 	actx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	actx = withActionGate(actx, s.gate(fence))
+	actx = withWorkflowExecution(withActionGate(actx, s.gate(fence)), ex.ID)
 	if s.waits != nil {
 		actx = withApprovalBinder(actx, s.binder(fence))
 	}
@@ -543,7 +583,7 @@ func (s *WorkflowSteps) execute(ctx context.Context, sc workflow.StepContext, ph
 		}
 		out = &runOutcome{status: RunDone, code: verdictEndCode(rc)}
 	}
-	res, err := s.end(ctx, &rc, at, out, st)
+	res, err := s.end(withWorkflowExecution(ctx, ex.ID), &rc, at, out, st)
 	return s.awaitDecisions(ctx, sc, fence, st, res, err)
 }
 

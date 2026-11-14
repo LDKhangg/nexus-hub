@@ -266,7 +266,7 @@ func (s *AgentStore) commit(ctx context.Context, job agent.AgentJob, status, cod
 		n, err := q.FinishAgentJob(ctx, sqlc.FinishAgentJobParams{ID: job.ID, Token: token, Status: status, Through: pgtype.Int8{Int64: through, Valid: through > 0}, Code: optText(code)})
 		return staleIfZero(n, err)
 	}
-	if err := s.writeBatchOutcome(ctx, q, job, ws, thread, code, routerNote, actorNote, text, through, finish); err != nil {
+	if err := s.writeBatchOutcome(ctx, q, job, ws, thread, code, routerNote, actorNote, text, through, 0, finish); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -277,7 +277,7 @@ func (s *AgentStore) commit(ctx context.Context, job agent.AgentJob, status, cod
 // "agent_job:<id>"), the job's end via finish (with the error code, which
 // becomes invalid_target when the report has no valid target), the thread
 // refresh and the follow-up job.
-func (s *AgentStore) writeBatchOutcome(ctx context.Context, q *sqlc.Queries, job agent.AgentJob, ws, thread pgtype.UUID, code, routerNote, actorNote, text string, through int64, finish func(code string) error) error {
+func (s *AgentStore) writeBatchOutcome(ctx context.Context, q *sqlc.Queries, job agent.AgentJob, ws, thread pgtype.UUID, code, routerNote, actorNote, text string, through, executionID int64, finish func(code string) error) error {
 	for _, note := range []struct{ role, content string }{{"ai_router", routerNote}, {"ai_actor", actorNote}} {
 		if note.content == "" {
 			continue
@@ -292,7 +292,10 @@ func (s *AgentStore) writeBatchOutcome(ctx context.Context, q *sqlc.Queries, job
 		if err != nil {
 			code = "invalid_target"
 		} else {
-			payload, _ := json.Marshal(map[string]string{"text": text})
+			payload, _ := json.Marshal(struct {
+				Text        string `json:"text"`
+				ExecutionID int64  `json:"execution_id,omitempty"`
+			}{Text: text, ExecutionID: executionID})
 			if err := q.InsertOutboundAction(ctx, sqlc.InsertOutboundActionParams{WorkspaceID: ws, IntegrationID: target, Payload: payload, DedupeKey: agent.AgentOperationKey(job.ID)}); err != nil {
 				return err
 			}

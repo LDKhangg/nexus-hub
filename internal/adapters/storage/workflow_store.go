@@ -175,6 +175,9 @@ func (s *WorkflowStore) StartExecutionTx(ctx context.Context, tx pgx.Tx, req wor
 	if err != nil {
 		return workflow.Execution{}, err
 	}
+	if err := bindStartResources(ctx, q, ws, row.ID, req.References, req.ResourceReferences); err != nil {
+		return workflow.Execution{}, err
+	}
 	for position, step := range req.Definition.Steps {
 		if _, err := q.InsertExecutionStep(ctx, sqlc.InsertExecutionStepParams{
 			WorkspaceID: ws, ExecutionID: row.ID, StepKey: step.Key, Position: int32(position), Kind: step.Kind, DependsOn: workflowDependsOn(step.DependsOn),
@@ -207,6 +210,44 @@ func (s *WorkflowStore) StartExecutionTx(ctx context.Context, tx pgx.Tx, req wor
 		return workflow.Execution{}, err
 	}
 	return mapWorkflowExecution(queued)
+}
+
+func bindStartResources(ctx context.Context, q *sqlc.Queries, workspaceID pgtype.UUID, executionID int64, refs workflow.References, supplied []workflow.ResourceReference) error {
+	resources := append([]workflow.ResourceReference(nil), supplied...)
+	if strings.HasPrefix(refs.Subject, "clickup:task:") {
+		resources = append(resources, workflow.ResourceReference{Kind: "clickup.task", ExternalID: strings.TrimPrefix(refs.Subject, "clickup:task:")})
+	} else if strings.HasPrefix(refs.Subject, "clickup:chat:") {
+		resources = append(resources, workflow.ResourceReference{Kind: "clickup.chat_message", ExternalID: strings.TrimPrefix(refs.Subject, "clickup:chat:")})
+	}
+	if isStartResourceKind(refs.SourceKind) {
+		resources = append(resources, workflow.ResourceReference{Kind: refs.SourceKind, ExternalID: refs.SourceID})
+	}
+	seen := make(map[string]bool, len(resources))
+	for _, resource := range resources {
+		if !isStartResourceKind(resource.Kind) || resource.ExternalID == "" {
+			continue
+		}
+		key := resource.Kind + "\x00" + resource.ExternalID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if err := q.BindWorkflowResource(ctx, sqlc.BindWorkflowResourceParams{
+			WorkspaceID: workspaceID, ExecutionID: executionID, Kind: resource.Kind, ExternalID: resource.ExternalID,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isStartResourceKind(kind string) bool {
+	switch kind {
+	case "clickup.task", "clickup.comment", "clickup.chat_message", "github.pr":
+		return true
+	default:
+		return false
+	}
 }
 
 // startDeadline is the earlier of the explicit request deadline and the

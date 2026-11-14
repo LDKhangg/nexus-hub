@@ -21,15 +21,15 @@ import (
 
 const workflowUsage = `usage: workflow <command> --workspace-id <uuid> [args]
   list [--state S] [--limit N] [--cursor C]    executions, newest first
-  show <id>                                    state, reason, version, deadline,
+  show <ref|id>                                state, reason, version, deadline,
                                                waits, live job, lineage, legacy links
-  steps <id>                                   steps, attempts, usage, checkpoint refs
-  history <id> [--limit N] [--cursor C]        ordered timeline
+  steps <ref|id>                               steps, attempts, usage, checkpoint refs
+  history <ref|id> [--limit N] [--cursor C]    ordered timeline
   jobs [--status S] [--execution-id ID] [--limit N] [--cursor C]
   dead-letter [--execution-id ID] [--limit N] [--cursor C]
-  cancel <id>                                  cancel a running or waiting execution
-  resume <id>                                  queue a wait whose decision is recorded
-  retry <id>                                   retry a FAILED execution as a linked child
+  cancel <ref|id>                              cancel a running or waiting execution
+  resume <ref|id>                              queue a wait whose decision is recorded
+  retry <ref|id>                               retry a FAILED execution as a linked child
   cutover [--apply]                            read-only preflight; --apply cuts over
 Lists take --limit 1-200 (default 50) and print next_cursor ("" at the end).
 Output holds IDs, validated lifecycle codes, counters and opaque reference digests only.`
@@ -218,9 +218,13 @@ func workflowCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 		if len(pos) != 1 {
 			return errors.New(workflowUsage)
 		}
-		id, err = strconv.ParseInt(pos[0], 10, 64)
+		var ok bool
+		id, ok = workflow.ParseRef(pos[0])
+		if !ok {
+			id, err = strconv.ParseInt(pos[0], 10, 64)
+		}
 		if err != nil || id <= 0 {
-			return errors.New("execution ID must be a positive integer")
+			return errors.New("execution reference must be WF-<positive integer> or a positive integer")
 		}
 	default:
 		if len(pos) != 0 {
@@ -268,7 +272,7 @@ func workflowCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 
 func executionSummary(v workflow.ExecutionView) map[string]any {
 	m := map[string]any{
-		"id": v.ID, "state": workflowState(v.State), "reason": workflowReason(v.Reason),
+		"id": v.ID, "ref": workflow.FormatRef(v.ID), "state": workflowState(v.State), "reason": workflowReason(v.Reason),
 		"behavior_digest": workflowDigest(v.BehaviorName), "behavior_version": v.BehaviorVersion, "version_id": v.VersionID,
 		"source_kind_digest": workflowDigest(v.References.SourceKind), "created_at": workflowTimeV(v.CreatedAt), "updated_at": workflowTimeV(v.UpdatedAt),
 	}
@@ -397,7 +401,7 @@ func (c workflowCLI) steps(ctx context.Context, id int64) error {
 		}
 		items = append(items, m)
 	}
-	return c.emit(map[string]any{"execution_id": id, "steps": items})
+	return c.emit(map[string]any{"execution_id": id, "ref": workflow.FormatRef(id), "steps": items})
 }
 
 func (c workflowCLI) history(ctx context.Context, id int64, limit int, cursor string) error {
@@ -434,7 +438,7 @@ func (c workflowCLI) history(ctx context.Context, id int64, limit int, cursor st
 		}
 		items = append(items, m)
 	}
-	return c.emit(map[string]any{"execution_id": id, "events": items, "next_cursor": workflow.EncodeCursor(scope, next)})
+	return c.emit(map[string]any{"execution_id": id, "ref": workflow.FormatRef(id), "events": items, "next_cursor": workflow.EncodeCursor(scope, next)})
 }
 
 func (c workflowCLI) jobs(ctx context.Context, scope, status string, executionID int64, limit int, cursor string) error {
@@ -492,7 +496,7 @@ func (c workflowCLI) cancel(ctx context.Context, id int64) error {
 	case err != nil:
 		return workflowStoreErr(err)
 	}
-	return c.emit(map[string]any{"execution_id": e.ID, "outcome": "cancelled", "state": workflowState(e.State), "reason": workflowReason(e.Reason),
+	return c.emit(map[string]any{"execution_id": e.ID, "ref": workflow.FormatRef(e.ID), "outcome": "cancelled", "state": workflowState(e.State), "reason": workflowReason(e.Reason),
 		"note": "an external request already in flight is not rolled back"})
 }
 
@@ -523,7 +527,7 @@ func (c workflowCLI) resume(ctx context.Context, id int64) error {
 	if !d.State.IsWaiting() {
 		outcome = "already_resumed"
 	}
-	return c.emit(map[string]any{"execution_id": e.ID, "outcome": outcome, "state": workflowState(e.State), "reason": workflowReason(e.Reason)})
+	return c.emit(map[string]any{"execution_id": e.ID, "ref": workflow.FormatRef(e.ID), "outcome": outcome, "state": workflowState(e.State), "reason": workflowReason(e.Reason)})
 }
 
 func (c workflowCLI) retry(ctx context.Context, id int64) error {
@@ -542,7 +546,7 @@ func (c workflowCLI) retry(ctx context.Context, id int64) error {
 	case err != nil:
 		return workflowStoreErr(err)
 	}
-	m := map[string]any{"execution_id": id, "retry_execution_id": child.ID, "state": workflowState(child.State), "outcome": "created"}
+	m := map[string]any{"execution_id": id, "ref": workflow.FormatRef(id), "retry_execution_id": child.ID, "retry_ref": workflow.FormatRef(child.ID), "state": workflowState(child.State), "outcome": "created"}
 	if d.RetryChildID != 0 {
 		m["outcome"] = "existing"
 		if child.State == workflow.StateFailed {

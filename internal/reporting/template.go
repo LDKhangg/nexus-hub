@@ -21,7 +21,7 @@ var allowedPlaceholders = map[string]bool{
 	"verdict": true, "confidence": true, "ai_summary": true, "items": true,
 	"outcome": true, "reason": true,
 	"task": true, "channel": true, "link": true,
-	"behavior": true, "run_id": true,
+	"behavior": true, "run_id": true, "workflow_ref": true,
 }
 
 // Values is the complete, fixed set of values an owner template may read.
@@ -47,6 +47,8 @@ type Values struct {
 	Link     string
 	Behavior string
 	RunID    string
+
+	WorkflowRef string
 }
 
 func (v Values) fields() map[string]string {
@@ -56,7 +58,7 @@ func (v Values) fields() map[string]string {
 		"verdict": v.Verdict, "confidence": v.Confidence, "ai_summary": v.AISummary, "items": v.Items,
 		"outcome": v.Outcome, "reason": v.Reason,
 		"task": v.Task, "channel": v.Channel, "link": v.Link,
-		"behavior": v.Behavior, "run_id": v.RunID,
+		"behavior": v.Behavior, "run_id": v.RunID, "workflow_ref": v.WorkflowRef,
 	}
 }
 
@@ -203,6 +205,6 @@ func Preview(kind Kind, body ...string) (string, error) {
 		PRTitle: "Sample pull request", PRs: "org/repo#1601", Verdict: "approve_request", Confidence: "0.94",
 		AISummary: "Sample summary", Items: "• Sample item", Outcome: "✅ Approved PR #1601 for Sample Contact", Reason: "Sample reason",
 		Task: "TASK-123", Channel: "project-chat", Link: "https://github.com/org/repo/pull/1601",
-		Behavior: "sample-behavior", RunID: "42",
+		Behavior: "sample-behavior", RunID: "42", WorkflowRef: "WF-101",
 	})
 }
