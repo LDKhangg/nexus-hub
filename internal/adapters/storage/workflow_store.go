@@ -173,7 +173,7 @@ func (s *WorkflowStore) StartExecutionTx(ctx context.Context, tx pgx.Tx, req wor
 	}
 	for position, step := range req.Definition.Steps {
 		if _, err := q.InsertExecutionStep(ctx, sqlc.InsertExecutionStepParams{
-			WorkspaceID: ws, ExecutionID: row.ID, StepKey: step.Key, Position: int32(position), Kind: step.Kind, DependsOn: step.DependsOn,
+			WorkspaceID: ws, ExecutionID: row.ID, StepKey: step.Key, Position: int32(position), Kind: step.Kind, DependsOn: workflowDependsOn(step.DependsOn),
 		}); err != nil {
 			return workflow.Execution{}, err
 		}
@@ -187,6 +187,7 @@ func (s *WorkflowStore) StartExecutionTx(ctx context.Context, tx pgx.Tx, req wor
 	}
 	if _, err := q.InsertWorkflowJob(ctx, sqlc.InsertWorkflowJobParams{
 		WorkspaceID: ws, ExecutionID: row.ID, StepKey: ready.StepKey, DueAt: ts(time.Now()), MaxAttempts: int32(req.Definition.Retry.MaxAttempts),
+		Attempts: ready.Attempts,
 	}); err != nil {
 		return workflow.Execution{}, err
 	}
@@ -359,7 +360,7 @@ func (s *WorkflowStore) RetryExecution(ctx context.Context, command workflow.Com
 	}
 	if _, err := q.InsertWorkflowJob(ctx, sqlc.InsertWorkflowJobParams{
 		WorkspaceID: ws, ExecutionID: child.ID, StepKey: ready.StepKey, DueAt: ts(time.Now()),
-		MaxAttempts: int32(definition.Retry.MaxAttempts),
+		MaxAttempts: int32(definition.Retry.MaxAttempts), Attempts: ready.Attempts,
 	}); err != nil {
 		return workflow.Execution{}, err
 	}
@@ -414,4 +415,13 @@ func (s *WorkflowStore) HandleSignal(context.Context, workflow.Signal) error {
 // Resume cannot manufacture a signal; P5 adds the persisted eligibility path.
 func (s *WorkflowStore) ResumeExecution(context.Context, workflow.Command) (workflow.Execution, error) {
 	return workflow.Execution{}, workflow.ErrNotEligible
+}
+
+// workflowDependsOn returns a non-nil slice so a root step stores an empty
+// text[] instead of SQL NULL in the NOT NULL depends_on column.
+func workflowDependsOn(deps []string) []string {
+	if deps == nil {
+		return []string{}
+	}
+	return deps
 }

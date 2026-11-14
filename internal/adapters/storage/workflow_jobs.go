@@ -10,6 +10,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -193,6 +194,9 @@ func updateWorkflowProgress(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID
 	if errors.Is(err, pgx.ErrNoRows) {
 		return workflow.Step{}, workflow.ErrStaleClaim
 	}
+	if isCheckpointSizeViolation(err) {
+		return workflow.Step{}, workflow.ErrInvalidInput
+	}
 	if err != nil {
 		return workflow.Step{}, err
 	}
@@ -313,7 +317,7 @@ func (s *WorkflowStore) CompleteJob(ctx context.Context, req workflow.JobResultR
 	if readyErr == nil {
 		if _, err := j.q.InsertWorkflowJob(ctx, sqlc.InsertWorkflowJobParams{
 			WorkspaceID: j.ws, ExecutionID: j.job.ExecutionID, StepKey: ready.StepKey,
-			DueAt: ts(req.At), MaxAttempts: j.job.MaxAttempts,
+			DueAt: ts(req.At), MaxAttempts: j.job.MaxAttempts, Attempts: ready.Attempts,
 		}); err != nil {
 			return err
 		}
@@ -601,6 +605,16 @@ func (s *WorkflowStore) ReconcileJobs(ctx context.Context, at time.Time) error {
 			return stepErr
 		}
 		dueAt := at
+		if workflow.StepState(step.State) != workflow.StepRunning && int(step.Attempts) >= execution.Definition.Retry.MaxAttempts {
+			// A pending step whose job was lost after its last allowed
+			// attempt cannot be claimed again; fail instead of restarting
+			// the attempt count.
+			if err := failReconcileExecution(ctx, q, executionRow, nil, step.StepKey,
+				int(step.Attempts), at, workflow.ReasonAttemptsExhausted); err != nil {
+				return err
+			}
+			continue
+		}
 		if workflow.StepState(step.State) == workflow.StepRunning {
 			delay, retry := reconcileDelay(execution.Definition, int(step.Attempts))
 			if !retry {
@@ -621,6 +635,9 @@ func (s *WorkflowStore) ReconcileJobs(ctx context.Context, at time.Time) error {
 		if _, err := q.InsertWorkflowJob(ctx, sqlc.InsertWorkflowJobParams{
 			WorkspaceID: executionRow.WorkspaceID, ExecutionID: executionRow.ID, StepKey: step.StepKey,
 			DueAt: ts(dueAt), MaxAttempts: int32(execution.Definition.Retry.MaxAttempts),
+			// The recreated job continues the step's attempt numbering so the
+			// claim fence (job attempts == step attempts) and max_attempts hold.
+			Attempts: step.Attempts,
 		}); err != nil {
 			return err
 		}
@@ -630,4 +647,13 @@ func (s *WorkflowStore) ReconcileJobs(ctx context.Context, at time.Time) error {
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// isCheckpointSizeViolation reports the execution_steps checkpoint CHECK
+// (jsonb object within 64 KiB). Go validates first; the database bound
+// measures the stored jsonb size, which can exceed the JSON text length, so
+// a late rejection is still the caller's invalid input, not a server error.
+func isCheckpointSizeViolation(err error) bool {
+	var pg *pgconn.PgError
+	return errors.As(err, &pg) && pg.Code == "23514" && pg.ConstraintName == "execution_steps_checkpoint_check"
 }

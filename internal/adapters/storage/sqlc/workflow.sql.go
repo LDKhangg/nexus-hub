@@ -809,8 +809,8 @@ func (q *Queries) InsertWorkflowExecution(ctx context.Context, arg InsertWorkflo
 }
 
 const insertWorkflowJob = `-- name: InsertWorkflowJob :one
-INSERT INTO public.jobs (workspace_id, execution_id, step_key, due_at, max_attempts)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO public.jobs (workspace_id, execution_id, step_key, due_at, max_attempts, attempts)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (execution_id) WHERE status IN ('pending','processing') DO NOTHING
 RETURNING id, workspace_id, execution_id, step_key, status, due_at, attempts, max_attempts, claim_token, lease_expires_at, last_error_code, dead_letter_reason, created_at, updated_at
 `
@@ -821,6 +821,7 @@ type InsertWorkflowJobParams struct {
 	StepKey     string
 	DueAt       pgtype.Timestamptz
 	MaxAttempts int32
+	Attempts    int32
 }
 
 func (q *Queries) InsertWorkflowJob(ctx context.Context, arg InsertWorkflowJobParams) (Job, error) {
@@ -830,6 +831,7 @@ func (q *Queries) InsertWorkflowJob(ctx context.Context, arg InsertWorkflowJobPa
 		arg.StepKey,
 		arg.DueAt,
 		arg.MaxAttempts,
+		arg.Attempts,
 	)
 	var i Job
 	err := row.Scan(

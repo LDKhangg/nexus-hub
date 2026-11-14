@@ -120,8 +120,8 @@ WHERE s.workspace_id = sqlc.arg(workspace_id) AND s.execution_id = sqlc.arg(pare
 ORDER BY s.position;
 
 -- name: InsertWorkflowJob :one
-INSERT INTO public.jobs (workspace_id, execution_id, step_key, due_at, max_attempts)
-VALUES (sqlc.arg(workspace_id), sqlc.arg(execution_id), sqlc.arg(step_key), sqlc.arg(due_at), sqlc.arg(max_attempts))
+INSERT INTO public.jobs (workspace_id, execution_id, step_key, due_at, max_attempts, attempts)
+VALUES (sqlc.arg(workspace_id), sqlc.arg(execution_id), sqlc.arg(step_key), sqlc.arg(due_at), sqlc.arg(max_attempts), sqlc.arg(attempts))
 ON CONFLICT (execution_id) WHERE status IN ('pending','processing') DO NOTHING
 RETURNING *;
 
