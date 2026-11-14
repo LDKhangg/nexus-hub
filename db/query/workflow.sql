@@ -124,8 +124,9 @@ WHERE s.workspace_id = sqlc.arg(workspace_id) AND s.execution_id = sqlc.arg(pare
 ORDER BY s.position;
 
 -- name: InsertWorkflowJob :one
-INSERT INTO public.jobs (workspace_id, execution_id, step_key, due_at, max_attempts, attempts)
-VALUES (sqlc.arg(workspace_id), sqlc.arg(execution_id), sqlc.arg(step_key), sqlc.arg(due_at), sqlc.arg(max_attempts), sqlc.arg(attempts))
+INSERT INTO public.jobs (workspace_id, execution_id, step_key, due_at, max_attempts, attempts, continues_attempt)
+VALUES (sqlc.arg(workspace_id), sqlc.arg(execution_id), sqlc.arg(step_key), sqlc.arg(due_at), sqlc.arg(max_attempts), sqlc.arg(attempts),
+  sqlc.arg(continues_attempt))
 ON CONFLICT (execution_id) WHERE status IN ('pending','processing') DO NOTHING
 RETURNING *;
 
@@ -134,7 +135,9 @@ SELECT j.* FROM public.jobs j
 JOIN public.workflow_executions e
   ON e.workspace_id = j.workspace_id AND e.id = j.execution_id
 WHERE j.status = 'pending' AND j.due_at <= sqlc.arg(at_time)::timestamptz
-  AND j.attempts < j.max_attempts
+  -- A resume job continues the step's current attempt, so it is claimable
+  -- even when that attempt was the last one.
+  AND (j.attempts < j.max_attempts OR j.continues_attempt)
   AND e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','COMPLETED','FAILED','CANCELLED')
   AND (e.deadline_at IS NULL OR e.deadline_at > sqlc.arg(at_time)::timestamptz)
 ORDER BY CASE WHEN j.status = 'processing' THEN 0 ELSE 1 END, j.due_at, j.id
@@ -145,7 +148,8 @@ LIMIT 1;
 
 -- name: ClaimWorkflowJobByID :one
 UPDATE public.jobs
-SET status = 'processing', attempts = attempts + 1, claim_token = sqlc.arg(claim_token),
+SET status = 'processing', attempts = attempts + CASE WHEN continues_attempt THEN 0 ELSE 1 END,
+    continues_attempt = false, claim_token = sqlc.arg(claim_token),
     lease_expires_at = sqlc.arg(lease_expires_at), last_error_code = NULL, updated_at = sqlc.arg(at_time)
 WHERE id = sqlc.arg(id) AND workspace_id = sqlc.arg(workspace_id)
   AND status IN ('pending','processing')
@@ -165,7 +169,8 @@ FOR UPDATE OF j;
 
 -- name: StartExecutionStepAttempt :one
 UPDATE public.execution_steps
-SET state = 'RUNNING', attempts = attempts + 1, updated_at = sqlc.arg(at_time)
+SET state = 'RUNNING', attempts = attempts + CASE WHEN sqlc.arg(new_attempt)::boolean THEN 1 ELSE 0 END,
+    updated_at = sqlc.arg(at_time)
 WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id)
   AND step_key = sqlc.arg(step_key) AND state IN ('PENDING','RUNNING')
 RETURNING *;
@@ -225,10 +230,13 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(executio
   AND state <> 'SUCCEEDED';
 
 -- name: ListReconcileWorkflowExecutions :many
+-- Nonterminal executions past their deadline (waiting ones included), and
+-- non-waiting ones without a live queue row.
 SELECT e.* FROM public.workflow_executions e
-WHERE e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','COMPLETED','FAILED','CANCELLED')
+WHERE e.state NOT IN ('COMPLETED','FAILED','CANCELLED')
   AND (e.deadline_at IS NOT NULL AND e.deadline_at <= sqlc.arg(at_time)::timestamptz
-       OR NOT EXISTS (SELECT 1 FROM public.jobs j WHERE j.execution_id = e.id AND j.status IN ('pending','processing')))
+       OR e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL')
+          AND NOT EXISTS (SELECT 1 FROM public.jobs j WHERE j.execution_id = e.id AND j.status IN ('pending','processing')))
 ORDER BY e.updated_at, e.id
 FOR UPDATE OF e SKIP LOCKED
 LIMIT 100;

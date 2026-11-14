@@ -77,6 +77,10 @@ func wakeWaitingStepTx(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, exe
 	if !from.IsWaiting() {
 		return row, false, nil
 	}
+	if row.DeadlineAt.Valid && !row.DeadlineAt.Time.After(at) {
+		// Past its deadline the wait is failed by the reconciler, not resumed.
+		return row, false, nil
+	}
 	step, err := q.GetExecutionStep(ctx, sqlc.GetExecutionStepParams{WorkspaceID: ws, ExecutionID: executionID, StepKey: stepKey})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -110,9 +114,11 @@ func wakeWaitingStepTx(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, exe
 	}
 	if _, err := q.InsertWorkflowJob(ctx, sqlc.InsertWorkflowJobParams{
 		WorkspaceID: ws, ExecutionID: executionID, StepKey: stepKey, DueAt: ts(at), MaxAttempts: int32(definition.Retry.MaxAttempts),
-		// The woken job continues the step's attempt numbering so the claim
-		// fence (job attempts == step attempts) holds.
-		Attempts: step.Attempts,
+		// The woken job resumes the step's current attempt: its claim keeps
+		// the attempt number (fence: job attempts == step attempts) and does
+		// not count against max_attempts, so approval rounds never exhaust
+		// the retry budget.
+		Attempts: step.Attempts, ContinuesAttempt: step.Attempts >= 1,
 	}); err != nil {
 		return row, false, err
 	}
@@ -194,6 +200,13 @@ func repairMissingSignalsTx(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID
 		}
 	}
 	return nil
+}
+
+// closeExecutionWaits closes the open waits of an execution that ended, in
+// the transaction that ends it.
+func closeExecutionWaits(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, executionID int64, at time.Time) error {
+	_, err := q.CloseWorkflowWaits(ctx, sqlc.CloseWorkflowWaitsParams{AtTime: ts(at), WorkspaceID: ws, ExecutionID: executionID})
+	return err
 }
 
 // --- behavior side (BehaviorStore) ---

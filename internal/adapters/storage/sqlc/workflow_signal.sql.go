@@ -11,6 +11,27 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const closeWorkflowWaits = `-- name: CloseWorkflowWaits :execrows
+UPDATE public.workflow_waits SET closed_at = $1
+WHERE workspace_id = $2 AND execution_id = $3
+  AND closed_at IS NULL
+`
+
+type CloseWorkflowWaitsParams struct {
+	AtTime      pgtype.Timestamptz
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+}
+
+// Closes the open waits of an execution that ended.
+func (q *Queries) CloseWorkflowWaits(ctx context.Context, arg CloseWorkflowWaitsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, closeWorkflowWaits, arg.AtTime, arg.WorkspaceID, arg.ExecutionID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const consumeWorkflowSignal = `-- name: ConsumeWorkflowSignal :execrows
 UPDATE public.workflow_signals SET consumed_at = $1
 WHERE workspace_id = $2 AND id = $3
@@ -97,7 +118,7 @@ func (q *Queries) GetWaitingExecutionStep(ctx context.Context, arg GetWaitingExe
 }
 
 const getWorkflowWaitByApproval = `-- name: GetWorkflowWaitByApproval :one
-SELECT id, workspace_id, execution_id, step_key, approval_id, wait_kind, created_at FROM public.workflow_waits
+SELECT id, workspace_id, execution_id, step_key, approval_id, wait_kind, created_at, closed_at FROM public.workflow_waits
 WHERE workspace_id = $1 AND approval_id = $2
 `
 
@@ -117,6 +138,7 @@ func (q *Queries) GetWorkflowWaitByApproval(ctx context.Context, arg GetWorkflow
 		&i.ApprovalID,
 		&i.WaitKind,
 		&i.CreatedAt,
+		&i.ClosedAt,
 	)
 	return i, err
 }
@@ -172,7 +194,7 @@ const insertWorkflowWait = `-- name: InsertWorkflowWait :one
 
 INSERT INTO public.workflow_waits (workspace_id, execution_id, step_key, approval_id, wait_kind)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, workspace_id, execution_id, step_key, approval_id, wait_kind, created_at
+RETURNING id, workspace_id, execution_id, step_key, approval_id, wait_kind, created_at, closed_at
 `
 
 type InsertWorkflowWaitParams struct {
@@ -201,6 +223,7 @@ func (q *Queries) InsertWorkflowWait(ctx context.Context, arg InsertWorkflowWait
 		&i.ApprovalID,
 		&i.WaitKind,
 		&i.CreatedAt,
+		&i.ClosedAt,
 	)
 	return i, err
 }
@@ -276,7 +299,7 @@ func (q *Queries) ListStepWaits(ctx context.Context, arg ListStepWaitsParams) ([
 }
 
 const listUnsignalledDecidedWaits = `-- name: ListUnsignalledDecidedWaits :many
-SELECT w.id, w.workspace_id, w.execution_id, w.step_key, w.approval_id, w.wait_kind, w.created_at FROM public.workflow_waits w
+SELECT w.id, w.workspace_id, w.execution_id, w.step_key, w.approval_id, w.wait_kind, w.created_at, w.closed_at FROM public.workflow_waits w
 JOIN public.approvals a ON a.workspace_id = w.workspace_id AND a.id = w.approval_id
 WHERE a.decision IS NOT NULL
   AND ($1::bigint IS NULL
@@ -310,6 +333,7 @@ func (q *Queries) ListUnsignalledDecidedWaits(ctx context.Context, arg ListUnsig
 			&i.ApprovalID,
 			&i.WaitKind,
 			&i.CreatedAt,
+			&i.ClosedAt,
 		); err != nil {
 			return nil, err
 		}

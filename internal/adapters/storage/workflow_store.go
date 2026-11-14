@@ -232,10 +232,12 @@ func terminateExecutionWork(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID
 	if _, err := q.CancelExecutionSteps(ctx, sqlc.CancelExecutionStepsParams{WorkspaceID: ws, ExecutionID: executionID}); err != nil {
 		return err
 	}
-	_, err := q.TerminateActiveWorkflowJobs(ctx, sqlc.TerminateActiveWorkflowJobsParams{
+	if _, err := q.TerminateActiveWorkflowJobs(ctx, sqlc.TerminateActiveWorkflowJobsParams{
 		Reason: workflowText(string(reason)), AtTime: ts(at), WorkspaceID: ws, ExecutionID: executionID,
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+	return closeExecutionWaits(ctx, q, ws, executionID, at)
 }
 
 // TransitionExecution is an administrative path: it atomically changes

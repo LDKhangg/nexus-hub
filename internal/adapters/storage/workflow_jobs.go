@@ -90,8 +90,12 @@ func (s *WorkflowStore) ClaimJob(ctx context.Context, at time.Time) (*workflow.J
 	if err != nil {
 		return nil, err
 	}
+	// A resume job continues the step's current attempt: neither the job
+	// nor the step counts another attempt, so the fence (job attempts ==
+	// step attempts) holds and approval rounds keep the retry budget.
 	stepRow, err := q.StartExecutionStepAttempt(ctx, sqlc.StartExecutionStepAttemptParams{
-		AtTime: ts(at), WorkspaceID: candidate.WorkspaceID, ExecutionID: candidate.ExecutionID, StepKey: candidate.StepKey,
+		NewAttempt: !candidate.ContinuesAttempt,
+		AtTime:     ts(at), WorkspaceID: candidate.WorkspaceID, ExecutionID: candidate.ExecutionID, StepKey: candidate.StepKey,
 	})
 	if err != nil {
 		return nil, err
@@ -338,6 +342,9 @@ func (s *WorkflowStore) CompleteJob(ctx context.Context, req workflow.JobResultR
 		if unfinished != 0 {
 			return workflow.ErrConflict
 		}
+		if err := closeExecutionWaits(ctx, j.q, j.ws, j.job.ExecutionID, req.At); err != nil {
+			return err
+		}
 		if _, err := transitionWorkflowJobExecution(ctx, j, workflow.StateCompleted, workflow.ReasonStepSucceeded); err != nil {
 			return err
 		}
@@ -439,6 +446,9 @@ func (s *WorkflowStore) FailJob(ctx context.Context, req workflow.JobResultReque
 		return err
 	}
 	if _, err := j.q.CancelExecutionSteps(ctx, sqlc.CancelExecutionStepsParams{WorkspaceID: j.ws, ExecutionID: j.job.ExecutionID}); err != nil {
+		return err
+	}
+	if err := closeExecutionWaits(ctx, j.q, j.ws, j.job.ExecutionID, req.At); err != nil {
 		return err
 	}
 	if _, err := transitionWorkflowJobExecution(ctx, j, workflow.StateFailed, req.Reason); err != nil {
@@ -591,9 +601,25 @@ func reconcileExecution(ctx context.Context, q *sqlc.Queries, executionRow sqlc.
 		return activeErr
 	}
 	if execution.Deadline != nil && !execution.Deadline.After(at) {
-		return failReconcileExecution(ctx, q, executionRow, activeJob.StepKey, int(activeJob.Attempts), at, workflow.ReasonDeadlineExceeded)
+		stepKey, attempt := activeJob.StepKey, int(activeJob.Attempts)
+		if activeErr != nil && execution.State.IsWaiting() {
+			// A wait past the deadline fails its waiting step; its bound
+			// waits are closed with the execution's work, so a later decision
+			// is recorded on the approval but never applied.
+			waiting, err := q.GetWaitingExecutionStep(ctx, sqlc.GetWaitingExecutionStepParams{
+				WorkspaceID: executionRow.WorkspaceID, ExecutionID: executionRow.ID,
+			})
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if err == nil {
+				stepKey, attempt = waiting.StepKey, int(waiting.Attempts)
+			}
+		}
+		return failReconcileExecution(ctx, q, executionRow, stepKey, attempt, at, workflow.ReasonDeadlineExceeded)
 	}
-	if activeErr == nil {
+	if activeErr == nil || execution.State.IsWaiting() {
+		// A live job, or a durable wait (woken by ReconcileSignals).
 		return nil
 	}
 	step, stepErr := q.FindReconcileExecutionStep(ctx, sqlc.FindReconcileExecutionStepParams{
@@ -626,7 +652,20 @@ func reconcileExecution(ctx context.Context, q *sqlc.Queries, executionRow sqlc.
 		return fmt.Errorf("%w: %s to %s", errReconcileIllegalTransition, executionRow.State, workflow.StateQueued)
 	}
 	dueAt := at
-	if workflow.StepState(step.State) != workflow.StepRunning && int(step.Attempts) >= execution.Definition.Retry.MaxAttempts {
+	// A pending step woken by a recorded, unapplied decision lost its resume
+	// job: the recreated job resumes the same attempt again, so the lost
+	// wakeup neither consumes nor exhausts the retry budget.
+	resume := false
+	if workflow.StepState(step.State) == workflow.StepPending && step.Attempts >= 1 {
+		pending, err := q.CountPendingStepSignals(ctx, sqlc.CountPendingStepSignalsParams{
+			WorkspaceID: executionRow.WorkspaceID, ExecutionID: executionRow.ID, StepKey: step.StepKey,
+		})
+		if err != nil {
+			return err
+		}
+		resume = pending > 0
+	}
+	if !resume && workflow.StepState(step.State) != workflow.StepRunning && int(step.Attempts) >= execution.Definition.Retry.MaxAttempts {
 		// A pending step whose job was lost after its last allowed attempt
 		// cannot be claimed again; fail instead of restarting the count.
 		return failReconcileExecution(ctx, q, executionRow, step.StepKey, int(step.Attempts), at, workflow.ReasonAttemptsExhausted)
@@ -649,7 +688,7 @@ func reconcileExecution(ctx context.Context, q *sqlc.Queries, executionRow sqlc.
 		DueAt: ts(dueAt), MaxAttempts: int32(execution.Definition.Retry.MaxAttempts),
 		// The recreated job continues the step's attempt numbering so the
 		// claim fence (job attempts == step attempts) and max_attempts hold.
-		Attempts: step.Attempts,
+		Attempts: step.Attempts, ContinuesAttempt: resume,
 	}); err != nil {
 		return err
 	}

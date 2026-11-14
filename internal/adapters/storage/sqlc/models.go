@@ -312,6 +312,8 @@ type Job struct {
 	DeadLetterReason pgtype.Text
 	CreatedAt        pgtype.Timestamptz
 	UpdatedAt        pgtype.Timestamptz
+	// True while the pending job resumes a woken step within its current attempt; its claim does not count an attempt.
+	ContinuesAttempt bool
 }
 
 type MessageLog struct {
@@ -555,6 +557,8 @@ type WorkflowWait struct {
 	ApprovalID  int64
 	WaitKind    string
 	CreatedAt   pgtype.Timestamptz
+	// When the execution ended; a decision after it is recorded but never applied.
+	ClosedAt pgtype.Timestamptz
 }
 
 type Workspace struct {

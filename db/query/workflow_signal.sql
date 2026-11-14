@@ -73,3 +73,9 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(executio
   AND state = 'WAITING'
 ORDER BY position
 LIMIT 1;
+
+-- name: CloseWorkflowWaits :execrows
+-- Closes the open waits of an execution that ended.
+UPDATE public.workflow_waits SET closed_at = sqlc.arg(at_time)
+WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id)
+  AND closed_at IS NULL;
