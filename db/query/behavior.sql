@@ -7,21 +7,24 @@ ON CONFLICT (workspace_id, name) DO UPDATE
 SET draft = EXCLUDED.draft, draft_vars = EXCLUDED.draft_vars, draft_source = EXCLUDED.draft_source, updated_at = now()
 RETURNING *;
 
+-- Internal built-in definitions (internal_kind set) are never visible to
+-- the public behavior paths below.
+
 -- name: GetBehaviorByName :one
-SELECT * FROM public.behaviors WHERE workspace_id = sqlc.arg(workspace_id) AND name = sqlc.arg(name);
+SELECT * FROM public.behaviors WHERE workspace_id = sqlc.arg(workspace_id) AND name = sqlc.arg(name) AND internal_kind IS NULL;
 
 -- name: GetBehaviorByID :one
-SELECT * FROM public.behaviors WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id);
+SELECT * FROM public.behaviors WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND internal_kind IS NULL;
 
 -- name: LockBehaviorByName :one
 -- Serializes publish and status changes of one behavior.
-SELECT * FROM public.behaviors WHERE workspace_id = sqlc.arg(workspace_id) AND name = sqlc.arg(name) FOR UPDATE;
+SELECT * FROM public.behaviors WHERE workspace_id = sqlc.arg(workspace_id) AND name = sqlc.arg(name) AND internal_kind IS NULL FOR UPDATE;
 
 -- name: ListBehaviors :many
 SELECT b.id, b.workspace_id, b.name, b.status, b.created_at, b.updated_at,
   COALESCE((SELECT MAX(v.version) FROM public.behavior_versions v WHERE v.behavior_id = b.id), 0)::int AS latest_version
 FROM public.behaviors b
-WHERE b.workspace_id = sqlc.arg(workspace_id)
+WHERE b.workspace_id = sqlc.arg(workspace_id) AND b.internal_kind IS NULL
 ORDER BY b.name;
 
 -- name: NextBehaviorVersion :one
@@ -58,7 +61,7 @@ ORDER BY version;
 SELECT DISTINCT ON (b.id) b.name, v.id, v.workspace_id, v.behavior_id, v.version, v.document, v.vars, v.published_at
 FROM public.behaviors b
 JOIN public.behavior_versions v ON v.workspace_id = b.workspace_id AND v.behavior_id = b.id
-WHERE b.workspace_id = sqlc.arg(workspace_id) AND b.status = 'enabled'
+WHERE b.workspace_id = sqlc.arg(workspace_id) AND b.status = 'enabled' AND b.internal_kind IS NULL
 ORDER BY b.id, v.version DESC;
 
 -- Runs.
@@ -78,19 +81,34 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND behavior_version_id = sqlc.arg(b
   AND subject = sqlc.arg(subject) AND revision = sqlc.arg(revision);
 
 -- name: FailExhaustedBehaviorRuns :execrows
--- Runs whose lease ended after the last allowed attempt.
-UPDATE public.behavior_runs SET status = 'failed', error_code = 'attempts_exhausted', claim_token = NULL,
+-- Runs whose lease ended after the last allowed attempt. A cut-over
+-- workspace's runs and a run owned by a workflow execution belong to the
+-- durable queue, never to the legacy claimer.
+UPDATE public.behavior_runs r SET status = 'failed', error_code = 'attempts_exhausted', claim_token = NULL,
   locked_until = NULL, finished_at = now(), updated_at = now()
-WHERE status = 'running' AND locked_until <= sqlc.arg(at_time)::timestamptz AND attempts >= sqlc.arg(max_attempts)::int;
+WHERE r.status = 'running' AND r.locked_until <= sqlc.arg(at_time)::timestamptz AND r.attempts >= sqlc.arg(max_attempts)::int
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_runtime_modes m
+                  WHERE m.workspace_id = r.workspace_id AND m.mode = 'workflow')
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_executions e
+                  WHERE e.workspace_id = r.workspace_id AND e.legacy_run_id = r.id);
 
 -- name: SelectBehaviorRunClaimCandidate :one
--- A due pending run, or a running run whose lease ended.
-SELECT id FROM public.behavior_runs
-WHERE ((status = 'pending' AND run_at <= sqlc.arg(at_time)::timestamptz)
-    OR (status = 'running' AND locked_until <= sqlc.arg(at_time)::timestamptz))
-  AND attempts < sqlc.arg(max_attempts)::int
-ORDER BY (status = 'running') DESC, run_at, id
-FOR UPDATE SKIP LOCKED LIMIT 1;
+-- A due pending run, or a running run whose lease ended. Runs of a
+-- cut-over workspace and runs owned by a workflow execution are never
+-- candidates; the claim re-checks the workspace's runtime mode under its
+-- KEY SHARE lock (this filter only skips them cheaply).
+SELECT r.id, r.workspace_id, b.name AS behavior_name
+FROM public.behavior_runs r
+JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
+WHERE ((r.status = 'pending' AND r.run_at <= sqlc.arg(at_time)::timestamptz)
+    OR (r.status = 'running' AND r.locked_until <= sqlc.arg(at_time)::timestamptz))
+  AND r.attempts < sqlc.arg(max_attempts)::int
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_runtime_modes m
+                  WHERE m.workspace_id = r.workspace_id AND m.mode = 'workflow')
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_executions e
+                  WHERE e.workspace_id = r.workspace_id AND e.legacy_run_id = r.id)
+ORDER BY (r.status = 'running') DESC, r.run_at, r.id
+FOR UPDATE OF r SKIP LOCKED LIMIT 1;
 
 -- name: ClaimBehaviorRunByID :one
 UPDATE public.behavior_runs AS r SET status = 'running', attempts = r.attempts + 1,
@@ -240,12 +258,21 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND nonce = sqlc.arg(nonce)
   AND decision IS NULL AND expires_at > sqlc.arg(at_time)::timestamptz
 RETURNING *;
 
--- name: ExpireApprovals :many
+-- name: ListDueApprovals :many
+-- Open approvals past their expiry with the execution of their wait (0 for
+-- none), read before expiring them so bound executions are locked first.
+SELECT a.workspace_id, a.id, COALESCE(w.execution_id, 0)::bigint AS execution_id
+FROM public.approvals a
+LEFT JOIN public.workflow_waits w ON w.workspace_id = a.workspace_id AND w.approval_id = a.id
+WHERE a.decision IS NULL AND a.expires_at <= sqlc.arg(at_time)::timestamptz
+ORDER BY a.expires_at, a.id
+LIMIT sqlc.arg(max_rows)::int;
+
+-- name: ExpireApproval :one
+-- Expires one open approval past its expiry; no row when it is decided.
 UPDATE public.approvals SET decision = 'expired', decided_by = 'system', decided_at = now(), updated_at = now()
-WHERE id IN (SELECT a.id FROM public.approvals a
-             WHERE a.decision IS NULL AND a.expires_at <= sqlc.arg(at_time)::timestamptz
-             ORDER BY a.expires_at, a.id
-             FOR UPDATE SKIP LOCKED LIMIT sqlc.arg(max_rows)::int)
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id)
+  AND decision IS NULL AND expires_at <= sqlc.arg(at_time)::timestamptz
 RETURNING *;
 
 -- name: SetApprovalMessage :execrows
@@ -422,3 +449,55 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND run_id = sqlc.arg(run_id) AND ms
 DELETE FROM public.behavior_messages
 WHERE workspace_id = sqlc.arg(workspace_id) AND run_id = sqlc.arg(run_id) AND msg_key = sqlc.arg(msg_key)
   AND telegram_message_id IS NULL;
+
+-- Durable runs: a run executed as workflow steps. Every write is made in
+-- the transaction that holds the workflow job fence; the run must be the
+-- execution's legacy run, in the same workspace, and never legacy-claimed.
+
+-- name: LockDurableBehaviorRun :one
+SELECT sqlc.embed(r), b.name AS behavior_name
+FROM public.behavior_runs r
+JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
+JOIN public.workflow_executions e ON e.workspace_id = r.workspace_id AND e.legacy_run_id = r.id
+WHERE r.workspace_id = sqlc.arg(workspace_id) AND r.id = sqlc.arg(id) AND e.id = sqlc.arg(execution_id)
+FOR UPDATE OF r;
+
+-- name: BeginDurableBehaviorRunAttempt :one
+-- A run imported by the cutover may still hold the legacy claim it had;
+-- once that lease has ended the durable attempt takes the run over (like a
+-- legacy reclaim) and clears the claim, so the old claimant's writes fail.
+UPDATE public.behavior_runs SET status = 'running', attempts = attempts + 1,
+  workflow_attempt_deadline = sqlc.arg(deadline)::timestamptz,
+  claim_token = NULL, locked_until = NULL,
+  started_at = COALESCE(started_at, now()), updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id)
+  AND (claim_token IS NULL OR locked_until <= sqlc.arg(at_time)::timestamptz)
+  AND status IN ('pending','running')
+RETURNING *;
+
+-- name: SetDurableBehaviorRunContext :execrows
+UPDATE public.behavior_runs SET context_snapshot = sqlc.arg(snapshot), updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'running' AND claim_token IS NULL;
+
+-- name: AddDurableBehaviorRunUsage :execrows
+UPDATE public.behavior_runs SET input_tokens = input_tokens + sqlc.arg(input)::int,
+  output_tokens = output_tokens + sqlc.arg(output)::int,
+  cache_read_tokens = cache_read_tokens + sqlc.arg(cache_read)::int,
+  cache_write_tokens = cache_write_tokens + sqlc.arg(cache_write)::int,
+  steps = steps + sqlc.arg(steps)::int, updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'running' AND claim_token IS NULL;
+
+-- name: SetDurableBehaviorRunActions :execrows
+UPDATE public.behavior_runs SET run_actions = sqlc.arg(result), updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'running' AND claim_token IS NULL;
+
+-- name: RetryDurableBehaviorRun :execrows
+-- Records why the attempt is retried; the run stays running (the workflow
+-- job owns the schedule).
+UPDATE public.behavior_runs SET error_code = sqlc.arg(code)::text, workflow_attempt_deadline = NULL, updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'running' AND claim_token IS NULL;
+
+-- name: FinishDurableBehaviorRun :execrows
+UPDATE public.behavior_runs SET status = sqlc.arg(status)::text, error_code = sqlc.narg(code),
+  workflow_attempt_deadline = NULL, finished_at = now(), updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'running' AND claim_token IS NULL;

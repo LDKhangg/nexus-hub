@@ -266,6 +266,14 @@ nh telegram webhook set    --workspace-id $WS --integration-id $TG
 nh telegram webhook status --workspace-id $WS --integration-id $TG   # url_matches: true
 ```
 
+At home without a tunnel (`public_base_url` empty) you can skip the webhook:
+with `telegram_mode` `auto` (the default) the hub polls Telegram itself
+(`getUpdates`), and the log says `telegram: receiving updates by long
+polling`. If a webhook is still set, the hub removes it once and logs
+`telegram: webhook removed for polling`. To force a mode:
+`nh settings set telegram_mode webhook` (or `poll`), then restart the hub.
+Use `webhook` only when Telegram can reach `public_base_url`.
+
 Stop the machine from sleeping. For example, set `HandleLidSwitch=ignore` in
 `/etc/systemd/logind.conf`, or turn sleep off in the desktop power settings.
 
@@ -594,6 +602,278 @@ payload. After step d.2, send the Lead the result of `/trace <task id>`
 from `journalctl --user -u nexus-hub` if there is one. Do not paste the
 webhook payload or any token. If no run starts while channel mentions
 work, task comment mentions are not detected yet.
+
+## 11. People and report style
+
+The directory fills itself as Nexus sees a ClickUp user who DMs or tags you, a
+GitHub PR author, or a Telegram sender. Reports then use the contact's current
+name instead of a platform ID. List or inspect what Nexus knows with:
+
+```sh
+nh contact list --workspace-id $WS [--platform clickup] [--search '<text>']
+nh contact show --workspace-id $WS <contact-id>
+```
+
+Name a contact by contact ID or `platform:external-id`. Quote names containing
+spaces. Telegram offers the same `/alias` command; reports about an unnamed
+ClickUp sender may also have a **Đặt tên** button—press it and reply with the
+name.
+
+```sh
+nh contact alias --workspace-id $WS clickup:<user-id> 'anh Định'
+# Telegram: /alias clickup:<user-id> anh Định
+```
+
+If two contacts are one person, move every account from the source into the
+target. If one account was joined incorrectly, find its account ID with
+`contact show` and split it into a new contact. Forgetting deletes the contact
+and all its accounts; `--yes` is required. A later platform sighting can add
+that person again.
+
+```sh
+nh contact merge  --workspace-id $WS <source-contact-id> <target-contact-id>
+nh contact split  --workspace-id $WS <account-id>
+nh contact forget --workspace-id $WS --yes <contact-id>
+```
+
+Choose `short`, `normal`, or `detailed` with `/prefs [style]`; `/prefs` alone
+shows buttons for the style and optional lines. The CLI can set several values
+at once (add `--behavior <name>` for a behavior-specific override):
+
+```sh
+nh report-prefs set --workspace $WS style=short show_reaction=false
+nh report-prefs set --workspace $WS show_ai_summary=true show_links=true \
+  show_pr_titles=true show_trace_hint=true language=vi
+```
+
+The owner's default is `short`, with the reaction line off and the AI summary,
+links, PR titles, and trace hint on. For example:
+
+```text
+✅ Approved PR #1601 cho anh Định
+AI: approve_request (0.94)
+https://github.com/org/repo/pull/1601
+```
+
+Templates can be set for these kinds: `pr_approve`, `pr_skipped`,
+`verdict_unavailable`, `mention`, `notify`, `fyi`, `digest`, and `failure`.
+Write the template to a file (or use `--file -` to read stdin), then save,
+preview, or reset it:
+
+```sh
+nh report-template set     pr_approve --workspace $WS --file report.txt
+nh report-template preview pr_approve --workspace $WS
+nh report-template reset   pr_approve --workspace $WS
+```
+
+`--behavior <name>` selects a behavior-specific template. On Telegram, send
+`/template <kind>`, then reply to the bot's forced-reply message with the new
+template; `/template <kind> reset` restores the default.
+
+Placeholders are `{contact}`, `{contact_platform}`, `{pr_number}`, `{pr_repo}`,
+`{pr_title}`, `{prs}`, `{verdict}`, `{confidence}`, `{ai_summary}`, `{items}`, `{outcome}`,
+`{reason}`, `{task}`, `{channel}`, `{link}`, `{behavior}`, and `{run_id}`. Start
+a line with `?{x}` to omit the whole line when placeholder `x` is empty; for
+example, `?{link}{link}`. A template is limited to 1,000 characters and 12
+lines. Unknown placeholders and control characters are rejected. Failure and
+skipped-approval reports always retain a non-empty reason.
+
+### Talk to the bot
+
+You can also write to the bot in plain words. Nexus sends the conversation to
+the `assistant_model` through your configured LLM provider. The assistant can
+answer general questions and use bounded read tools for contacts, behavior
+runs and traces, report preferences and templates, and workflow executions,
+history and jobs.
+
+```text
+lần chạy gần nhất ra sao?          → reads the latest run and trace
+workflow 42 đang ở đâu?            → reads its steps and history
+giải thích đoạn Go này             → answers as an open conversation
+đặt tên clickup:12345 là chị Lan   → asks first: "Làm" / "Huỷ"
+resume workflow 42                 → asks first: "Làm" / "Huỷ"
+```
+
+Reads answer at once. Changes (a contact name, report style, or workflow
+cancel/resume/retry) only run after you press **Làm**; **Huỷ** leaves them
+unchanged. A confirmed workflow change remains safely retryable from the same
+button after a temporary failure, but only until that confirmation expires;
+resume confirmations are pinned to the wait shown when they were proposed.
+Long answers are sent as ordered messages below Telegram's size limit. Recent
+conversation (up to 20 exchanges with a 64 KiB transmitted-history budget) is
+kept separately per workspace and chat, only in memory, and is forgotten when
+Nexus restarts. Messages, prompts, tool inputs/results and answers are never
+logged.
+
+The defaults are model `claude-opus-5-5`, a 180-second turn timeout and 30
+owner messages per chat per minute. Configure them with
+`nh settings set assistant_model <claude-model-id>`,
+`nh settings set assistant_timeout <duration>` and
+`nh settings set assistant_rate_per_minute <number>`. Turn the assistant off
+with `nh settings set telegram_assistant false`.
+
+## 12. Durable workflows (Phase 5)
+
+From Phase 5 every behavior run and every comment-pipeline batch is a durable
+**execution**: a row pinned to one immutable published version, with ordered
+steps, an append-only history and one job in a persistent queue. A restart
+picks up where it stopped. The `nh workflow` commands below inspect and recover
+executions. They print only IDs, states, reason codes, counters and references.
+Message text, prompts, tool input and output, approval payloads and tokens are
+never printed.
+
+What is proven so far: the engine, cutover and these commands are tested
+against PostgreSQL with fake providers only (see the Phase 5 completion report, written to
+`docs/product/reports/`). Live ClickUp, Telegram and Claude behaviour after a
+crash is still open evidence. Write down what you see (execution ID, state,
+reason).
+
+### States and reasons
+
+An execution moves through `RECEIVED` → `QUEUED` → `RUNNING` (or `TRIAGING`,
+`PLANNING`, `EVALUATING`) and ends `COMPLETED`, `FAILED` or `CANCELLED`. While
+it waits for you it is `WAITING_FOR_APPROVAL` or `WAITING_FOR_USER`. An ended
+execution never runs again. The `reason` field explains the last change:
+
+| Reason | Meaning | What to do |
+|---|---|---|
+| `step_retry` | a step failed and is queued again after a backoff (5s, 15s, 30s, 60s) | nothing; it retries by itself, at most 5 attempts in all |
+| `attempts_exhausted`, `non_retryable` | the step gave up; the job is a dead letter | read `workflow dead-letter`, fix the cause, then `workflow retry` |
+| `deadline_exceeded` | the execution's own deadline passed | `workflow retry` starts a child with a fresh deadline |
+| `lease_expired` | a worker stopped mid-step (crash, restart); the step is queued again | nothing |
+| `side_effect_uncertain` | an action started but its outcome is unknown | check ClickUp/GitHub/Telegram by hand; this execution is never retried or resent |
+| `cancelled` | you or the system cancelled it | nothing |
+
+### Waits, deadlines and leases
+
+- **Waits.** A step that asks you (a "Đăng" draft, an approval) records a
+  durable wait and holds no job lease. Your button press is stored with the
+  decision and wakes the step, even across a restart. An alias, report-style
+  or feedback prompt never blocks an execution. If an execution stays
+  waiting after you decided, `nh workflow resume` queues it again. It never
+  decides for you.
+- **Deadlines.** A step attempt has a 10-minute timeout by default. An
+  execution may also have its own deadline (`workflow.execution_deadline_seconds` in a
+  schema 2 behavior). It is fixed when the execution starts. When it passes,
+  the execution fails with `deadline_exceeded`, even while waiting.
+- **Leases.** A worker that claims a job holds a lease (15 minutes by
+  default, always longer than the step timeout). Every write checks the claim.
+  A worker that comes back after its lease expired, or after a cancel, writes
+  nothing. The reconciler runs at startup and every 30 seconds. It requeues
+  expired leases and lost wakeups and never steals a live lease.
+- **Uncertainty.** If the hub crashes between sending a request and saving
+  its receipt, it does not resend. The execution fails with
+  `side_effect_uncertain`, and `workflow retry` refuses it. Decide by hand
+  what happened.
+
+### Restore and publish
+
+Editing or restoring a behavior never changes a running execution: each one
+keeps the version it started with.
+
+```sh
+nh behavior restore  --workspace-id $WS spec-review --version 3   # old version → draft
+nh behavior validate --workspace-id $WS spec-review
+nh behavior publish  --workspace-id $WS spec-review               # new version N+1
+```
+
+New triggers use the new version. Existing executions and their retries stay
+on their pinned version.
+
+### Inspect
+
+```sh
+nh workflow list    --workspace-id $WS                      # newest first, 50 per page
+nh workflow list    --workspace-id $WS --state FAILED --limit 20
+nh workflow list    --workspace-id $WS --cursor <next_cursor>
+nh workflow show    --workspace-id $WS 42                   # state, reason, version, deadline, waits, live job, lineage
+nh workflow steps   --workspace-id $WS 42                   # steps, attempts, usage, checkpoint references
+nh workflow history --workspace-id $WS 42                   # ordered timeline
+nh workflow jobs    --workspace-id $WS --status processing  # leases in flight
+nh workflow dead-letter --workspace-id $WS                  # failed jobs with their reason
+```
+
+Lists print one JSON object with the rows and `next_cursor`. Pass it back with
+`--cursor` for the next page; `""` means the end. Every command needs
+`--workspace-id`. An execution of another workspace is `not_found`.
+
+Caller-, provider- and configuration-supplied references are never printed.
+Fields such as triggers, source IDs, behavior names, step keys and checkpoint
+references appear as stable `sha256:...` digests instead. Use matching digests
+across `show`, `steps`, `history`, `jobs` and `dead-letter` to correlate rows;
+legacy run/job IDs and validated lifecycle states, kinds and reason codes stay
+readable. An empty optional reference has an empty digest value.
+
+`nh trace` shows the run's executions at the end ("Executions"), and
+`trace --json` has them as `executions`. `nh inspect` adds `workflow_executions`
+and `jobs` rows with their `legacy_run_id` / `legacy_job_id`. The old run and
+job IDs are unchanged.
+
+### Recover
+
+```sh
+nh workflow cancel --workspace-id $WS 42   # {"outcome":"cancelled","state":"CANCELLED",...}
+nh workflow resume --workspace-id $WS 42   # {"outcome":"resumed","state":"QUEUED",...}
+nh workflow retry  --workspace-id $WS 42   # {"retry_execution_id":57,"outcome":"created",...}
+```
+
+- **cancel** stops future work at once, even for a worker still running.
+  A request already sent is not rolled back. Errors: `already_cancelled`,
+  `not_cancellable` (it already ended).
+- **resume** works only for a waiting execution whose decision is already
+  recorded. Errors: `not_resumable` (not waiting, already ended, or no decision
+  yet).
+- **retry** works only for a `FAILED` execution. It creates one linked child
+  execution on the same version. Finished steps with a reusable checkpoint are
+  kept, and action identities stay the same, so a finished action is not done
+  twice. The failed parent is not changed. Running retry again returns the
+  same child (`"outcome":"existing"`). If the child also fails, retry the
+  child. Errors: `not_retryable` (not FAILED), `side_effect_uncertain`,
+  `unsafe_retry` (a finished step has no reusable checkpoint). There is no
+  force-resend.
+
+A failed command exits nonzero and prints the reason code on stderr.
+
+### Cutover (one time, per workspace)
+
+A new binary keeps a workspace on the legacy queues until you cut it over.
+After the cutover the durable queue is the only scheduler for its behavior
+runs and agent batches. Plan a maintenance window:
+
+1. Back up the database:
+   `docker exec nexus-home-pg pg_dump -U postgres -Fc nexus_hub > ~/nexus-hub-$(date +%F).dump`.
+   Also keep the master key backup.
+2. Stop the service: `systemctl --user stop nexus-hub`. Wait for running
+   steps to finish, or for their leases to expire (`workflow jobs --status
+   processing`).
+3. Install the new binaries and run `goose … up`.
+4. Preflight. It is read-only, so nothing changes:
+   `nh workflow cutover --workspace-id $WS`. Check `ready: true`. Each
+   `blocked` entry has a record ID and a code (`behavior_version_invalid`,
+   `approval_step_unmappable`). Fix those, then run the preflight again.
+   `in_flight_tool_runs` count actions with an unknown outcome. They are kept
+   as uncertain and never resent.
+5. Apply: `nh workflow cutover --workspace-id $WS --apply`. It locks the
+   workspace and imports or fences everything in one transaction, or writes
+   nothing and exits with `cutover_blocked`. A second apply is a no-op
+   (`already_cut_over: true`).
+6. Start the new binary: `systemctl --user start nexus-hub`.
+
+Never start an old binary from before Phase 5 against a cut-over database. It
+does not know the fence and would schedule work a second time. Disabling the
+new worker is not a rollback either. The only way back is to restore the
+step 1 backup, which loses everything since then. Get a separately approved
+recovery plan first. No historical rows are deleted: old runs, agent jobs,
+approvals and tool receipts stay readable with `trace`, `runs` and `inspect`.
+
+### Restart and shutdown
+
+`systemctl --user restart nexus-hub` is safe at any time after the cutover.
+On shutdown the worker stops claiming. A step cut off mid-attempt writes
+nothing more, and its lease expires. At startup the reconciler requeues it.
+It continues from its last checkpoint, never from the beginning. Waiting
+executions stay waiting. A button pressed while the hub was down arrives when
+it starts (Telegram keeps updates for 24 hours) and wakes the step.
 
 ## Upkeep
 

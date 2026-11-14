@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
+	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
 
@@ -278,7 +279,7 @@ type runActionEnv struct {
 func (e *Engine) RunActions(ctx context.Context, rc RunContext, save RunActionSaver) (RunActionsEnd, error) {
 	run := rc.Run
 	res := DecodeRunActions(run.RunActions)
-	env := runActionEnv{final: run.Attempts >= MaxRunAttempts}
+	env := runActionEnv{final: rc.finalAttempt()}
 	if !rc.Doc.DryRun && hasRunWrite(rc.Doc.RunActions) {
 		cfg, err := e.d.Policies.RunPolicy(ctx, run.WorkspaceID, rc.Trigger.IntegrationID)
 		if err != nil {
@@ -297,6 +298,10 @@ func (e *Engine) RunActions(ctx context.Context, rc RunContext, save RunActionSa
 			prevPassed, failed = o.Passed(), failed || o.failedRun()
 			continue
 		}
+		// A durable step re-checks its workflow claim before each action.
+		if err := authorizeAction(ctx); err != nil {
+			return RunActionsEnd{}, err
+		}
 		var o RunActionOutcome
 		transient := false
 		switch {
@@ -313,7 +318,11 @@ func (e *Engine) RunActions(ctx context.Context, rc RunContext, save RunActionSa
 			o = RunActionOutcome{Index: i, Type: a.Type, Status: OutcomeSkippedPrevious}
 		case a.Type == ActionPRApprove:
 			prev, _ := res.Get(i)
-			o, transient = e.runPRApprove(ctx, rc, env, i, a, prev)
+			var err error
+			o, transient, err = e.runPRApprove(ctx, rc, env, i, a, prev)
+			if err != nil {
+				return RunActionsEnd{}, err
+			}
 		case a.Type == ActionChatReaction:
 			o, transient = e.runChatReaction(ctx, rc, env, i, a)
 		case a.Type == ActionTelegramMessage:
@@ -395,12 +404,12 @@ func writeStatus(res tools.CallResult, env runActionEnv) (status, code string, t
 // runPRApprove approves each pull request of the trigger data, resuming
 // after the targets prev already recorded as final. The action is OK when
 // every pull request is approved or already approved.
-func (e *Engine) runPRApprove(ctx context.Context, rc RunContext, env runActionEnv, i int, a ActionSpec, prev RunActionOutcome) (RunActionOutcome, bool) {
+func (e *Engine) runPRApprove(ctx context.Context, rc RunContext, env runActionEnv, i int, a ActionSpec, prev RunActionOutcome) (RunActionOutcome, bool, error) {
 	o := RunActionOutcome{Index: i, Type: a.Type, Status: OutcomePending}
 	prs := rc.Trigger.PRs
 	if len(prs) == 0 {
 		o.Status, o.Code = OutcomeError, CodeNoPR
-		return o, false
+		return o, false, nil
 	}
 	if len(prs) > MaxPRRefs {
 		prs = prs[:MaxPRRefs]
@@ -418,11 +427,14 @@ func (e *Engine) runPRApprove(ctx context.Context, rc RunContext, env runActionE
 		case rc.Doc.DryRun:
 			po.Status = OutcomeDryRun
 		default:
+			if err := authorizeAction(ctx); err != nil {
+				return o, false, err
+			}
 			res := e.callRunWrite(ctx, rc, env, runActionScope(rc.Run.ID, i, k), ToolPRApprove,
 				map[string]any{"account": account, "repo": pr.Repo, "number": pr.Number})
 			status, code, transient := writeStatus(res, env)
 			if transient {
-				return o, true
+				return o, true, nil
 			}
 			po.Status, po.Code = status, code
 			if status == OutcomeOK {
@@ -445,7 +457,7 @@ func (e *Engine) runPRApprove(ctx context.Context, rc RunContext, env runActionE
 			if o.Status == OutcomeUnknown && o.Code == "" {
 				o.Code = OutcomeUnknown
 			}
-			return o, false
+			return o, false, nil
 		}
 		dry = dry && po.Status == OutcomeDryRun
 		policyDry = policyDry || po.Status == OutcomePolicyDryRun
@@ -456,7 +468,7 @@ func (e *Engine) runPRApprove(ctx context.Context, rc RunContext, env runActionE
 	case policyDry:
 		o.Status = OutcomePolicyDryRun
 	}
-	return o, false
+	return o, false, nil
 }
 
 // runChatReaction adds the action's reaction to the triggering message in
@@ -503,9 +515,16 @@ func (e *Engine) runTelegram(ctx context.Context, rc RunContext, env runActionEn
 		}
 		return RunActionOutcome{}, true, nil
 	}
-	clean := func(s string) string { return e.d.Redactor.CleanOutbound(s, true) }
-	text := runActionsText(textsFor(rc.Doc.Language), rc, res, clean)
-	id, err := e.sendOnce(ctx, rc.Run, fmt.Sprintf("run_action:%d", i), chat, OutMessage{Text: text})
+	text, err := e.runActionsReport(ctx, rc, res)
+	if err != nil {
+		return RunActionOutcome{}, true, nil
+	}
+	// A refused workflow claim ends the attempt without an outcome: the
+	// send was not tried.
+	if err := authorizeAction(ctx); err != nil {
+		return RunActionOutcome{}, false, err
+	}
+	id, err := e.sendOnce(ctx, rc.Run, fmt.Sprintf("run_action:%d", i), chat, e.withAliasButton(ctx, rc, OutMessage{Text: text}))
 	switch {
 	case err != nil && id == 0:
 		if env.final {
@@ -521,6 +540,78 @@ func (e *Engine) runTelegram(ctx context.Context, rc RunContext, env runActionEn
 		o.Status, o.TelegramMessageID = OutcomeOK, id
 	}
 	return o, false, nil
+}
+
+// runActionsReport converts stored identifiers and safe outcome codes into
+// the shared renderer input. Triggering message text is neither available nor
+// copied into the report.
+func (e *Engine) runActionsReport(ctx context.Context, rc RunContext, res RunActionsResult) (string, error) {
+	kind := reporting.KindNotify
+	values := reporting.Values{Behavior: rc.Doc.Name, RunID: fmt.Sprint(rc.Run.ID), Channel: rc.Trigger.ChannelName}
+	var reaction string
+	var prLines []string
+	for i, a := range rc.Doc.RunActions {
+		o, ok := res.Get(i)
+		if !ok || a.Type == ActionTelegramMessage {
+			continue
+		}
+		switch a.Type {
+		case ActionPRApprove:
+			if o.Status == OutcomeSkippedVerdict || o.Status == OutcomeSkippedPrevious {
+				kind = reporting.KindPRSkipped
+				values.Reason = runActionReason(textsFor(rc.Doc.Language), a, o, res.Verdict)
+			}
+			if len(o.PRs) == 0 && o.Code != "" {
+				kind = reporting.KindFailure
+				values.Reason = textsFor(rc.Doc.Language).outcomeWord(o.Status, o.Code)
+			}
+			for _, po := range o.PRs {
+				if values.PRNumber == "" {
+					values.PRNumber = strconv.Itoa(po.Number)
+					values.PRRepo = po.Repo
+					values.Link = reporting.PRLink(po.Repo, po.Number)
+				}
+				prLines = append(prLines, "• "+textsFor(rc.Doc.Language).prLine(PRRef{Repo: po.Repo, Number: po.Number}.String(), textsFor(rc.Doc.Language).prWord(po)))
+				if passed(po.Status) && kind != reporting.KindPRSkipped && kind != reporting.KindFailure {
+					kind = reporting.KindPRApprove
+				} else if !passed(po.Status) {
+					kind = reporting.KindFailure
+					values.Reason = textsFor(rc.Doc.Language).outcomeWord(po.Status, po.Code)
+				}
+			}
+		case ActionChatReaction:
+			reaction = textsFor(rc.Doc.Language).reactionLine(o)
+		}
+	}
+	values.PRs = strings.Join(prLines, "\n")
+	if v := res.Verdict; v != nil {
+		if v.Available() {
+			values.Verdict = v.Label
+			values.Confidence = reporting.Confidence(v.Confidence)
+			values.AISummary = capRunes(strings.Join(strings.Fields(e.d.Redactor.CleanOutbound(v.Summary, true)), " "), MaxVerdictSummaryChars)
+		} else {
+			if kind != reporting.KindFailure && kind != reporting.KindPRSkipped {
+				kind = reporting.KindVerdictUnavailable
+			}
+			values.Reason = textsFor(rc.Doc.Language).verdictUnavailableLine(verdictCode(v))
+		}
+	}
+	return e.d.Reports.Render(ctx, reporting.Report{
+		Kind: kind, WorkspaceID: rc.Run.WorkspaceID,
+		Behavior: rc.Run.BehaviorName, Language: rc.Doc.Language, Platform: "clickup", ExternalID: rc.Trigger.SenderID,
+		Values: values, Reaction: reaction, TraceHint: fmt.Sprintf("/trace %d", rc.Run.ID),
+	})
+}
+
+func runActionReason(t texts, a ActionSpec, o RunActionOutcome, verdict *RunVerdict) string {
+	if o.Code == CodeVerdictUnavailable || o.VerdictConfidence == nil {
+		return t.gateUnavailableLine(a.Type, verdictCode(verdict))
+	}
+	want := ""
+	if a.When != nil {
+		want = a.When.Verdict
+	}
+	return t.gateSkippedLine(a.Type, o.VerdictLabel, *o.VerdictConfidence, want)
 }
 
 // runActionsText is the owner's report of a run's run-level actions: the

@@ -48,6 +48,11 @@ type Settings struct {
 	OpencodeCLIPath                       string        // empty: not set
 	OpencodeCLITimeout                    time.Duration // one opencode call
 	OpencodeCLIConcurrency                int64         // opencode calls at once
+	TelegramAssistant                     bool          // owner free text goes to the LLM assistant
+	TelegramMode                          string        // auto | webhook | poll: how Telegram updates arrive
+	AssistantModel                        string        // the Telegram assistant's Claude model id
+	AssistantTimeout                      time.Duration // one assistant answer, tool steps included
+	AssistantRatePerMinute                int64         // assistant messages per chat per minute (runaway guard)
 }
 
 // Store reads every stored setting.
@@ -71,6 +76,7 @@ const (
 	kPublicURL
 	kEnum
 	kExecPath
+	kClaudeModel
 )
 
 type spec struct {
@@ -82,8 +88,12 @@ type spec struct {
 }
 
 var (
-	// claudeModelRe: Claude model ids (anthropic, claude_cli).
+	// claudeModelRe retains the existing provider model-id shape because
+	// deployments may use provider-side aliases for the pipeline models.
 	claudeModelRe = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,99}$`)
+	// assistantClaudeModelRe is deliberately narrower: assistant_model is a
+	// product-level Claude selection, not a provider alias.
+	assistantClaudeModelRe = regexp.MustCompile(`^claude-[a-z0-9][a-z0-9.-]{0,92}$`)
 	// opencodeModelRe: opencode provider/model[#variant] ids. The first
 	// character is alphanumeric so an id can never look like a flag.
 	opencodeModelRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*/[A-Za-z0-9._-]+(#[A-Za-z0-9._-]+)?$`)
@@ -129,6 +139,11 @@ var specs = map[string]spec{
 	"opencode_cli_path":          {kind: kExecPath, def: "", set: func(s *Settings, v any) { s.OpencodeCLIPath = v.(string) }},
 	"opencode_cli_timeout":       {kind: kDuration, def: 120 * time.Second, min: 5, max: 1800, set: func(s *Settings, v any) { s.OpencodeCLITimeout = v.(time.Duration) }},
 	"opencode_cli_concurrency":   {kind: kInt, def: int64(1), min: 1, max: 4, set: func(s *Settings, v any) { s.OpencodeCLIConcurrency = v.(int64) }},
+	"telegram_assistant":         {kind: kBool, def: true, set: func(s *Settings, v any) { s.TelegramAssistant = v.(bool) }},
+	"assistant_model":            {kind: kClaudeModel, def: "claude-opus-5-5", set: func(s *Settings, v any) { s.AssistantModel = v.(string) }},
+	"assistant_timeout":          {kind: kDuration, def: 180 * time.Second, min: 10, max: 900, set: func(s *Settings, v any) { s.AssistantTimeout = v.(time.Duration) }},
+	"assistant_rate_per_minute":  {kind: kInt, def: int64(30), min: 1, max: 120, set: func(s *Settings, v any) { s.AssistantRatePerMinute = v.(int64) }},
+	"telegram_mode":              {kind: kEnum, def: TelegramModeAuto, enum: []string{TelegramModeAuto, TelegramModeWebhook, TelegramModePoll}, set: func(s *Settings, v any) { s.TelegramMode = v.(string) }},
 }
 
 // modelKeys are the settings that hold a model id, in report order.
@@ -140,6 +155,25 @@ const (
 	LLMProviderClaudeCLI   = "claude_cli"
 	LLMProviderOpencodeCLI = "opencode_cli"
 )
+
+// Telegram update delivery values of telegram_mode.
+const (
+	TelegramModeAuto    = "auto"    // poll when public_base_url is empty, otherwise webhook
+	TelegramModeWebhook = "webhook" // Telegram posts to the webhook only
+	TelegramModePoll    = "poll"    // the hub long-polls getUpdates
+)
+
+// TelegramPolling reports whether the hub receives Telegram updates by long
+// polling: telegram_mode poll, or auto with no public_base_url.
+func (s Settings) TelegramPolling() bool {
+	switch s.TelegramMode {
+	case TelegramModePoll:
+		return true
+	case TelegramModeWebhook:
+		return false
+	}
+	return s.PublicBaseURL == ""
+}
 
 // maxModelIDLen bounds any model id.
 const maxModelIDLen = 200
@@ -291,6 +325,10 @@ func parse(key string, raw json.RawMessage) (any, error) {
 	switch sp.kind {
 	case kModel:
 		if !IsModelID(str) {
+			return nil, bad
+		}
+	case kClaudeModel:
+		if !assistantClaudeModelRe.MatchString(str) {
 			return nil, bad
 		}
 	case kAbsPath:

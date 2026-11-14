@@ -17,6 +17,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
+	"github.com/LDKhangg/nexus-hub/internal/people"
+	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/secrets"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/labstack/echo/v4"
@@ -28,6 +30,18 @@ const TelegramSecretHeader = "X-Telegram-Bot-Api-Secret-Token"
 // AnswerStager stages a free-text reply on the approval waiting for it.
 type AnswerStager interface {
 	StageAnswer(ctx context.Context, workspaceID string, messageID int64, answer string, now time.Time) (string, error)
+}
+
+// TemplateReplyStager keeps an owner template reply out of the generic
+// Telegram update row and returns a short opaque reference for the worker.
+type TemplateReplyStager interface {
+	StageTemplateReply(ctx context.Context, workspaceID string, messageID int64, body string, now time.Time) (string, error)
+}
+
+// AssistantStager keeps the owner's plain free text in memory for the
+// Telegram assistant and returns a short opaque key for the worker.
+type AssistantStager interface {
+	StageAssistantText(workspaceID, text string, now time.Time) (string, error)
 }
 
 // TelegramHandler receives Telegram updates for the owner. It verifies the
@@ -47,18 +61,27 @@ type TelegramHandler struct {
 	secrets      SecretResolver
 	inbox        behavior.InboxStore
 	answers      AnswerStager
+	templates    TemplateReplyStager
+	assistant    AssistantStager
 	ownerChatID  int64
 	ownerUserID  int64
 	now          func() time.Time
 	ignored      atomic.Int64
 }
 
-func NewTelegramHandler(integrations WebhookIntegrationLookup, resolver SecretResolver, inbox behavior.InboxStore, answers AnswerStager, ownerChatID int64) *TelegramHandler {
-	return &TelegramHandler{integrations: integrations, secrets: resolver, inbox: inbox, answers: answers, ownerChatID: ownerChatID, now: time.Now}
+func NewTelegramHandler(integrations WebhookIntegrationLookup, resolver SecretResolver, inbox behavior.InboxStore, answers AnswerStager, ownerChatID int64, templates ...TemplateReplyStager) *TelegramHandler {
+	h := &TelegramHandler{integrations: integrations, secrets: resolver, inbox: inbox, answers: answers, ownerChatID: ownerChatID, now: time.Now}
+	if len(templates) > 0 {
+		h.templates = templates[0]
+	}
+	return h
 }
 
 type tgUser struct {
-	ID int64 `json:"id"`
+	ID        int64  `json:"id"`
+	Username  string `json:"username"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
 }
 
 type tgChat struct {
@@ -150,28 +173,97 @@ func (h *TelegramHandler) Handle(c echo.Context) error {
 	if subtle.ConstantTimeCompare([]byte(given), []byte(want)) != 1 {
 		return h.reject(c, id, "wrong_secret")
 	}
+	switch status, err := h.process(ctx, integration, raw, "telegram webhook"); {
+	case err != nil:
+		return respond(http.StatusServiceUnavailable, "service unavailable")
+	case status == UpdateInvalid:
+		return respond(http.StatusBadRequest, "invalid update")
+	default:
+		return ok(status)
+	}
+}
+
+// Results of HandleUpdate (and the webhook's 200 status values).
+const (
+	UpdateQueued    = "queued"    // stored for the inbox worker
+	UpdateDuplicate = "duplicate" // this update_id was stored before
+	UpdateIgnored   = "ignored"   // not the owner's: no effect, nothing stored
+	UpdateInvalid   = "invalid"   // malformed: can never be stored
+)
+
+// ErrUpdateUnavailable means the update could not be handled now (storage,
+// lookup or staging failed); the caller keeps it and tries again.
+var ErrUpdateUnavailable = errors.New("telegram update: service unavailable")
+
+// HandleUpdate handles one raw Telegram update received by long polling
+// (getUpdates) for the Telegram control integration integrationID. After
+// the integration lookup it runs exactly the webhook's path (owner rule,
+// normalize, staging, people sighting, inbox insert deduplicated by
+// update_id). It returns one of the Update* results, or an error wrapping
+// ErrUpdateUnavailable when the update must be offered again later.
+func (h *TelegramHandler) HandleUpdate(ctx context.Context, integrationID string, raw []byte) (string, error) {
+	if !tenant.ValidUUID(integrationID) {
+		return "", ErrUpdateUnavailable
+	}
+	integration, err := h.integrations.LookupWebhookIntegration(ctx, integrationID)
+	if err != nil || tenant.ValidateTelegramControl(integration) != nil {
+		return "", ErrUpdateUnavailable
+	}
+	if len(raw) > maxBodyBytes {
+		return UpdateInvalid, nil
+	}
+	return h.process(ctx, integration, raw, "telegram poll")
+}
+
+// process is the shared part of the webhook and polling paths; label only
+// prefixes its log lines.
+func (h *TelegramHandler) process(ctx context.Context, integration tenant.WebhookIntegration, raw []byte, label string) (string, error) {
 	var upd tgUpdate
 	if json.Unmarshal(raw, &upd) != nil || upd.UpdateID <= 0 {
-		return respond(http.StatusBadRequest, "invalid update")
+		return UpdateInvalid, nil
 	}
 	u, owner, err := h.normalize(ctx, integration.WorkspaceID, upd)
 	if err != nil {
-		return respond(http.StatusServiceUnavailable, "service unavailable")
+		return "", ErrUpdateUnavailable
 	}
 	if !owner {
 		n := h.ignored.Add(1)
-		log.Printf("telegram webhook: non-owner update ignored integration=%s chat=%d count=%d", id, u.ChatID, n)
-		return ok("ignored")
+		log.Printf("%s: non-owner update ignored integration=%s chat=%d count=%d", label, integration.ID, u.ChatID, n)
+		return UpdateIgnored, nil
+	}
+	if directory, ok := h.inbox.(people.Resolver); ok {
+		if from := telegramSender(upd); from != nil {
+			_ = directory.Sighting(ctx, people.Sighting{
+				WorkspaceID:  integration.WorkspaceID,
+				Platform:     "telegram",
+				ExternalID:   strconv.FormatInt(from.ID, 10),
+				PlatformName: strings.TrimSpace(from.FirstName + " " + from.LastName),
+				Username:     from.Username,
+				Source:       "auto",
+				IsSelf:       true,
+				SeenAt:       h.now(),
+			})
+		}
 	}
 	u.WorkspaceID, u.IntegrationID, u.UpdateID = integration.WorkspaceID, integration.ID, upd.UpdateID
 	created, err := h.inbox.RecordUpdate(ctx, integration.WorkspaceID, u)
 	if err != nil {
-		return respond(http.StatusServiceUnavailable, "service unavailable")
+		return "", ErrUpdateUnavailable
 	}
 	if !created {
-		return ok("duplicate")
+		return UpdateDuplicate, nil
 	}
-	return ok("queued")
+	return UpdateQueued, nil
+}
+
+func telegramSender(upd tgUpdate) *tgUser {
+	if upd.CallbackQuery != nil {
+		return &upd.CallbackQuery.From
+	}
+	if upd.Message != nil {
+		return upd.Message.From
+	}
+	return nil
 }
 
 // WithOwnerUser sets the owner's Telegram user ID for an owner chat that is
@@ -181,6 +273,13 @@ func (h *TelegramHandler) WithOwnerUser(userID int64) *TelegramHandler {
 	if userID > 0 {
 		h.ownerUserID = userID
 	}
+	return h
+}
+
+// WithAssistant hands the owner's plain free text (not a reply) to the
+// Telegram assistant through stager. Nil keeps plain text without content.
+func (h *TelegramHandler) WithAssistant(stager AssistantStager) *TelegramHandler {
+	h.assistant = stager
 	return h
 }
 
@@ -250,7 +349,23 @@ func (h *TelegramHandler) normalize(ctx context.Context, workspaceID string, upd
 			return u, true, nil
 		}
 		u.Kind = behavior.UpdateText
-		if m.ReplyTo == nil || m.ReplyTo.MessageID <= 0 || text == "" {
+		if text == "" {
+			return u, true, nil
+		}
+		if m.ReplyTo == nil || m.ReplyTo.MessageID <= 0 {
+			if h.assistant == nil {
+				return u, true, nil
+			}
+			if utf8.RuneCountInString(text) > 4000 {
+				u.Note = behavior.NoteTextTooLong
+				return u, true, nil
+			}
+			// The text stays in memory for the worker, never in the update row.
+			key, err := h.assistant.StageAssistantText(workspaceID, text, h.now())
+			if err != nil {
+				return u, true, nil
+			}
+			u.Args = behavior.AssistantTextPrefix + key
 			return u, true, nil
 		}
 		if utf8.RuneCountInString(text) > 4000 {
@@ -260,8 +375,19 @@ func (h *TelegramHandler) normalize(ctx context.Context, workspaceID string, upd
 		// The answer is staged on the approval, never in the update row.
 		nonce, err := h.answers.StageAnswer(ctx, workspaceID, m.ReplyTo.MessageID, text, h.now())
 		if errors.Is(err, behavior.ErrNotFound) {
-			u.Note = behavior.NoteNoOpenReply
-			return u, true, nil
+			if h.templates == nil {
+				u.Note = behavior.NoteNoOpenReply
+				return u, true, nil
+			}
+			nonce, err = h.templates.StageTemplateReply(ctx, workspaceID, m.ReplyTo.MessageID, text, h.now())
+			if errors.Is(err, reporting.ErrTemplatePromptNotFound) {
+				u.Note = behavior.NoteNoOpenReply
+				return u, true, nil
+			}
+			if err == nil {
+				u.Args = "report-template:" + nonce
+				return u, true, nil
+			}
 		}
 		if err != nil {
 			return u, true, err

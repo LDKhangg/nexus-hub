@@ -12,6 +12,7 @@ import (
 // ResolvedDoc is a behavior with defaults applied and vars filled in. It is
 // what a run uses.
 type ResolvedDoc struct {
+	Schema      int
 	Name        string
 	Version     int // set when resolved from a published version
 	Description string
@@ -34,7 +35,8 @@ type ResolvedDoc struct {
 	Tone           string // empty: the profile tone
 	// Verdict is the behavior's verdict block with defaults applied; nil
 	// when the behavior declares none.
-	Verdict *VerdictSpec
+	Verdict  *VerdictSpec
+	Workflow *WorkflowDoc
 }
 
 // VerdictSpec is a resolved verdict block: the closed list of labels the
@@ -142,7 +144,7 @@ func Resolve(doc Doc, vars map[string]string) (ResolvedDoc, error) {
 	}
 
 	out := ResolvedDoc{
-		Name: doc.Name, Description: doc.Description, Instructions: r(doc.Instructions),
+		Schema: doc.Schema, Name: doc.Name, Description: doc.Description, Instructions: r(doc.Instructions), Workflow: doc.Workflow,
 		Autonomy: AutonomyRules{
 			ConfidenceThreshold: DefaultConfidenceThreshold, RequireCitations: true, NotifyWhenInformational: true,
 		},

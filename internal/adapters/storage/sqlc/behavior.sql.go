@@ -46,6 +46,105 @@ func (q *Queries) AddBehaviorRunUsage(ctx context.Context, arg AddBehaviorRunUsa
 	return result.RowsAffected(), nil
 }
 
+const addDurableBehaviorRunUsage = `-- name: AddDurableBehaviorRunUsage :execrows
+UPDATE public.behavior_runs SET input_tokens = input_tokens + $1::int,
+  output_tokens = output_tokens + $2::int,
+  cache_read_tokens = cache_read_tokens + $3::int,
+  cache_write_tokens = cache_write_tokens + $4::int,
+  steps = steps + $5::int, updated_at = now()
+WHERE workspace_id = $6 AND id = $7 AND status = 'running' AND claim_token IS NULL
+`
+
+type AddDurableBehaviorRunUsageParams struct {
+	Input       int32
+	Output      int32
+	CacheRead   int32
+	CacheWrite  int32
+	Steps       int32
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+func (q *Queries) AddDurableBehaviorRunUsage(ctx context.Context, arg AddDurableBehaviorRunUsageParams) (int64, error) {
+	result, err := q.db.Exec(ctx, addDurableBehaviorRunUsage,
+		arg.Input,
+		arg.Output,
+		arg.CacheRead,
+		arg.CacheWrite,
+		arg.Steps,
+		arg.WorkspaceID,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const beginDurableBehaviorRunAttempt = `-- name: BeginDurableBehaviorRunAttempt :one
+UPDATE public.behavior_runs SET status = 'running', attempts = attempts + 1,
+  workflow_attempt_deadline = $1::timestamptz,
+  claim_token = NULL, locked_until = NULL,
+  started_at = COALESCE(started_at, now()), updated_at = now()
+WHERE workspace_id = $2 AND id = $3
+  AND (claim_token IS NULL OR locked_until <= $4::timestamptz)
+  AND status IN ('pending','running')
+RETURNING id, workspace_id, behavior_id, behavior_version_id, version, trigger_kind, trigger, subject, revision, status, correlation_id, attempts, run_at, locked_until, claim_token, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, steps, error_code, snapshot, undone_at, started_at, finished_at, created_at, updated_at, context_snapshot, run_actions, workflow_attempt_deadline
+`
+
+type BeginDurableBehaviorRunAttemptParams struct {
+	Deadline    pgtype.Timestamptz
+	WorkspaceID pgtype.UUID
+	ID          int64
+	AtTime      pgtype.Timestamptz
+}
+
+// A run imported by the cutover may still hold the legacy claim it had;
+// once that lease has ended the durable attempt takes the run over (like a
+// legacy reclaim) and clears the claim, so the old claimant's writes fail.
+func (q *Queries) BeginDurableBehaviorRunAttempt(ctx context.Context, arg BeginDurableBehaviorRunAttemptParams) (BehaviorRun, error) {
+	row := q.db.QueryRow(ctx, beginDurableBehaviorRunAttempt,
+		arg.Deadline,
+		arg.WorkspaceID,
+		arg.ID,
+		arg.AtTime,
+	)
+	var i BehaviorRun
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.BehaviorID,
+		&i.BehaviorVersionID,
+		&i.Version,
+		&i.TriggerKind,
+		&i.Trigger,
+		&i.Subject,
+		&i.Revision,
+		&i.Status,
+		&i.CorrelationID,
+		&i.Attempts,
+		&i.RunAt,
+		&i.LockedUntil,
+		&i.ClaimToken,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheReadTokens,
+		&i.CacheWriteTokens,
+		&i.Steps,
+		&i.ErrorCode,
+		&i.Snapshot,
+		&i.UndoneAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ContextSnapshot,
+		&i.RunActions,
+		&i.WorkflowAttemptDeadline,
+	)
+	return i, err
+}
+
 const behaviorVersionStats = `-- name: BehaviorVersionStats :many
 
 SELECT v.version,
@@ -199,7 +298,7 @@ UPDATE public.behavior_runs AS r SET status = 'running', attempts = r.attempts +
   locked_until = $2::timestamptz + make_interval(secs => $3::float8),
   started_at = COALESCE(r.started_at, now()), updated_at = now()
 WHERE r.id = $4
-RETURNING r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot, r.run_actions
+RETURNING r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot, r.run_actions, r.workflow_attempt_deadline
 `
 
 type ClaimBehaviorRunByIDParams struct {
@@ -247,6 +346,7 @@ func (q *Queries) ClaimBehaviorRunByID(ctx context.Context, arg ClaimBehaviorRun
 		&i.UpdatedAt,
 		&i.ContextSnapshot,
 		&i.RunActions,
+		&i.WorkflowAttemptDeadline,
 	)
 	return i, err
 }
@@ -376,7 +476,7 @@ INSERT INTO public.behavior_runs(workspace_id, behavior_id, behavior_version_id,
 VALUES ($1, $2, $3, $4,
   $5, $6, $7, $8, $9, $10)
 ON CONFLICT (behavior_version_id, subject, revision) DO NOTHING
-RETURNING id, workspace_id, behavior_id, behavior_version_id, version, trigger_kind, trigger, subject, revision, status, correlation_id, attempts, run_at, locked_until, claim_token, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, steps, error_code, snapshot, undone_at, started_at, finished_at, created_at, updated_at, context_snapshot, run_actions
+RETURNING id, workspace_id, behavior_id, behavior_version_id, version, trigger_kind, trigger, subject, revision, status, correlation_id, attempts, run_at, locked_until, claim_token, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, steps, error_code, snapshot, undone_at, started_at, finished_at, created_at, updated_at, context_snapshot, run_actions, workflow_attempt_deadline
 `
 
 type CreateBehaviorRunParams struct {
@@ -438,6 +538,7 @@ func (q *Queries) CreateBehaviorRun(ctx context.Context, arg CreateBehaviorRunPa
 		&i.UpdatedAt,
 		&i.ContextSnapshot,
 		&i.RunActions,
+		&i.WorkflowAttemptDeadline,
 	)
 	return i, err
 }
@@ -495,65 +596,56 @@ func (q *Queries) DecideApproval(ctx context.Context, arg DecideApprovalParams) 
 	return i, err
 }
 
-const expireApprovals = `-- name: ExpireApprovals :many
+const expireApproval = `-- name: ExpireApproval :one
 UPDATE public.approvals SET decision = 'expired', decided_by = 'system', decided_at = now(), updated_at = now()
-WHERE id IN (SELECT a.id FROM public.approvals a
-             WHERE a.decision IS NULL AND a.expires_at <= $1::timestamptz
-             ORDER BY a.expires_at, a.id
-             FOR UPDATE SKIP LOCKED LIMIT $2::int)
+WHERE workspace_id = $1 AND id = $2
+  AND decision IS NULL AND expires_at <= $3::timestamptz
 RETURNING id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer
 `
 
-type ExpireApprovalsParams struct {
-	AtTime  pgtype.Timestamptz
-	MaxRows int32
+type ExpireApprovalParams struct {
+	WorkspaceID pgtype.UUID
+	ID          int64
+	AtTime      pgtype.Timestamptz
 }
 
-func (q *Queries) ExpireApprovals(ctx context.Context, arg ExpireApprovalsParams) ([]Approval, error) {
-	rows, err := q.db.Query(ctx, expireApprovals, arg.AtTime, arg.MaxRows)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []Approval
-	for rows.Next() {
-		var i Approval
-		if err := rows.Scan(
-			&i.ID,
-			&i.WorkspaceID,
-			&i.Kind,
-			&i.RunID,
-			&i.ItemID,
-			&i.Action,
-			&i.Resource,
-			&i.Payload,
-			&i.Options,
-			&i.Nonce,
-			&i.ExpiresAt,
-			&i.Decision,
-			&i.Answer,
-			&i.DecidedBy,
-			&i.DecidedAt,
-			&i.TelegramMessageID,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.ReplyMessageID,
-			&i.PendingAnswer,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
+// Expires one open approval past its expiry; no row when it is decided.
+func (q *Queries) ExpireApproval(ctx context.Context, arg ExpireApprovalParams) (Approval, error) {
+	row := q.db.QueryRow(ctx, expireApproval, arg.WorkspaceID, arg.ID, arg.AtTime)
+	var i Approval
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Kind,
+		&i.RunID,
+		&i.ItemID,
+		&i.Action,
+		&i.Resource,
+		&i.Payload,
+		&i.Options,
+		&i.Nonce,
+		&i.ExpiresAt,
+		&i.Decision,
+		&i.Answer,
+		&i.DecidedBy,
+		&i.DecidedAt,
+		&i.TelegramMessageID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ReplyMessageID,
+		&i.PendingAnswer,
+	)
+	return i, err
 }
 
 const failExhaustedBehaviorRuns = `-- name: FailExhaustedBehaviorRuns :execrows
-UPDATE public.behavior_runs SET status = 'failed', error_code = 'attempts_exhausted', claim_token = NULL,
+UPDATE public.behavior_runs r SET status = 'failed', error_code = 'attempts_exhausted', claim_token = NULL,
   locked_until = NULL, finished_at = now(), updated_at = now()
-WHERE status = 'running' AND locked_until <= $1::timestamptz AND attempts >= $2::int
+WHERE r.status = 'running' AND r.locked_until <= $1::timestamptz AND r.attempts >= $2::int
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_runtime_modes m
+                  WHERE m.workspace_id = r.workspace_id AND m.mode = 'workflow')
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_executions e
+                  WHERE e.workspace_id = r.workspace_id AND e.legacy_run_id = r.id)
 `
 
 type FailExhaustedBehaviorRunsParams struct {
@@ -561,7 +653,9 @@ type FailExhaustedBehaviorRunsParams struct {
 	MaxAttempts int32
 }
 
-// Runs whose lease ended after the last allowed attempt.
+// Runs whose lease ended after the last allowed attempt. A cut-over
+// workspace's runs and a run owned by a workflow execution belong to the
+// durable queue, never to the legacy claimer.
 func (q *Queries) FailExhaustedBehaviorRuns(ctx context.Context, arg FailExhaustedBehaviorRunsParams) (int64, error) {
 	result, err := q.db.Exec(ctx, failExhaustedBehaviorRuns, arg.AtTime, arg.MaxAttempts)
 	if err != nil {
@@ -589,6 +683,32 @@ func (q *Queries) FinishBehaviorRun(ctx context.Context, arg FinishBehaviorRunPa
 		arg.Code,
 		arg.ID,
 		arg.Token,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const finishDurableBehaviorRun = `-- name: FinishDurableBehaviorRun :execrows
+UPDATE public.behavior_runs SET status = $1::text, error_code = $2,
+  workflow_attempt_deadline = NULL, finished_at = now(), updated_at = now()
+WHERE workspace_id = $3 AND id = $4 AND status = 'running' AND claim_token IS NULL
+`
+
+type FinishDurableBehaviorRunParams struct {
+	Status      string
+	Code        pgtype.Text
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+func (q *Queries) FinishDurableBehaviorRun(ctx context.Context, arg FinishDurableBehaviorRunParams) (int64, error) {
+	result, err := q.db.Exec(ctx, finishDurableBehaviorRun,
+		arg.Status,
+		arg.Code,
+		arg.WorkspaceID,
+		arg.ID,
 	)
 	if err != nil {
 		return 0, err
@@ -708,7 +828,7 @@ func (q *Queries) GetApprovalByNonce(ctx context.Context, arg GetApprovalByNonce
 }
 
 const getBehaviorByID = `-- name: GetBehaviorByID :one
-SELECT id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at FROM public.behaviors WHERE workspace_id = $1 AND id = $2
+SELECT id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at, internal_kind FROM public.behaviors WHERE workspace_id = $1 AND id = $2 AND internal_kind IS NULL
 `
 
 type GetBehaviorByIDParams struct {
@@ -729,12 +849,14 @@ func (q *Queries) GetBehaviorByID(ctx context.Context, arg GetBehaviorByIDParams
 		&i.DraftSource,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.InternalKind,
 	)
 	return i, err
 }
 
 const getBehaviorByName = `-- name: GetBehaviorByName :one
-SELECT id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at FROM public.behaviors WHERE workspace_id = $1 AND name = $2
+
+SELECT id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at, internal_kind FROM public.behaviors WHERE workspace_id = $1 AND name = $2 AND internal_kind IS NULL
 `
 
 type GetBehaviorByNameParams struct {
@@ -742,6 +864,8 @@ type GetBehaviorByNameParams struct {
 	Name        string
 }
 
+// Internal built-in definitions (internal_kind set) are never visible to
+// the public behavior paths below.
 func (q *Queries) GetBehaviorByName(ctx context.Context, arg GetBehaviorByNameParams) (Behavior, error) {
 	row := q.db.QueryRow(ctx, getBehaviorByName, arg.WorkspaceID, arg.Name)
 	var i Behavior
@@ -755,6 +879,7 @@ func (q *Queries) GetBehaviorByName(ctx context.Context, arg GetBehaviorByNamePa
 		&i.DraftSource,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.InternalKind,
 	)
 	return i, err
 }
@@ -787,7 +912,7 @@ func (q *Queries) GetBehaviorMessage(ctx context.Context, arg GetBehaviorMessage
 }
 
 const getBehaviorRun = `-- name: GetBehaviorRun :one
-SELECT r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot, r.run_actions, b.name AS behavior_name
+SELECT r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot, r.run_actions, r.workflow_attempt_deadline, b.name AS behavior_name
 FROM public.behavior_runs r JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
 WHERE r.workspace_id = $1 AND r.id = $2
 `
@@ -835,13 +960,14 @@ func (q *Queries) GetBehaviorRun(ctx context.Context, arg GetBehaviorRunParams) 
 		&i.BehaviorRun.UpdatedAt,
 		&i.BehaviorRun.ContextSnapshot,
 		&i.BehaviorRun.RunActions,
+		&i.BehaviorRun.WorkflowAttemptDeadline,
 		&i.BehaviorName,
 	)
 	return i, err
 }
 
 const getBehaviorRunByDedupe = `-- name: GetBehaviorRunByDedupe :one
-SELECT id, workspace_id, behavior_id, behavior_version_id, version, trigger_kind, trigger, subject, revision, status, correlation_id, attempts, run_at, locked_until, claim_token, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, steps, error_code, snapshot, undone_at, started_at, finished_at, created_at, updated_at, context_snapshot, run_actions FROM public.behavior_runs
+SELECT id, workspace_id, behavior_id, behavior_version_id, version, trigger_kind, trigger, subject, revision, status, correlation_id, attempts, run_at, locked_until, claim_token, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, steps, error_code, snapshot, undone_at, started_at, finished_at, created_at, updated_at, context_snapshot, run_actions, workflow_attempt_deadline FROM public.behavior_runs
 WHERE workspace_id = $1 AND behavior_version_id = $2
   AND subject = $3 AND revision = $4
 `
@@ -891,6 +1017,7 @@ func (q *Queries) GetBehaviorRunByDedupe(ctx context.Context, arg GetBehaviorRun
 		&i.UpdatedAt,
 		&i.ContextSnapshot,
 		&i.RunActions,
+		&i.WorkflowAttemptDeadline,
 	)
 	return i, err
 }
@@ -1304,7 +1431,7 @@ func (q *Queries) InsertTelegramUpdate(ctx context.Context, arg InsertTelegramUp
 }
 
 const latestBehaviorRunByCorrelation = `-- name: LatestBehaviorRunByCorrelation :one
-SELECT r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot, r.run_actions, b.name AS behavior_name
+SELECT r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot, r.run_actions, r.workflow_attempt_deadline, b.name AS behavior_name
 FROM public.behavior_runs r JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
 WHERE r.workspace_id = $1 AND r.correlation_id = $2
 ORDER BY r.created_at DESC, r.id DESC LIMIT 1
@@ -1353,13 +1480,14 @@ func (q *Queries) LatestBehaviorRunByCorrelation(ctx context.Context, arg Latest
 		&i.BehaviorRun.UpdatedAt,
 		&i.BehaviorRun.ContextSnapshot,
 		&i.BehaviorRun.RunActions,
+		&i.BehaviorRun.WorkflowAttemptDeadline,
 		&i.BehaviorName,
 	)
 	return i, err
 }
 
 const latestBehaviorRunBySubject = `-- name: LatestBehaviorRunBySubject :one
-SELECT r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot, r.run_actions, b.name AS behavior_name
+SELECT r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot, r.run_actions, r.workflow_attempt_deadline, b.name AS behavior_name
 FROM public.behavior_runs r JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
 WHERE r.workspace_id = $1 AND r.subject = $2
 ORDER BY r.created_at DESC, r.id DESC LIMIT 1
@@ -1408,6 +1536,7 @@ func (q *Queries) LatestBehaviorRunBySubject(ctx context.Context, arg LatestBeha
 		&i.BehaviorRun.UpdatedAt,
 		&i.BehaviorRun.ContextSnapshot,
 		&i.BehaviorRun.RunActions,
+		&i.BehaviorRun.WorkflowAttemptDeadline,
 		&i.BehaviorName,
 	)
 	return i, err
@@ -1512,7 +1641,7 @@ const listBehaviors = `-- name: ListBehaviors :many
 SELECT b.id, b.workspace_id, b.name, b.status, b.created_at, b.updated_at,
   COALESCE((SELECT MAX(v.version) FROM public.behavior_versions v WHERE v.behavior_id = b.id), 0)::int AS latest_version
 FROM public.behaviors b
-WHERE b.workspace_id = $1
+WHERE b.workspace_id = $1 AND b.internal_kind IS NULL
 ORDER BY b.name
 `
 
@@ -1609,11 +1738,53 @@ func (q *Queries) ListDecisions(ctx context.Context, arg ListDecisionsParams) ([
 	return items, nil
 }
 
+const listDueApprovals = `-- name: ListDueApprovals :many
+SELECT a.workspace_id, a.id, COALESCE(w.execution_id, 0)::bigint AS execution_id
+FROM public.approvals a
+LEFT JOIN public.workflow_waits w ON w.workspace_id = a.workspace_id AND w.approval_id = a.id
+WHERE a.decision IS NULL AND a.expires_at <= $1::timestamptz
+ORDER BY a.expires_at, a.id
+LIMIT $2::int
+`
+
+type ListDueApprovalsParams struct {
+	AtTime  pgtype.Timestamptz
+	MaxRows int32
+}
+
+type ListDueApprovalsRow struct {
+	WorkspaceID pgtype.UUID
+	ID          int64
+	ExecutionID int64
+}
+
+// Open approvals past their expiry with the execution of their wait (0 for
+// none), read before expiring them so bound executions are locked first.
+func (q *Queries) ListDueApprovals(ctx context.Context, arg ListDueApprovalsParams) ([]ListDueApprovalsRow, error) {
+	rows, err := q.db.Query(ctx, listDueApprovals, arg.AtTime, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListDueApprovalsRow
+	for rows.Next() {
+		var i ListDueApprovalsRow
+		if err := rows.Scan(&i.WorkspaceID, &i.ID, &i.ExecutionID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listEnabledBehaviorVersions = `-- name: ListEnabledBehaviorVersions :many
 SELECT DISTINCT ON (b.id) b.name, v.id, v.workspace_id, v.behavior_id, v.version, v.document, v.vars, v.published_at
 FROM public.behaviors b
 JOIN public.behavior_versions v ON v.workspace_id = b.workspace_id AND v.behavior_id = b.id
-WHERE b.workspace_id = $1 AND b.status = 'enabled'
+WHERE b.workspace_id = $1 AND b.status = 'enabled' AND b.internal_kind IS NULL
 ORDER BY b.id, v.version DESC
 `
 
@@ -1787,7 +1958,7 @@ func (q *Queries) ListRunItems(ctx context.Context, arg ListRunItemsParams) ([]R
 }
 
 const lockBehaviorByName = `-- name: LockBehaviorByName :one
-SELECT id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at FROM public.behaviors WHERE workspace_id = $1 AND name = $2 FOR UPDATE
+SELECT id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at, internal_kind FROM public.behaviors WHERE workspace_id = $1 AND name = $2 AND internal_kind IS NULL FOR UPDATE
 `
 
 type LockBehaviorByNameParams struct {
@@ -1809,6 +1980,7 @@ func (q *Queries) LockBehaviorByName(ctx context.Context, arg LockBehaviorByName
 		&i.DraftSource,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.InternalKind,
 	)
 	return i, err
 }
@@ -1830,6 +2002,69 @@ func (q *Queries) LockClaimedBehaviorRun(ctx context.Context, arg LockClaimedBeh
 	var workspace_id pgtype.UUID
 	err := row.Scan(&workspace_id)
 	return workspace_id, err
+}
+
+const lockDurableBehaviorRun = `-- name: LockDurableBehaviorRun :one
+
+SELECT r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot, r.run_actions, r.workflow_attempt_deadline, b.name AS behavior_name
+FROM public.behavior_runs r
+JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
+JOIN public.workflow_executions e ON e.workspace_id = r.workspace_id AND e.legacy_run_id = r.id
+WHERE r.workspace_id = $1 AND r.id = $2 AND e.id = $3
+FOR UPDATE OF r
+`
+
+type LockDurableBehaviorRunParams struct {
+	WorkspaceID pgtype.UUID
+	ID          int64
+	ExecutionID int64
+}
+
+type LockDurableBehaviorRunRow struct {
+	BehaviorRun  BehaviorRun
+	BehaviorName string
+}
+
+// Durable runs: a run executed as workflow steps. Every write is made in
+// the transaction that holds the workflow job fence; the run must be the
+// execution's legacy run, in the same workspace, and never legacy-claimed.
+func (q *Queries) LockDurableBehaviorRun(ctx context.Context, arg LockDurableBehaviorRunParams) (LockDurableBehaviorRunRow, error) {
+	row := q.db.QueryRow(ctx, lockDurableBehaviorRun, arg.WorkspaceID, arg.ID, arg.ExecutionID)
+	var i LockDurableBehaviorRunRow
+	err := row.Scan(
+		&i.BehaviorRun.ID,
+		&i.BehaviorRun.WorkspaceID,
+		&i.BehaviorRun.BehaviorID,
+		&i.BehaviorRun.BehaviorVersionID,
+		&i.BehaviorRun.Version,
+		&i.BehaviorRun.TriggerKind,
+		&i.BehaviorRun.Trigger,
+		&i.BehaviorRun.Subject,
+		&i.BehaviorRun.Revision,
+		&i.BehaviorRun.Status,
+		&i.BehaviorRun.CorrelationID,
+		&i.BehaviorRun.Attempts,
+		&i.BehaviorRun.RunAt,
+		&i.BehaviorRun.LockedUntil,
+		&i.BehaviorRun.ClaimToken,
+		&i.BehaviorRun.InputTokens,
+		&i.BehaviorRun.OutputTokens,
+		&i.BehaviorRun.CacheReadTokens,
+		&i.BehaviorRun.CacheWriteTokens,
+		&i.BehaviorRun.Steps,
+		&i.BehaviorRun.ErrorCode,
+		&i.BehaviorRun.Snapshot,
+		&i.BehaviorRun.UndoneAt,
+		&i.BehaviorRun.StartedAt,
+		&i.BehaviorRun.FinishedAt,
+		&i.BehaviorRun.CreatedAt,
+		&i.BehaviorRun.UpdatedAt,
+		&i.BehaviorRun.ContextSnapshot,
+		&i.BehaviorRun.RunActions,
+		&i.BehaviorRun.WorkflowAttemptDeadline,
+		&i.BehaviorName,
+	)
+	return i, err
 }
 
 const markBehaviorRunUndone = `-- name: MarkBehaviorRunUndone :execrows
@@ -1929,6 +2164,27 @@ func (q *Queries) RetryBehaviorRun(ctx context.Context, arg RetryBehaviorRunPara
 		arg.ID,
 		arg.Token,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const retryDurableBehaviorRun = `-- name: RetryDurableBehaviorRun :execrows
+UPDATE public.behavior_runs SET error_code = $1::text, workflow_attempt_deadline = NULL, updated_at = now()
+WHERE workspace_id = $2 AND id = $3 AND status = 'running' AND claim_token IS NULL
+`
+
+type RetryDurableBehaviorRunParams struct {
+	Code        string
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+// Records why the attempt is retried; the run stays running (the workflow
+// job owns the schedule).
+func (q *Queries) RetryDurableBehaviorRun(ctx context.Context, arg RetryDurableBehaviorRunParams) (int64, error) {
+	result, err := q.db.Exec(ctx, retryDurableBehaviorRun, arg.Code, arg.WorkspaceID, arg.ID)
 	if err != nil {
 		return 0, err
 	}
@@ -2080,12 +2336,18 @@ func (q *Queries) SearchReusableDecisions(ctx context.Context, arg SearchReusabl
 }
 
 const selectBehaviorRunClaimCandidate = `-- name: SelectBehaviorRunClaimCandidate :one
-SELECT id FROM public.behavior_runs
-WHERE ((status = 'pending' AND run_at <= $1::timestamptz)
-    OR (status = 'running' AND locked_until <= $1::timestamptz))
-  AND attempts < $2::int
-ORDER BY (status = 'running') DESC, run_at, id
-FOR UPDATE SKIP LOCKED LIMIT 1
+SELECT r.id, r.workspace_id, b.name AS behavior_name
+FROM public.behavior_runs r
+JOIN public.behaviors b ON b.workspace_id = r.workspace_id AND b.id = r.behavior_id
+WHERE ((r.status = 'pending' AND r.run_at <= $1::timestamptz)
+    OR (r.status = 'running' AND r.locked_until <= $1::timestamptz))
+  AND r.attempts < $2::int
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_runtime_modes m
+                  WHERE m.workspace_id = r.workspace_id AND m.mode = 'workflow')
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_executions e
+                  WHERE e.workspace_id = r.workspace_id AND e.legacy_run_id = r.id)
+ORDER BY (r.status = 'running') DESC, r.run_at, r.id
+FOR UPDATE OF r SKIP LOCKED LIMIT 1
 `
 
 type SelectBehaviorRunClaimCandidateParams struct {
@@ -2093,12 +2355,21 @@ type SelectBehaviorRunClaimCandidateParams struct {
 	MaxAttempts int32
 }
 
-// A due pending run, or a running run whose lease ended.
-func (q *Queries) SelectBehaviorRunClaimCandidate(ctx context.Context, arg SelectBehaviorRunClaimCandidateParams) (int64, error) {
+type SelectBehaviorRunClaimCandidateRow struct {
+	ID           int64
+	WorkspaceID  pgtype.UUID
+	BehaviorName string
+}
+
+// A due pending run, or a running run whose lease ended. Runs of a
+// cut-over workspace and runs owned by a workflow execution are never
+// candidates; the claim re-checks the workspace's runtime mode under its
+// KEY SHARE lock (this filter only skips them cheaply).
+func (q *Queries) SelectBehaviorRunClaimCandidate(ctx context.Context, arg SelectBehaviorRunClaimCandidateParams) (SelectBehaviorRunClaimCandidateRow, error) {
 	row := q.db.QueryRow(ctx, selectBehaviorRunClaimCandidate, arg.AtTime, arg.MaxAttempts)
-	var id int64
-	err := row.Scan(&id)
-	return id, err
+	var i SelectBehaviorRunClaimCandidateRow
+	err := row.Scan(&i.ID, &i.WorkspaceID, &i.BehaviorName)
+	return i, err
 }
 
 const setApprovalMessage = `-- name: SetApprovalMessage :execrows
@@ -2246,6 +2517,44 @@ func (q *Queries) SetBehaviorStatus(ctx context.Context, arg SetBehaviorStatusPa
 	return result.RowsAffected(), nil
 }
 
+const setDurableBehaviorRunActions = `-- name: SetDurableBehaviorRunActions :execrows
+UPDATE public.behavior_runs SET run_actions = $1, updated_at = now()
+WHERE workspace_id = $2 AND id = $3 AND status = 'running' AND claim_token IS NULL
+`
+
+type SetDurableBehaviorRunActionsParams struct {
+	Result      []byte
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+func (q *Queries) SetDurableBehaviorRunActions(ctx context.Context, arg SetDurableBehaviorRunActionsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setDurableBehaviorRunActions, arg.Result, arg.WorkspaceID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const setDurableBehaviorRunContext = `-- name: SetDurableBehaviorRunContext :execrows
+UPDATE public.behavior_runs SET context_snapshot = $1, updated_at = now()
+WHERE workspace_id = $2 AND id = $3 AND status = 'running' AND claim_token IS NULL
+`
+
+type SetDurableBehaviorRunContextParams struct {
+	Snapshot    []byte
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+func (q *Queries) SetDurableBehaviorRunContext(ctx context.Context, arg SetDurableBehaviorRunContextParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setDurableBehaviorRunContext, arg.Snapshot, arg.WorkspaceID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const stageApprovalAnswer = `-- name: StageApprovalAnswer :one
 UPDATE public.approvals SET pending_answer = $1::text, updated_at = now()
 WHERE id = (SELECT c.id FROM public.approvals c
@@ -2334,7 +2643,7 @@ INSERT INTO public.behaviors(workspace_id, name, draft, draft_vars, draft_source
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (workspace_id, name) DO UPDATE
 SET draft = EXCLUDED.draft, draft_vars = EXCLUDED.draft_vars, draft_source = EXCLUDED.draft_source, updated_at = now()
-RETURNING id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at
+RETURNING id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at, internal_kind
 `
 
 type UpsertBehaviorDraftParams struct {
@@ -2365,6 +2674,7 @@ func (q *Queries) UpsertBehaviorDraft(ctx context.Context, arg UpsertBehaviorDra
 		&i.DraftSource,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.InternalKind,
 	)
 	return i, err
 }

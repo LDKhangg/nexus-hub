@@ -11,6 +11,7 @@ import (
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
+	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -21,15 +22,20 @@ import (
 // BehaviorStore persists the behavior engine's definitions, runs, items,
 // approvals, inbound updates, profile and decision memory.
 type BehaviorStore struct {
-	pool *pgxpool.Pool
-	q    *sqlc.Queries
+	pool   *pgxpool.Pool
+	q      *sqlc.Queries
+	people *PeopleRepository
 }
 
 func NewBehaviorStore(pool *pgxpool.Pool) (*BehaviorStore, error) {
 	if pool == nil {
 		return nil, errors.New("behavior store requires pool")
 	}
-	return &BehaviorStore{pool: pool, q: sqlc.New(pool)}, nil
+	directory, err := NewPeopleRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	return &BehaviorStore{pool: pool, q: sqlc.New(pool), people: directory}, nil
 }
 
 var (
@@ -39,7 +45,18 @@ var (
 	_ behavior.InboxStore      = (*BehaviorStore)(nil)
 	_ behavior.ProfileStore    = (*BehaviorStore)(nil)
 	_ behavior.MemoryStore     = (*BehaviorStore)(nil)
+	_ people.Resolver          = (*BehaviorStore)(nil)
 )
+
+// DisplayName resolves a workspace account through the shared store's people directory.
+func (s *BehaviorStore) DisplayName(ctx context.Context, workspaceID, platform, externalID string) (string, bool) {
+	return s.people.DisplayName(ctx, workspaceID, platform, externalID)
+}
+
+// Sighting records a workspace account observation.
+func (s *BehaviorStore) Sighting(ctx context.Context, sighting people.Sighting) error {
+	return s.people.Sighting(ctx, sighting)
+}
 
 // --- helpers ---
 
@@ -418,7 +435,8 @@ func mapRun(r sqlc.BehaviorRun, name string) behavior.Run {
 			CacheWriteTokens: int(r.CacheWriteTokens), Steps: int(r.Steps),
 		},
 		ErrorCode: r.ErrorCode.String, Snapshot: r.Snapshot, Context: r.ContextSnapshot, RunActions: r.RunActions, UndoneAt: tsPtr(r.UndoneAt), RunAt: r.RunAt.Time,
-		StartedAt: tsPtr(r.StartedAt), FinishedAt: tsPtr(r.FinishedAt), CreatedAt: r.CreatedAt.Time, UpdatedAt: r.UpdatedAt.Time,
+		WorkflowAttemptDeadline: tsPtr(r.WorkflowAttemptDeadline),
+		StartedAt:               tsPtr(r.StartedAt), FinishedAt: tsPtr(r.FinishedAt), CreatedAt: r.CreatedAt.Time, UpdatedAt: r.UpdatedAt.Time,
 	}
 }
 
@@ -505,21 +523,28 @@ func (s *BehaviorStore) ClaimRun(ctx context.Context, now time.Time, lease time.
 	if _, err := q.FailExhaustedBehaviorRuns(ctx, sqlc.FailExhaustedBehaviorRunsParams{AtTime: at, MaxAttempts: int32(maxAttempts)}); err != nil {
 		return nil, err
 	}
-	id, err := q.SelectBehaviorRunClaimCandidate(ctx, sqlc.SelectBehaviorRunClaimCandidateParams{AtTime: at, MaxAttempts: int32(maxAttempts)})
+	cand, err := q.SelectBehaviorRunClaimCandidate(ctx, sqlc.SelectBehaviorRunClaimCandidateParams{AtTime: at, MaxAttempts: int32(maxAttempts)})
 	if isNoRows(err) {
 		return nil, tx.Commit(ctx)
 	}
 	if err != nil {
 		return nil, err
 	}
-	row, err := q.ClaimBehaviorRunByID(ctx, sqlc.ClaimBehaviorRunByIDParams{Token: token, AtTime: at, LeaseSecs: lease.Seconds(), ID: id})
+	// The runtime-mode fence: a cut-over workspace (or one whose cutover is
+	// running) belongs to the durable workflow queue.
+	if allowed, err := legacyClaimAllowed(ctx, q, cand.WorkspaceID); err != nil {
+		return nil, err
+	} else if !allowed {
+		return nil, tx.Commit(ctx)
+	}
+	row, err := q.ClaimBehaviorRunByID(ctx, sqlc.ClaimBehaviorRunByIDParams{Token: token, AtTime: at, LeaseSecs: lease.Seconds(), ID: cand.ID})
 	if err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	run := mapRun(row, "")
+	run := mapRun(row, cand.BehaviorName)
 	run.ClaimToken = tok
 	return &run, nil
 }

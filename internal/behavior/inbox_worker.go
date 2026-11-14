@@ -8,8 +8,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/google/uuid"
 )
 
@@ -30,6 +32,7 @@ const (
 	msgNoAnswer     = "Không thấy câu trả lời, hãy gửi lại."
 	usageTrace      = "Cú pháp: /trace <run id hoặc task> [item]"
 	usageUndo       = "Cú pháp: /undo <run id>"
+	usageAlias      = "Cú pháp: /alias <platform:id> <tên>"
 )
 
 // InboxSettings tunes the inbound worker.
@@ -52,6 +55,10 @@ type InboxDeps struct {
 	Tracer    Tracer
 	Undoer    Undoer
 	Callbacks CallbackHandler
+	People    people.Directory
+	Reports   ReportSettings
+	// Assistant, when set, answers the owner's plain free text.
+	Assistant *Assistant
 }
 
 // InboxWorker processes stored Telegram updates: built-in commands,
@@ -63,6 +70,11 @@ type InboxWorker struct {
 	settings InboxSettings
 	now      func() time.Time
 	wait     func(context.Context, time.Duration) error
+
+	// assistantJobs is the bounded assistant queue; Run starts its single
+	// consumer. assistantNoticeAfter is when a "working" message is sent.
+	assistantJobs        chan assistantJob
+	assistantNoticeAfter time.Duration
 }
 
 func NewInboxWorker(d InboxDeps, s InboxSettings) *InboxWorker {
@@ -93,7 +105,8 @@ func NewInboxWorker(d InboxDeps, s InboxSettings) *InboxWorker {
 	if d.Callbacks == nil {
 		d.Callbacks = Unavailable{}
 	}
-	return &InboxWorker{d: d, settings: s, now: time.Now, wait: waitFor}
+	return &InboxWorker{d: d, settings: s, now: time.Now, wait: waitFor,
+		assistantJobs: make(chan assistantJob, assistantQueueSize), assistantNoticeAfter: assistantNoticeAfter}
 }
 
 func waitFor(ctx context.Context, d time.Duration) error {
@@ -107,8 +120,16 @@ func waitFor(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// Run processes updates until ctx ends.
+// Run processes updates until ctx ends. It also runs the assistant queue
+// and returns only after the assistant job in progress has stopped.
 func (w *InboxWorker) Run(ctx context.Context) error {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		w.runAssistant(ctx)
+	}()
+	defer wg.Wait()
 	for ctx.Err() == nil {
 		worked, err := w.processNext(ctx)
 		if err != nil && ctx.Err() == nil {
@@ -177,6 +198,9 @@ func (w *InboxWorker) dispatch(ctx context.Context, u InboundUpdate, corr string
 	actor := "telegram:" + strconv.FormatInt(u.ChatID, 10)
 	switch u.Kind {
 	case UpdateCallback:
+		if strings.HasPrefix(u.Command, "rp:") {
+			return w.reportCallback(ctx, u, to)
+		}
 		return w.callback(ctx, u, to, actor, corr)
 	case UpdateCommand, UpdateText, UpdateOther:
 		if text, code := noteText(u.Note); text != "" {
@@ -285,6 +309,42 @@ func (w *InboxWorker) command(ctx context.Context, u InboundUpdate, to ChatRef, 
 			return w.reply(ctx, to, usageUndo, "usage")
 		}
 		reply, err = w.d.Undoer.Undo(hctx, UndoRequest{WorkspaceID: u.WorkspaceID, RunID: id, Actor: actor, CorrelationID: corr})
+	case "/contacts":
+		if w.d.People == nil {
+			err = ErrNotAvailable
+			break
+		}
+		contacts, listErr := w.d.People.List(hctx, u.WorkspaceID, "", args, 10)
+		if listErr != nil {
+			err = listErr
+			break
+		}
+		if len(contacts) == 0 {
+			reply = msgNotFound
+			break
+		}
+		var lines []string
+		for _, contact := range contacts {
+			lines = append(lines, contact.Name+" · "+contact.ID)
+		}
+		reply = strings.Join(lines, "\n")
+	case "/alias":
+		if w.d.People == nil {
+			err = ErrNotAvailable
+			break
+		}
+		ref, name, ok := strings.Cut(args, " ")
+		if !ok || strings.TrimSpace(ref) == "" || strings.TrimSpace(name) == "" {
+			return w.reply(ctx, to, usageAlias, "usage")
+		}
+		contact, aliasErr := w.d.People.SetAlias(hctx, u.WorkspaceID, ref, name)
+		if aliasErr != nil {
+			err = aliasErr
+		} else {
+			reply = "Đã đặt tên: " + contact.Name
+		}
+	case "/prefs", "/template":
+		return w.reportCommand(hctx, u, to)
 	default:
 		reply, err = w.d.Commands.TriggerCommand(hctx, CommandRequest{
 			WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, UpdateID: u.UpdateID,
@@ -301,7 +361,10 @@ func (w *InboxWorker) helpText(ctx context.Context, workspaceID string) string {
 	b.WriteString("Lệnh có sẵn:\n")
 	b.WriteString("/help: danh sách lệnh\n")
 	b.WriteString("/trace <run id hoặc task> [item]: xem một lần chạy\n")
+	b.WriteString("/prefs [short|normal|detailed]: tùy chọn báo cáo\n")
+	b.WriteString("/template <kind> [reset]: mẫu báo cáo\n")
 	b.WriteString("/undo <run id>: hoàn tác một lần chạy")
+	b.WriteString("\n/contacts [tìm kiếm]: danh bạ\n/alias <platform:id> <tên>: đặt tên")
 	if w.d.Defs == nil {
 		return b.String()
 	}
@@ -385,6 +448,21 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 	if err != nil {
 		return "", "retry", false
 	}
+	if a.TelegramMessageID != 0 && a.TelegramMessageID != msgID {
+		return msgStale, "stale", false
+	}
+	if a.Kind == ApprovalAssistantAction {
+		if !w.now().Before(a.ExpiresAt) {
+			return msgStale, "stale", true
+		}
+		if a.Decision == "" {
+			return w.assistantCallback(ctx, u, to, data, a, actor, corr)
+		}
+		if a.Decision == DecisionApproved && data.Kind == CallbackApprove && a.DecidedBy == actor && isAssistantWorkflowAction(a.Action) {
+			return w.assistantCallback(ctx, u, to, data, a, actor, corr)
+		}
+		return msgStale, "stale", true
+	}
 	if data.Kind.Decides() && (a.Decision != "" || !w.now().Before(a.ExpiresAt)) {
 		return msgStale, "stale", true
 	}
@@ -409,6 +487,12 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 
 func (w *InboxWorker) freeText(ctx context.Context, u InboundUpdate, to ChatRef, actor, corr string) outcome {
 	nonce := strings.TrimSpace(u.Args)
+	if strings.HasPrefix(nonce, templateReplyPrefix) {
+		return w.reportTemplateReply(ctx, u, to)
+	}
+	if strings.HasPrefix(nonce, AssistantTextPrefix) {
+		return w.assistant(ctx, u, to, actor, corr)
+	}
 	if nonce == "" {
 		return w.reply(ctx, to, msgHint, "")
 	}

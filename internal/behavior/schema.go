@@ -15,8 +15,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// SchemaVersion is the only behavior document schema this engine accepts.
-const SchemaVersion = 1
+// SchemaVersion is the latest behavior document schema this engine accepts.
+const SchemaVersion = 2
+
+const LegacySchemaVersion = 1
 
 // MaxSourceBytes caps an imported behavior or values file. It matches the
 // storage limit on the kept source text.
@@ -95,7 +97,8 @@ type Doc struct {
 	Vars           map[string]VarDoc      `json:"vars,omitempty" yaml:"vars,omitempty"`
 	// Verdict asks the model step for one structured verdict per run, which
 	// run-level actions may require with "when".
-	Verdict *VerdictDoc `json:"verdict,omitempty" yaml:"verdict,omitempty"`
+	Verdict  *VerdictDoc  `json:"verdict,omitempty" yaml:"verdict,omitempty"`
+	Workflow *WorkflowDoc `json:"workflow,omitempty" yaml:"workflow,omitempty"`
 }
 
 // VerdictDoc declares the closed list of verdict labels the model may

@@ -4,6 +4,9 @@ A behavior is a versioned definition, stored as data, that tells the engine
 what to do on an event. Write it in YAML (`.yaml`/`.yml`) or JSON (`.json`)
 and manage it with the CLI:
 
+Report text follows the owner's report preferences and templates; it is not
+fixed by the behavior file.
+
 ```sh
 setup-notices behavior import my-behavior.yaml --vars my-values.yaml --workspace-id <uuid>
 setup-notices behavior validate my-behavior --workspace-id <uuid>

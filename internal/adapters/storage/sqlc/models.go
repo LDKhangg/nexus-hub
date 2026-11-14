@@ -8,6 +8,32 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+// Validated triage/investigation results of one agent batch, referenced by workflow checkpoints; written once per stage.
+type AgentBatchResult struct {
+	ID                int64
+	WorkspaceID       pgtype.UUID
+	AgentJobID        int64
+	ExecutionID       int64
+	Stage             string
+	Outcome           string
+	ThroughMessageID  int64
+	LastTriagedID     int64
+	MaxMessageID      int64
+	Category          string
+	Urgency           string
+	Confidence        float64
+	Summary           string
+	Goal              string
+	RouterNote        string
+	ToolsAvailable    bool
+	UnseenCount       int32
+	ReportText        string
+	ToolsLine         string
+	TotalInputTokens  int64
+	TotalOutputTokens int64
+	CreatedAt         pgtype.Timestamptz
+}
+
 type AgentJob struct {
 	ID                  int64
 	WorkspaceID         pgtype.UUID
@@ -27,6 +53,10 @@ type AgentJob struct {
 	CacheWriteTokens    int32
 	CreatedAt           pgtype.Timestamptz
 	UpdatedAt           pgtype.Timestamptz
+	// The workflow execution that owns this batch; NULL for a legacy-claimed job.
+	WorkflowExecutionID pgtype.Int8
+	// Deadline of the current attempt of a workflow-owned batch; NULL otherwise.
+	WorkflowAttemptDeadline pgtype.Timestamptz
 }
 
 type AppSetting struct {
@@ -72,6 +102,8 @@ type Behavior struct {
 	DraftSource string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
+	// Non-NULL for an internal built-in definition; such rows are immutable and hidden from the public behavior paths.
+	InternalKind pgtype.Text
 }
 
 // One batched engine Telegram message; identifiers only, never message text.
@@ -146,6 +178,8 @@ type BehaviorRun struct {
 	ContextSnapshot []byte
 	// Outcomes of the run-level actions: types, identifiers and codes only, never message text.
 	RunActions []byte
+	// Deadline of the current attempt of a run executed by durable workflow steps; NULL otherwise.
+	WorkflowAttemptDeadline pgtype.Timestamptz
 }
 
 // Published behavior versions are immutable; a trigger rejects UPDATE.
@@ -176,6 +210,29 @@ type ClickupChatPoll struct {
 	UpdatedAt              pgtype.Timestamptz
 }
 
+type Contact struct {
+	ID          pgtype.UUID
+	WorkspaceID pgtype.UUID
+	DisplayName pgtype.Text
+	Note        string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+type ContactAccount struct {
+	ID           pgtype.UUID
+	WorkspaceID  pgtype.UUID
+	ContactID    pgtype.UUID
+	Platform     string
+	ExternalID   string
+	PlatformName pgtype.Text
+	Username     pgtype.Text
+	Source       string
+	IsSelf       bool
+	FirstSeen    pgtype.Timestamptz
+	LastSeen     pgtype.Timestamptz
+}
+
 // AES-256-GCM ciphertext only; AAD binds workspace, name and kind. The master key lives outside the database.
 type Credential struct {
 	ID          pgtype.UUID
@@ -201,6 +258,44 @@ type DecisionMemory struct {
 	ItemID      pgtype.Int8
 	CreatedAt   pgtype.Timestamptz
 	ForgottenAt pgtype.Timestamptz
+}
+
+type ExecutionEvent struct {
+	ID               int64
+	WorkspaceID      pgtype.UUID
+	ExecutionID      int64
+	Sequence         int64
+	Kind             string
+	FromState        pgtype.Text
+	ToState          pgtype.Text
+	StepKey          pgtype.Text
+	Attempt          int32
+	ReasonCode       pgtype.Text
+	IdempotencyKey   pgtype.Text
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	CreatedAt        pgtype.Timestamptz
+}
+
+type ExecutionStep struct {
+	ID               int64
+	WorkspaceID      pgtype.UUID
+	ExecutionID      int64
+	StepKey          string
+	Position         int32
+	Kind             string
+	DependsOn        []string
+	State            string
+	Attempts         int32
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	Checkpoint       []byte
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
 }
 
 type HubThread struct {
@@ -232,6 +327,25 @@ type Integration struct {
 	IsEnabled            bool
 	CreatedAt            pgtype.Timestamptz
 	UpdatedAt            pgtype.Timestamptz
+}
+
+type Job struct {
+	ID               int64
+	WorkspaceID      pgtype.UUID
+	ExecutionID      int64
+	StepKey          string
+	Status           string
+	DueAt            pgtype.Timestamptz
+	Attempts         int32
+	MaxAttempts      int32
+	ClaimToken       pgtype.UUID
+	LeaseExpiresAt   pgtype.Timestamptz
+	LastErrorCode    pgtype.Text
+	DeadLetterReason pgtype.Text
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
+	// True while the pending job resumes a woken step within its current attempt; its claim does not count an attempt.
+	ContinuesAttempt bool
 }
 
 type MessageLog struct {
@@ -287,6 +401,42 @@ type OutboundAction struct {
 	CreatedAt         pgtype.Timestamptz
 	UpdatedAt         pgtype.Timestamptz
 	SentAt            pgtype.Timestamptz
+}
+
+type ReportPreference struct {
+	UserID        pgtype.UUID
+	WorkspaceID   pgtype.UUID
+	BehaviorName  pgtype.Text
+	Style         string
+	ShowReaction  bool
+	ShowAiSummary bool
+	ShowLinks     bool
+	ShowPrTitles  bool
+	ShowTraceHint bool
+	Language      pgtype.Text
+	CreatedAt     pgtype.Timestamptz
+	UpdatedAt     pgtype.Timestamptz
+}
+
+type ReportTemplate struct {
+	UserID       pgtype.UUID
+	WorkspaceID  pgtype.UUID
+	BehaviorName pgtype.Text
+	Kind         string
+	Body         string
+	UpdatedAt    pgtype.Timestamptz
+}
+
+type ReportTemplatePrompt struct {
+	ID           pgtype.UUID
+	UserID       pgtype.UUID
+	WorkspaceID  pgtype.UUID
+	MessageID    int64
+	BehaviorName pgtype.Text
+	Kind         string
+	PendingBody  pgtype.Text
+	ExpiresAt    pgtype.Timestamptz
+	CreatedAt    pgtype.Timestamptz
 }
 
 type RunItem struct {
@@ -367,6 +517,14 @@ type ToolRun struct {
 	CorrelationID pgtype.UUID
 }
 
+type User struct {
+	ID          pgtype.UUID
+	DisplayName string
+	Status      string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
 type UserProfile struct {
 	WorkspaceID      pgtype.UUID
 	Language         string
@@ -382,9 +540,79 @@ type UserProfile struct {
 	UpdatedAt    pgtype.Timestamptz
 }
 
+type WorkflowExecution struct {
+	ID                int64
+	WorkspaceID       pgtype.UUID
+	BehaviorVersionID int64
+	TriggerKey        string
+	CorrelationID     pgtype.UUID
+	State             string
+	ReasonCode        pgtype.Text
+	Definition        []byte
+	SourceKind        string
+	SourceID          string
+	Subject           string
+	Revision          string
+	OperationKey      string
+	LegacyRunID       pgtype.Int8
+	LegacyJobID       pgtype.Int8
+	ParentExecutionID pgtype.Int8
+	DeadlineAt        pgtype.Timestamptz
+	CancelledAt       pgtype.Timestamptz
+	StartedAt         pgtype.Timestamptz
+	FinishedAt        pgtype.Timestamptz
+	CreatedAt         pgtype.Timestamptz
+	UpdatedAt         pgtype.Timestamptz
+}
+
+// Runtime-mode fence per workspace: legacy claimers or the durable workflow queue schedule its agent and behavior work, never both.
+type WorkflowRuntimeMode struct {
+	WorkspaceID pgtype.UUID
+	Mode        string
+	CutoverAt   pgtype.Timestamptz
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+// One authorized decision per wait; consumed_at is set when the fenced continuation applied it.
+type WorkflowSignal struct {
+	ID            int64
+	WorkspaceID   pgtype.UUID
+	SignalID      string
+	ExecutionID   int64
+	StepKey       string
+	WaitID        int64
+	ReferenceKind string
+	ReferenceID   int64
+	Decision      string
+	ConsumedAt    pgtype.Timestamptz
+	CreatedAt     pgtype.Timestamptz
+}
+
+// A blocking approval or user-input wait of one execution step; only bound approvals change execution state.
+type WorkflowWait struct {
+	ID          int64
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+	StepKey     string
+	ApprovalID  int64
+	WaitKind    string
+	CreatedAt   pgtype.Timestamptz
+	// When the execution ended; a decision after it is recorded but never applied.
+	ClosedAt pgtype.Timestamptz
+}
+
 type Workspace struct {
 	ID          pgtype.UUID
 	DisplayName string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+type WorkspaceMember struct {
+	UserID      pgtype.UUID
+	WorkspaceID pgtype.UUID
+	Role        string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }

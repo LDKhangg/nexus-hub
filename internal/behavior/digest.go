@@ -3,9 +3,12 @@ package behavior
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
+
+	"github.com/LDKhangg/nexus-hub/internal/reporting"
 )
 
 // This file applies the profile's quiet hours and digest mode to the
@@ -252,7 +255,6 @@ func (e *Engine) flushBatch(ctx context.Context, b *DigestBatch) (bool, error) {
 	}
 	t := textsFor(p.Language)
 	var sb strings.Builder
-	sb.WriteString(t.batchHead(total) + "\n")
 	per := max(maxTelegramRunes/total-40, 60)
 	for _, sec := range sections {
 		head := t.digestHead()
@@ -261,11 +263,18 @@ func (e *Engine) flushBatch(ctx context.Context, b *DigestBatch) (bool, error) {
 		}
 		sb.WriteString("\n" + head + " (" + t.runRef(sec.rc.Doc.Name, sec.rc.Run.ID) + ")\n")
 		sb.WriteString(summaryLines(t, sec.items, sec.withStatus, per))
-		if link := RunLink(sec.rc); link != "" {
-			sb.WriteString(link + "\n")
-		}
 	}
-	msg := OutMessage{Text: capRunes(strings.TrimSpace(sb.String()), maxTelegramRunes)}
+	first := sections[0].rc
+	text, err := e.d.Reports.Render(ctx, reporting.Report{
+		Kind: reporting.KindDigest, WorkspaceID: ws, Language: p.Language,
+		Platform: "clickup", ExternalID: first.Trigger.SenderID,
+		Values: reporting.Values{Outcome: t.batchHead(total), Items: strings.TrimSpace(sb.String()), RunID: fmt.Sprint(b.ID)},
+	})
+	if err != nil {
+		e.releaseBatch(ctx, b, time.Time{})
+		return false, err
+	}
+	msg := OutMessage{Text: capRunes(text, maxTelegramRunes)}
 	if total == 1 {
 		sec := sections[0]
 		fb, err := e.ensureApproval(ctx, ws, NewApproval{
@@ -278,6 +287,7 @@ func (e *Engine) flushBatch(ctx context.Context, b *DigestBatch) (bool, error) {
 		}
 		msg.Buttons = [][]Button{e.feedbackRow(t, fb.Nonce)}
 	}
+	msg = e.withAliasButton(ctx, first, msg)
 	sctx, cancel := context.WithTimeout(ctx, e.s.RequestTimeout)
 	id, err := e.d.Messenger.SendMessage(sctx, b.Chat, msg)
 	cancel()

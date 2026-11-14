@@ -8,8 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -91,6 +93,15 @@ func initNotices(ctx context.Context, pool *pgxpool.Pool, args []string, out io.
 		_ = tx.Rollback(c)
 	}()
 	if _, err := tx.Exec(ctx, `INSERT INTO workspaces(id,display_name) VALUES($1,$2) ON CONFLICT(id) DO NOTHING`, workspace, *name); err != nil {
+		return errors.New("workspace setup failed")
+	}
+	// Give a new workspace its owner membership so owner-scoped settings
+	// (report preferences and templates) can be saved. Idempotent.
+	var workspaceKey pgtype.UUID
+	if err := workspaceKey.Scan(workspace); err != nil {
+		return errors.New("workspace setup failed")
+	}
+	if _, err := sqlc.New(tx).EnsureWorkspaceOwner(ctx, workspaceKey); err != nil {
 		return errors.New("workspace setup failed")
 	}
 	// Merge owned configuration fields only. Never select or overwrite credentials.

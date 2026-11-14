@@ -99,6 +99,11 @@ const (
 	// ApprovalFeedbackReason waits for the owner's optional free-text reason
 	// for a 👎.
 	ApprovalFeedbackReason ApprovalKind = "feedback_reason"
+	// ApprovalContactAlias waits for the owner's free-text name for an account.
+	ApprovalContactAlias ApprovalKind = "contact_alias"
+	// ApprovalAssistantAction is a write the Telegram assistant proposed;
+	// "Làm" runs it through the same handler as the slash command.
+	ApprovalAssistantAction ApprovalKind = "assistant_action"
 )
 
 // Decision is an approval's outcome.
@@ -217,12 +222,15 @@ type Run struct {
 	// RunActions holds the outcomes of the run's run-level actions
 	// (RunActionsResult); empty until the first one finished.
 	RunActions json.RawMessage
-	UndoneAt   *time.Time
-	RunAt      time.Time
-	StartedAt  *time.Time
-	FinishedAt *time.Time
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	// WorkflowAttemptDeadline is the deadline of the current attempt of a
+	// run executed as durable workflow steps; nil otherwise.
+	WorkflowAttemptDeadline *time.Time
+	UndoneAt                *time.Time
+	RunAt                   time.Time
+	StartedAt               *time.Time
+	FinishedAt              *time.Time
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
 }
 
 // Citation points at a source fragment.
@@ -309,6 +317,10 @@ type Approval struct {
 	// PendingAnswer is a staged free-text reply not yet handed on.
 	PendingAnswer string
 	CreatedAt     time.Time
+	// ExecutionID is the workflow execution whose step waits on this
+	// approval (set by Decide, ExpireDue and the wait store); 0 for an
+	// approval without a wait, decided on the legacy route.
+	ExecutionID int64
 }
 
 // InboundUpdate is a normalized Telegram update. Only a short command and

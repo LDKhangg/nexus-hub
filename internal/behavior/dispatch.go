@@ -16,6 +16,19 @@ type RunContext struct {
 	Trigger TriggerData
 	// Context is what the run read (empty when it failed before reading).
 	Context ContextSnapshot
+
+	// writes is the fenced write side of a run executed as durable
+	// workflow steps; nil writes under the legacy run claim.
+	writes runWrites
+	// lastAttempt marks the last allowed attempt of a durable run besides
+	// the run's own attempt count (see finalAttempt).
+	lastAttempt bool
+}
+
+// finalAttempt reports whether this is the run's last allowed attempt: a
+// transient failure is then final.
+func (rc RunContext) finalAttempt() bool {
+	return rc.lastAttempt || rc.Run.Attempts >= MaxRunAttempts
 }
 
 // Dispatcher hands a run's classified items to the action library. Items

@@ -19,6 +19,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/config"
 	httpdelivery "github.com/LDKhangg/nexus-hub/internal/delivery/http"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
+	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/secrets"
 	"github.com/LDKhangg/nexus-hub/internal/settings"
 	"github.com/google/uuid"
@@ -98,7 +99,8 @@ func run() error {
 	// inbox worker does the work. Behavior commands create pending runs;
 	// buttons, replies and /undo go to the action engine; /trace answers
 	// "not available" until it is wired.
-	telegramHandler := httpdelivery.NewTelegramHandler(integrations, resolver, behaviors, behaviors, s.OwnerTelegramChatID).WithOwnerUser(s.OwnerTelegramUserID)
+	reportSettings := reporting.NewPostgresStore(pool)
+	telegramHandler := httpdelivery.NewTelegramHandler(integrations, resolver, behaviors, behaviors, s.OwnerTelegramChatID, reportSettings).WithOwnerUser(s.OwnerTelegramUserID)
 	commands, err := behavior.NewCommandRunner(behaviors, behaviors)
 	if err != nil {
 		return errors.New("behavior command runner startup failed")
@@ -108,16 +110,51 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	inbox := behavior.NewInboxWorker(behavior.InboxDeps{
-		Inbox: behaviors, Approvals: behaviors, Defs: behaviors, Messenger: messenger,
-		Commands: commands, Undoer: engine, Callbacks: engine,
-		Tracer: &behavior.TraceService{Store: behaviors, Profiles: behaviors},
-	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
 	workspaces, err := storage.NewWorkspaceRepository(pool)
 	if err != nil {
 		return errors.New("workspace repository startup failed")
 	}
 	chatPoller := buildChatPoller(s, behaviors, workspaces, integrations, ag.known, resolver, messenger)
+	// The durable workflow runtime schedules cut-over workspaces; the legacy
+	// behavior run and agent job claimers keep running for workspaces still
+	// in legacy runtime mode (the runtime-mode fence keeps them apart). The
+	// outbound, digest, chat-poll and Telegram assistant workers are
+	// unchanged.
+	workflows, err := buildWorkflowRuntime(pool, s, ag, behaviors, runs, engine)
+	if err != nil {
+		return err
+	}
+	// The Telegram assistant keeps the owner's conversation in memory and
+	// uses the configured provider's tool-calling path. Workflow reads and
+	// commands share the durable runtime store; writes still require the
+	// existing Làm/Huỷ approval callback.
+	var assistant *behavior.Assistant
+	if s.TelegramAssistant {
+		assistant = &behavior.Assistant{
+			Models: ag.provider, Model: s.AssistantModel, Runs: behaviors, Inbox: behavior.NewAssistantInbox(),
+			Workflows: workflows.store, WorkflowCommands: workflows.commands, Redact: redactor.RedactSecrets,
+			Timeout: s.AssistantTimeout, RatePerMinute: int(s.AssistantRatePerMinute),
+		}
+		telegramHandler.WithAssistant(assistant.Inbox)
+	}
+	inbox := behavior.NewInboxWorker(behavior.InboxDeps{
+		Inbox: behaviors, Approvals: behaviors, Defs: behaviors, Messenger: messenger,
+		Commands: commands, Undoer: engine, Callbacks: engine,
+		Tracer:    &behavior.TraceService{Store: behaviors, Profiles: behaviors, People: ag.people},
+		People:    ag.people,
+		Reports:   reportSettings,
+		Assistant: assistant,
+	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
+	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows}
+	// Telegram updates arrive by webhook, or by long polling when the hub
+	// has no public URL (telegram_mode, see settings.TelegramPolling). Both
+	// paths end in the same handler.
+	if s.TelegramPolling() {
+		log.Print("telegram: receiving updates by long polling")
+		services = append(services, buildTelegramPoller(workspaces, integrations, resolver, telegramHandler))
+	} else {
+		log.Print("telegram: receiving updates by webhook")
+	}
 	handler := httpdelivery.NewWebhookHandler(integrations, httpdelivery.NewVerifiedParserFactory(resolver), relay.NewNoticeService(notices))
 	e := echo.New()
 	e.HideBanner = true
@@ -129,7 +166,7 @@ func run() error {
 	e.POST("/webhook/:source/:integrationID", handler.HandleWebhook)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runServices(ctx, e, []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller}, s.ListenAddr, shutdownTimeout)
+	return runServices(ctx, e, services, s.ListenAddr, shutdownTimeout)
 }
 
 type serviceWorker interface{ Run(context.Context) error }

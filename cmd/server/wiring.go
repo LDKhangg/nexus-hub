@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/control/telegram"
 	githubapi "github.com/LDKhangg/nexus-hub/internal/adapters/github"
@@ -23,12 +24,15 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/behavior/chatpoll"
+	httpdelivery "github.com/LDKhangg/nexus-hub/internal/delivery/http"
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/memory"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
+	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/secrets"
 	"github.com/LDKhangg/nexus-hub/internal/settings"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
+	"github.com/LDKhangg/nexus-hub/internal/workflow"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -38,6 +42,8 @@ type agentServices struct {
 	known        map[string]tenant.Tier
 	reg          *tools.Registry
 	limits       tools.Limits
+	people       *storage.PeopleRepository
+	store        *storage.AgentStore
 	// provider returns the workspace's default LLM provider.
 	provider func(ctx context.Context, ws string) (domain.LLMProvider, error)
 }
@@ -71,12 +77,16 @@ func resolveGit(configured string) (string, error) {
 // tools, such as memory_search). Code tools are skipped (with a warning)
 // when git is unavailable.
 func buildTools(s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, extra ...tools.Tool) (*tools.Registry, error) {
+	return buildToolsWithPeople(s, resolver, redactor, nil, extra...)
+}
+
+func buildToolsWithPeople(s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, directory *storage.PeopleRepository, extra ...tools.Tool) (*tools.Registry, error) {
 	apiClient := netguard.Client(s.ToolTimeout, netguard.DefaultHosts)
 	creds := githubapi.NewCredentials(apiClient, resolver, redactor, nil)
 	gh := githubapi.NewClient(apiClient, creds)
-	all := append([]tools.Tool{}, githubtools.NewReadTools(gh)...)
-	all = append(all, githubtools.NewWriteTools(gh, redactor)...)
-	all = append(all, githubtools.NewDangerousTools(gh, redactor)...)
+	all := append([]tools.Tool{}, githubtools.NewReadTools(gh, directory)...)
+	all = append(all, githubtools.NewWriteTools(gh, redactor, directory)...)
+	all = append(all, githubtools.NewDangerousTools(gh, redactor, directory)...)
 	all = append(all, clickuptools.NewTaskTool(apiClient, resolver))
 	// ClickUp writes of the behavior action library: tier write, not repo
 	// scoped, so agent jobs can never call them (no repo grant allows them).
@@ -84,7 +94,7 @@ func buildTools(s settings.Settings, resolver *secrets.Resolver, redactor *agent
 	// Run-level actions of the behavior engine (approve a pull request as
 	// the owner's pat account, react to a ClickUp Chat message). They are
 	// ActionOnly: offered and run only by the behavior action executor.
-	all = append(all, githubtools.NewApproveTool(gh))
+	all = append(all, githubtools.NewApproveTool(gh, directory))
 	all = append(all, clickuptools.NewChatReactionTool(apiClient, resolver, clickupchat.New(apiClient)))
 	// Undo of a run-level reaction (/undo), also ActionOnly.
 	all = append(all, clickuptools.NewChatReactionRemoveTool(apiClient, resolver, clickupchat.New(apiClient)))
@@ -101,7 +111,11 @@ func buildTools(s settings.Settings, resolver *secrets.Resolver, redactor *agent
 }
 
 func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, sender *telegram.Client, extra ...tools.Tool) (agentServices, error) {
-	reg, err := buildTools(s, resolver, redactor, extra...)
+	directory, err := storage.NewPeopleRepository(pool)
+	if err != nil {
+		return agentServices{}, errors.New("people directory startup failed")
+	}
+	reg, err := buildToolsWithPeople(s, resolver, redactor, directory, extra...)
 	if err != nil {
 		return agentServices{}, errors.New("tool registry startup failed")
 	}
@@ -158,7 +172,7 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
 	})
 	worker := relay.NewActionWorker(actions, sender, relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
-	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider}, nil
+	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, people: directory, store: store}, nil
 }
 
 // buildBehaviorEngine wires the behavior run executor and the action
@@ -184,6 +198,8 @@ func buildBehaviorEngine(pool *pgxpool.Pool, s settings.Settings, store *storage
 		Decisions: behavior.MemoryRecorder{Store: store},
 		Digests:   store,
 		Redactor:  redactor,
+		Reports:   reporting.NewRenderer(reporting.NewPostgresStore(pool), ag.people),
+		People:    ag.people,
 	}, behavior.ActionSettings{OwnerClickUpUserID: s.OwnerClickUpUserID, RequestTimeout: s.NoticeRequestTimeout})
 	if err != nil {
 		return nil, nil, errors.New("behavior action engine startup failed")
@@ -198,9 +214,10 @@ func buildBehaviorEngine(pool *pgxpool.Pool, s settings.Settings, store *storage
 		Notifier:       engine,
 		Redactor:       redactor,
 		ChatMessages:   &chatpoll.MessageReader{Chat: clickUpAPI, Secrets: resolver},
-		Comments:       &chatpoll.CommentReader{API: clickUpAPI, Secrets: resolver},
-		Members:        &chatpoll.MemberDirectory{API: clickUpAPI, Secrets: resolver},
-		ChannelMembers: &chatpoll.ChannelMemberDirectory{API: clickUpAPI, Secrets: resolver},
+		Comments:       &chatpoll.CommentReader{API: clickUpAPI, Secrets: resolver, People: ag.people},
+		Members:        &chatpoll.MemberDirectory{API: clickUpAPI, Secrets: resolver, People: ag.people},
+		ChannelMembers: &chatpoll.ChannelMemberDirectory{API: clickUpAPI, Secrets: resolver, People: ag.people},
+		People:         ag.people,
 	}, behavior.RunWorkerSettings{
 		Workers: int(s.BehaviorWorkers), PollInterval: s.BehaviorPollInterval,
 		DefaultModel: s.ActorModel, DefaultMaxTokens: int(s.BehaviorMaxTokens), MaxOutputTokens: int(s.MaxOutputTokens),
@@ -361,6 +378,195 @@ func (c chatPollTargets) workspaceTargets(ctx context.Context, workspaceID strin
 		}
 		if len(list) < chatPollPage {
 			return out, nil
+		}
+	}
+}
+
+// telegramPollTimeout is the HTTP timeout of getUpdates calls: longer than
+// the long-poll wait so an idle poll is never cut off.
+const telegramPollTimeout = telegram.DefaultPollTimeout + 20*time.Second
+
+// buildTelegramPoller wires Telegram long polling: every enabled Telegram
+// control integration, the bot token reference the messenger uses, a
+// Telegram client allowed only the API hosts, and the webhook's handler.
+func buildTelegramPoller(workspaces *storage.WorkspaceRepository, integrations *storage.IntegrationRepository, resolver *secrets.Resolver, handler *httpdelivery.TelegramHandler) *telegram.Poller {
+	api := telegram.NewClient(netguard.Client(telegramPollTimeout, netguard.DefaultHosts), resolver)
+	return telegram.NewPoller(telegramPollTargets{workspaces: workspaces, integrations: integrations}, api, handler, telegram.PollerSettings{})
+}
+
+// telegramPollTargets lists, across all workspaces, the enabled Telegram
+// control integrations with a valid bot token reference (the same check
+// as telegram.ControlTokenRef).
+type telegramPollTargets struct {
+	workspaces   *storage.WorkspaceRepository
+	integrations *storage.IntegrationRepository
+}
+
+func (c telegramPollTargets) TelegramPollTargets(ctx context.Context) ([]telegram.PollTarget, error) {
+	var out []telegram.PollTarget
+	for off := int32(0); ; off += chatPollPage {
+		wss, err := c.workspaces.List(ctx, chatPollPage, off)
+		if err != nil {
+			return nil, err
+		}
+		for _, ws := range wss {
+			for ioff := int32(0); ; ioff += chatPollPage {
+				list, err := c.integrations.List(ctx, ws.ID, chatPollPage, ioff)
+				if err != nil {
+					return nil, err
+				}
+				for _, in := range list {
+					if !telegramControl(in) {
+						continue
+					}
+					cfg, err := tenant.ParseTelegramTargetConfig(in.Config)
+					if err != nil {
+						continue
+					}
+					out = append(out, telegram.PollTarget{WorkspaceID: ws.ID, IntegrationID: in.ID, TokenRef: cfg.BotTokenRef})
+				}
+				if len(list) < chatPollPage {
+					break
+				}
+			}
+		}
+		if len(wss) < chatPollPage {
+			return out, nil
+		}
+	}
+}
+
+// --- durable workflow runtime ---
+
+// Durable workflow runtime tuning: how often the reconciler runs, and how
+// many runs, batches and orphan batches one starter pass handles per
+// cut-over workspace.
+const (
+	workflowReconcileInterval = 30 * time.Second
+	workflowStartBatch        = 20
+)
+
+// workflowRuntime is the durable workflow runtime of the server: the
+// generic job worker, the startup and periodic reconciler, and the starter
+// of cut-over workspaces (behavior runs created by the existing trigger
+// paths, due agent batches through StartDueBatches, and the release of
+// agent batches whose execution failed or was cancelled). The starters
+// create nothing for a workspace still in legacy runtime mode, whose work
+// the legacy claimers keep taking.
+type workflowRuntime struct {
+	store      *storage.WorkflowStore
+	commands   workflow.Engine
+	agents     *storage.AgentWorkflowStore
+	worker     *workflow.Worker
+	reconciler *workflow.Reconciler
+	orch       *agent.Orchestrator
+	pipeline   agent.PipelineSettings
+	interval   time.Duration
+}
+
+// buildWorkflowRuntime registers the behavior and agent step executors
+// (behavior approvals become durable waits) and builds the runtime.
+func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServices, behaviors *storage.BehaviorStore, runs *behavior.RunWorker, engine *behavior.Engine) (*workflowRuntime, error) {
+	store, err := storage.NewWorkflowStore(pool)
+	if err != nil {
+		return nil, errors.New("workflow store startup failed")
+	}
+	agents, err := storage.NewAgentWorkflowStore(ag.store, store)
+	if err != nil {
+		return nil, errors.New("agent workflow store startup failed")
+	}
+	reg := workflow.NewRegistry()
+	behaviorSteps, err := behavior.NewWorkflowSteps(runs, behaviors, store)
+	if err != nil {
+		return nil, errors.New("behavior workflow steps startup failed")
+	}
+	if err := behaviorSteps.EnableApprovalWaits(behaviors, engine); err != nil {
+		return nil, errors.New("behavior approval waits startup failed")
+	}
+	if err := behaviorSteps.Register(reg); err != nil {
+		return nil, errors.New("behavior workflow steps registration failed")
+	}
+	agentSteps, err := agent.NewWorkflowSteps(ag.orchestrator, agents, store)
+	if err != nil {
+		return nil, errors.New("agent workflow steps startup failed")
+	}
+	if err := agentSteps.Register(reg); err != nil {
+		return nil, errors.New("agent workflow steps registration failed")
+	}
+	// The behavior run executors plus one for the comment pipeline, which
+	// the legacy agent worker ran on its own.
+	worker := workflow.NewWorker(store, reg, nil, workflow.WorkerSettings{
+		Workers: int(s.BehaviorWorkers) + 1, PollInterval: s.BehaviorPollInterval,
+	})
+	return &workflowRuntime{
+		store: store, commands: workflow.NewEngine(store), agents: agents, worker: worker, reconciler: workflow.NewReconciler(store), orch: ag.orchestrator,
+		pipeline: agent.PipelineSettings{
+			Limits: ag.limits, AllowDangerous: s.AllowDangerous,
+			MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
+			DebounceWindow: s.DebounceWindow, DebounceMaxWait: s.DebounceMaxWait,
+		},
+		interval: s.BehaviorPollInterval,
+	}, nil
+}
+
+// Run reconciles once, then runs the worker, the starter and the periodic
+// reconciler until ctx ends. On shutdown it stops claiming and starting;
+// a step cut off mid-attempt writes nothing more, and its lease simply
+// expires for the next reconciliation (no lease is released early).
+func (r *workflowRuntime) Run(ctx context.Context) error {
+	r.reconcile(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = r.worker.Run(ctx)
+	}()
+	start := time.NewTicker(r.interval)
+	defer start.Stop()
+	reconcile := time.NewTicker(workflowReconcileInterval)
+	defer reconcile.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			<-done
+			return nil
+		case <-start.C:
+			r.startCutOver(ctx)
+		case <-reconcile.C:
+			r.reconcile(ctx)
+		}
+	}
+}
+
+// reconcile repairs expired leases, missing wakeups and lost signals. Only
+// a category is logged, never record contents.
+func (r *workflowRuntime) reconcile(ctx context.Context) {
+	if err := r.reconciler.Reconcile(ctx, time.Now()); err != nil && ctx.Err() == nil {
+		log.Print("workflow reconciler: some records were not repaired; retried on the next pass")
+	}
+}
+
+// startCutOver runs one starter pass over the cut-over workspaces.
+func (r *workflowRuntime) startCutOver(ctx context.Context) {
+	workspaces, err := r.store.WorkflowWorkspaces(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Print("workflow starter: cut-over workspaces not listed")
+		}
+		return
+	}
+	for _, ws := range workspaces {
+		if ctx.Err() != nil {
+			return
+		}
+		now := time.Now()
+		if _, err := r.store.StartPendingBehaviorRuns(ctx, ws, now, workflowStartBatch); err != nil && ctx.Err() == nil {
+			log.Printf("workflow starter: workspace %s behavior runs not started", ws)
+		}
+		if _, err := r.agents.StartDueBatches(ctx, ws, now, r.pipeline, workflowStartBatch); err != nil && ctx.Err() == nil {
+			log.Printf("workflow starter: workspace %s agent batches not started", ws)
+		}
+		if _, err := r.orch.ReleaseOrphanBatches(ctx, r.agents, ws, workflowStartBatch); err != nil && ctx.Err() == nil {
+			log.Printf("workflow starter: workspace %s orphan agent batches not released", ws)
 		}
 	}
 }

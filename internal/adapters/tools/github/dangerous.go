@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
+	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
 
@@ -33,9 +34,13 @@ func (t *dangerTool) Run(ctx context.Context, c tools.Call) (tools.ToolOutput, e
 
 // NewDangerousTools returns github_pr_merge, github_pr_close and
 // github_issue_close. They only run when dangerous tools are enabled.
-func NewDangerousTools(api API, s tools.Sanitizer) []tools.Tool {
+func NewDangerousTools(api API, s tools.Sanitizer, directories ...people.Resolver) []tools.Tool {
+	var directory people.Resolver
+	if len(directories) > 0 {
+		directory = directories[0]
+	}
 	mk := func(name, desc, props string, req []string, allowed []string, fn func(context.Context, *dangerTool, tools.Call, input) (tools.ToolOutput, error)) tools.Tool {
-		return &dangerTool{base: base{api: api, spec: tools.ToolSpec{Name: name, Description: desc, InputSchema: schema(props, req...), Tier: tenant.TierDangerous}}, san: s, allowed: allowed, run: fn}
+		return &dangerTool{base: base{api: api, people: directory, spec: tools.ToolSpec{Name: name, Description: desc, InputSchema: schema(props, req...), Tier: tenant.TierDangerous}}, san: s, allowed: allowed, run: fn}
 	}
 	comment := `,"comment":{"type":"string","maxLength":4000}`
 	return []tools.Tool{

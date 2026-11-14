@@ -96,7 +96,17 @@ type ValidateOption func(*validateEnv)
 type validateEnv struct {
 	// githubAccounts maps hub GitHub account names to their type; nil when
 	// the caller did not supply them.
-	githubAccounts map[string]string
+	githubAccounts       map[string]string
+	workflowCapabilities []string
+}
+
+// WithWorkflowCapabilities makes validation reject worker constraints that
+// the current in-process executor cannot satisfy.
+func WithWorkflowCapabilities(capabilities []string) ValidateOption {
+	return func(e *validateEnv) {
+		e.workflowCapabilities = make([]string, len(capabilities))
+		copy(e.workflowCapabilities, capabilities)
+	}
 }
 
 // WithGitHubAccounts makes validation check that every github.pr_approve
@@ -178,8 +188,11 @@ func Validate(doc Doc, vars map[string]string, allowedReads []string, opts ...Va
 // environment facts env holds when it is non-nil.
 func validate(doc Doc, vars map[string]string, allowed map[string]bool, env *validateEnv) FieldErrors {
 	c := &checker{env: env}
-	if doc.Schema != SchemaVersion {
-		c.add("schema", "must be %d", SchemaVersion)
+	if doc.Schema != LegacySchemaVersion && doc.Schema != SchemaVersion {
+		c.add("schema", "must be %d or %d", LegacySchemaVersion, SchemaVersion)
+	}
+	if doc.Schema == LegacySchemaVersion && doc.Workflow != nil {
+		c.add("workflow", "requires schema %d", SchemaVersion)
 	}
 	if !NameRe.MatchString(doc.Name) {
 		c.add("name", "must be 1-63 of a-z, 0-9, _ or -, starting with a letter or digit")
@@ -260,6 +273,19 @@ func validate(doc Doc, vars map[string]string, allowed map[string]bool, env *val
 			c.add("profile.tone", "must be at most 200 characters")
 		}
 	}
+	resolved := ResolvedDoc{Schema: doc.Schema, Reads: make([]ReadSpec, len(doc.Reads)), Instructions: doc.Instructions, Actions: map[Class][]ActionSpec{}, Workflow: doc.Workflow}
+	for class, actions := range doc.Actions {
+		if class == ActionsRun {
+			resolved.RunActions = make([]ActionSpec, len(actions))
+		} else {
+			resolved.Actions[Class(class)] = make([]ActionSpec, len(actions))
+		}
+	}
+	var capabilities []string
+	if env != nil {
+		capabilities = env.workflowCapabilities
+	}
+	c.errs = append(c.errs, validateWorkflow(resolved, capabilities)...)
 	return c.errs
 }
 

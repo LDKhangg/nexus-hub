@@ -12,6 +12,7 @@ import (
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
 	"github.com/LDKhangg/nexus-hub/internal/domain"
+	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/jackc/pgx/v5"
@@ -33,6 +34,7 @@ type NoticeRepository struct {
 	queries  *sqlc.Queries
 	newID    func() (string, error)
 	debounce DebounceSettings
+	people   *PeopleRepository
 
 	mu    sync.RWMutex
 	known map[string]tenant.Tier
@@ -48,7 +50,11 @@ func NewNoticeRepository(pool *pgxpool.Pool, newID func() (string, error), debou
 	if debounce.MaxWait <= 0 {
 		debounce.MaxWait = defaultDebounceMaxWait
 	}
-	return &NoticeRepository{pool: pool, queries: sqlc.New(pool), newID: newID, debounce: debounce}, nil
+	directory, err := NewPeopleRepository(pool)
+	if err != nil {
+		return nil, err
+	}
+	return &NoticeRepository{pool: pool, queries: sqlc.New(pool), newID: newID, debounce: debounce, people: directory}, nil
 }
 
 // SetKnownTools registers the tool tiers used to validate agent configs.
@@ -96,6 +102,18 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 		if e.WorkspaceID != events[0].WorkspaceID || e.IntegrationID != events[0].IntegrationID || e.Source != domain.SourceClickup || e.EventKey == "" || e.ExternalID == "" || e.ExternalMessageID == "" || e.OccurredAt.IsZero() {
 			return result, errors.New("invalid notice batch")
 		}
+	}
+	events = append([]domain.NormalizedEvent(nil), events...)
+	var sightings []people.Sighting
+	for i := range events {
+		e := &events[i]
+		if e.SenderID != "" {
+			sightings = append(sightings, people.Sighting{WorkspaceID: e.WorkspaceID, Platform: "clickup", ExternalID: e.SenderID, PlatformName: e.SenderName, Source: "auto", IsSelf: e.FromOwnBot, SeenAt: e.OccurredAt})
+		}
+		if assigneeID := e.Metadata["assignee_added"]; assigneeID != "" {
+			sightings = append(sightings, people.Sighting{WorkspaceID: e.WorkspaceID, Platform: "clickup", ExternalID: assigneeID, Source: "auto", SeenAt: e.OccurredAt})
+		}
+		e.SenderName = ""
 	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -219,7 +237,13 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 		}
 		result.Accepted++
 	}
-	return result, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return result, err
+	}
+	for _, sighting := range sightings {
+		_ = r.people.Sighting(ctx, sighting)
+	}
+	return result, nil
 }
 
 // agentEnabledAtIngest decides whether comments go to the agent. A source

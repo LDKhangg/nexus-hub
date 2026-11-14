@@ -12,6 +12,7 @@ import (
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/github"
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
+	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
 
@@ -52,8 +53,9 @@ var permsApprove = map[string]string{"pull_requests": "write"}
 // It is AccountScoped (no repo grant) and ActionOnly (only the behavior
 // engine's run-level action executor may run it).
 type approveTool struct {
-	api  API
-	spec tools.ToolSpec
+	api    API
+	spec   tools.ToolSpec
+	people people.Resolver
 }
 
 var (
@@ -65,8 +67,12 @@ var (
 // {"account":"<hub account name>","repo":"owner/name","number":<n>}.
 // Its output names the pull request, the outcome and the review id:
 // "pr=owner/name#n outcome=approved|already_approved review_id=<id>".
-func NewApproveTool(api API) tools.Tool {
-	return &approveTool{api: api, spec: tools.ToolSpec{
+func NewApproveTool(api API, directories ...people.Resolver) tools.Tool {
+	var directory people.Resolver
+	if len(directories) > 0 {
+		directory = directories[0]
+	}
+	return &approveTool{api: api, people: directory, spec: tools.ToolSpec{
 		Name: ToolPRApprove,
 		Description: "Approve an open pull request as the named hub GitHub account (type pat), with no review text. " +
 			"Does nothing when that account's latest review is already an approval.",
@@ -141,6 +147,9 @@ func (t *approveTool) Run(ctx context.Context, c tools.Call) (tools.ToolOutput, 
 	var p pull
 	if err := t.do(ctx, c, in.Repo, "GET", fmt.Sprintf("/repos/%s/pulls/%d", in.Repo, n), nil, &p, false); err != nil {
 		return tools.ToolOutput{}, err
+	}
+	if t.people != nil && p.User.Login != "" {
+		_ = t.people.Sighting(ctx, people.Sighting{WorkspaceID: c.WorkspaceID, Platform: "github", ExternalID: p.User.Login, Username: p.User.Login, Source: "auto", IsSelf: strings.EqualFold(login, p.User.Login)})
 	}
 	if p.State != "open" || p.Merged {
 		return tools.ToolOutput{}, toolErr(CodePRClosed)

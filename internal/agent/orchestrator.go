@@ -209,10 +209,10 @@ func (o *Orchestrator) run(ctx context.Context, job *AgentJob, jc JobContext, pa
 		threshold = tenant.DefaultConfidenceThreshold
 	}
 	outcome := Route(d, RoutingPolicy{Threshold: threshold, ToolsAvailable: toolsAvailable})
-	res := JobResult{Outcome: outcome, ThroughMessageID: through, RouterNote: o.clean(fmt.Sprintf("%s · %s · %.2f → %s: %s", d.Category, urgency(d), d.Confidence, outcome, d.Summary))}
+	res := JobResult{Outcome: outcome, ThroughMessageID: through, RouterNote: o.routerNote(d, outcome)}
 	switch outcome {
 	case OutcomeNotify:
-		res.Text = o.clean(fmt.Sprintf("🧠 Nexus · %s\n%s · %s\n%s", jc.Title, urgency(d), d.Summary, jc.TaskURL))
+		res.Text = o.notifyText(jc, d)
 	case OutcomeInvestigate:
 		budget := TokenBudget{MaxInput: o.settings.MaxInputTokens, MaxOutput: o.settings.MaxOutputTokens, Used: total}
 		if budget.exhausted() {
@@ -227,19 +227,40 @@ func (o *Orchestrator) run(ctx context.Context, job *AgentJob, jc JobContext, pa
 			return err
 		}
 		res.ActorNote = o.clean(report.Text)
-		res.Text = o.clean(fmt.Sprintf("🔎 Nexus · %s\n%s · %s\n\n%s\n\nTools: %s\nTokens: %d/%d\n%s",
-			jc.Title, urgency(d), d.Summary, report.Text, toolsLine(report.Calls), total.Input+total.CacheRead+total.CacheWrite, total.Output, jc.TaskURL))
+		res.Text = o.investigateText(jc, d, report.Text, toolsLine(report.Calls), total.Input+total.CacheRead+total.CacheWrite, total.Output)
 	}
-	if n := unseenComments(jc, packet); n > 0 {
-		note := fmt.Sprintf("(+%d earlier comment(s) in this batch were not shown to the AI; see the task)", n)
-		if res.Text == "" {
-			// An Ignore must not silently cover comments the AI never saw.
-			res.Text = o.clean(fmt.Sprintf("🧠 Nexus · %s\nAI ignored the comments it saw.\n%s\n%s", jc.Title, note, jc.TaskURL))
-		} else {
-			res.Text = o.clean(res.Text + "\n" + note)
-		}
-	}
+	res.Text = o.withUnseenNote(jc, res.Text, unseenComments(jc, packet))
 	return o.store.CommitOutcome(ctx, *job, res)
+}
+
+// routerNote is the stored Tier-1 note of a routed decision.
+func (o *Orchestrator) routerNote(d TriageDecision, outcome Outcome) string {
+	return o.clean(fmt.Sprintf("%s · %s · %.2f → %s: %s", d.Category, urgency(d), d.Confidence, outcome, d.Summary))
+}
+
+// notifyText is the Telegram report of a Notify outcome.
+func (o *Orchestrator) notifyText(jc JobContext, d TriageDecision) string {
+	return o.clean(fmt.Sprintf("🧠 Nexus · %s\n%s · %s\n%s", jc.Title, urgency(d), d.Summary, jc.TaskURL))
+}
+
+// investigateText is the Telegram report of an Investigate outcome. tokensIn
+// counts input, cache-read and cache-write tokens of the whole job.
+func (o *Orchestrator) investigateText(jc JobContext, d TriageDecision, reportText, tools string, tokensIn, tokensOut int64) string {
+	return o.clean(fmt.Sprintf("🔎 Nexus · %s\n%s · %s\n\n%s\n\nTools: %s\nTokens: %d/%d\n%s",
+		jc.Title, urgency(d), d.Summary, reportText, tools, tokensIn, tokensOut, jc.TaskURL))
+}
+
+// withUnseenNote adds the note about n batch comments the AI did not see.
+// An Ignore (empty text) must not silently cover them.
+func (o *Orchestrator) withUnseenNote(jc JobContext, text string, n int) string {
+	if n <= 0 {
+		return text
+	}
+	note := fmt.Sprintf("(+%d earlier comment(s) in this batch were not shown to the AI; see the task)", n)
+	if text == "" {
+		return o.clean(fmt.Sprintf("🧠 Nexus · %s\nAI ignored the comments it saw.\n%s\n%s", jc.Title, note, jc.TaskURL))
+	}
+	return o.clean(text + "\n" + note)
 }
 
 // unseenComments counts untriaged external comments that the packet's batch

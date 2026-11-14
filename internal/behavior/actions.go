@@ -15,7 +15,9 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/agent"
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
 	"github.com/LDKhangg/nexus-hub/internal/descblock"
+	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
+	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
 
@@ -169,6 +171,10 @@ type ActionDeps struct {
 	// mode; nil sends them at once.
 	Digests  DigestStore
 	Redactor *agent.Redactor
+	// Reports is the single preference-aware renderer for every owner report.
+	// Nil uses owner defaults and platform/id contact fallbacks.
+	Reports *reporting.Renderer
+	People  people.Directory
 }
 
 // ActionSettings tune the action library.
@@ -205,6 +211,9 @@ func NewEngine(d ActionDeps, s ActionSettings) (*Engine, error) {
 	}
 	if d.Redactor == nil {
 		d.Redactor = agent.NewRedactor(nil)
+	}
+	if d.Reports == nil {
+		d.Reports = reporting.NewRenderer(nil, nil)
 	}
 	if s.SweepInterval <= 0 {
 		s.SweepInterval = time.Minute
@@ -662,6 +671,10 @@ func (e *Engine) execute(ctx context.Context, rc RunContext, env writeEnv, chat 
 			}
 			checked, outside = true, h
 		}
+		// A durable step re-checks its workflow claim before each write.
+		if err := authorizeAction(ctx); err != nil {
+			return "", nil, err
+		}
 		var out tools.CallResult
 		switch a.Type {
 		case ActionClickUpComment:
@@ -761,6 +774,9 @@ func (e *Engine) planChange(ctx context.Context, rc RunContext, env writeEnv, i 
 // requestConfirm creates the item's confirm_action approval (one per item,
 // listing every change) and sends it with "Xác nhận" / "Huỷ".
 func (e *Engine) requestConfirm(ctx context.Context, rc RunContext, env writeEnv, chat ChatRef, it Item, changes []change) error {
+	if err := authorizeAction(ctx); err != nil {
+		return err
+	}
 	payload, _ := json.Marshal(confirmPayload{TaskID: env.taskID, Changes: changes})
 	types := make([]string, 0, len(changes))
 	for _, c := range changes {
@@ -901,7 +917,14 @@ func (e *Engine) ensureApproval(ctx context.Context, ws string, na NewApproval, 
 	if len(na.Options) == 0 {
 		na.Options = json.RawMessage(`[]`)
 	}
-	a, err := e.d.Store.CreateApproval(ctx, ws, na)
+	// A durable step binds a blocking approval to itself in the same
+	// transaction that creates it; every other approval has no wait.
+	var a Approval
+	if bind := approvalBinderFrom(ctx); bind != nil && blockingApproval(na.Kind) {
+		a, err = bind(ctx, na)
+	} else {
+		a, err = e.d.Store.CreateApproval(ctx, ws, na)
+	}
 	if errors.Is(err, ErrConflict) {
 		if a, ok, ferr := find(); ferr != nil || ok {
 			return a, ferr
@@ -934,6 +957,9 @@ func (e *Engine) feedbackRow(t texts, nonce string) []Button {
 // the message ID (0 when an earlier send's outcome is unknown).
 func (e *Engine) sendOnce(ctx context.Context, run Run, key string, chat ChatRef, m OutMessage) (int64, error) {
 	ws, runID := run.WorkspaceID, run.ID
+	if err := authorizeAction(ctx); err != nil {
+		return 0, err
+	}
 	claimed, id, err := e.d.Store.ClaimMessage(ctx, ws, runID, key)
 	if err != nil || !claimed {
 		return id, err
@@ -1066,18 +1092,25 @@ func (e *Engine) summary(ctx context.Context, rc RunContext, chat ChatRef, key, 
 		return nil
 	}
 	t := textsFor(rc.Doc.Language)
-	var b strings.Builder
-	b.WriteString(head + " (" + t.runRef(rc.Doc.Name, rc.Run.ID) + ")\n")
-	link := RunLink(rc)
-	budget := maxTelegramRunes
-	if link != "" {
-		budget -= len(link) + 1
+	kind := reporting.KindNotify
+	if key == DigestKeyFYI {
+		kind = reporting.KindFYI
 	}
-	b.WriteString(summaryLines(t, items, withStatus, max(budget/len(items)-40, 60)))
-	text := capRunes(strings.TrimSpace(b.String()), budget)
-	if link != "" {
-		text += "\n" + link
+	if rc.Trigger.Mentioned {
+		kind = reporting.KindMention
 	}
+	text, err := e.d.Reports.Render(ctx, reporting.Report{
+		Kind: kind, WorkspaceID: rc.Run.WorkspaceID,
+		Behavior: rc.Run.BehaviorName, Language: rc.Doc.Language, Platform: "clickup", ExternalID: rc.Trigger.SenderID,
+		Values: reporting.Values{
+			Items: head + "\n" + strings.TrimSpace(summaryLines(t, items, withStatus, max(maxTelegramRunes/len(items)-40, 60))),
+			Link:  RunLink(rc), Behavior: rc.Doc.Name, RunID: fmt.Sprint(rc.Run.ID), Channel: rc.Trigger.ChannelName,
+		}, TraceHint: fmt.Sprintf("/trace %d", rc.Run.ID),
+	})
+	if err != nil {
+		return err
+	}
+	text = capRunes(text, maxTelegramRunes)
 	msg := OutMessage{Text: text}
 	if len(items) == 1 {
 		fb, err := e.ensureApproval(ctx, rc.Run.WorkspaceID, NewApproval{
@@ -1089,7 +1122,8 @@ func (e *Engine) summary(ctx context.Context, rc RunContext, chat ChatRef, key, 
 		}
 		msg.Buttons = [][]Button{e.feedbackRow(t, fb.Nonce)}
 	}
-	_, err := e.sendOnce(ctx, rc.Run, key, chat, msg)
+	msg = e.withAliasButton(ctx, rc, msg)
+	_, err = e.sendOnce(ctx, rc.Run, key, chat, msg)
 	return err
 }
 
@@ -1143,6 +1177,13 @@ func (e *Engine) Dispatch(ctx context.Context, rc RunContext, items []Item) erro
 	t := textsFor(rc.Doc.Language)
 	var autos, notifies []Item
 	for _, it := range items {
+		// Only a drafted item is written or sent; a durable step re-checks
+		// its workflow claim before each one.
+		if it.Status == ItemDrafted {
+			if err := authorizeAction(ctx); err != nil {
+				return err
+			}
+		}
 		switch it.Class {
 		case ClassAuto:
 			if rc.Doc.DryRun {
@@ -1179,6 +1220,9 @@ func (e *Engine) Dispatch(ctx context.Context, rc RunContext, items []Item) erro
 		}
 	}
 	// Digest and FYI follow the profile's quiet hours and digest mode.
+	if err := authorizeAction(ctx); err != nil {
+		return err
+	}
 	if err := e.inform(ctx, rc, chat, DigestKeyNotify, t.digestHead(), notifies, false); err != nil {
 		return err
 	}
@@ -1225,7 +1269,37 @@ func (e *Engine) RunFailed(ctx context.Context, rc RunContext, code string) erro
 	if !codeRe.MatchString(code) {
 		code = "failed"
 	}
-	t := textsFor(rc.Doc.Language)
-	_, err = e.sendOnce(ctx, rc.Run, "failed", chat, OutMessage{Text: t.runFailed(name, rc.Run.ID, code)})
+	text, renderErr := e.d.Reports.Render(ctx, reporting.Report{
+		Kind: reporting.KindFailure, WorkspaceID: rc.Run.WorkspaceID,
+		Behavior: rc.Run.BehaviorName, Language: rc.Doc.Language, Platform: "clickup", ExternalID: rc.Trigger.SenderID,
+		Values:    reporting.Values{Reason: code, Behavior: name, RunID: fmt.Sprint(rc.Run.ID)},
+		TraceHint: fmt.Sprintf("/trace %d", rc.Run.ID),
+	})
+	if renderErr != nil {
+		return renderErr
+	}
+	_, err = e.sendOnce(ctx, rc.Run, "failed", chat, e.withAliasButton(ctx, rc, OutMessage{Text: text}))
 	return err
+}
+
+func (e *Engine) withAliasButton(ctx context.Context, rc RunContext, msg OutMessage) OutMessage {
+	if e.d.People == nil || rc.Trigger.SenderID == "" {
+		return msg
+	}
+	has, err := e.d.People.HasAlias(ctx, rc.Run.WorkspaceID, "clickup", rc.Trigger.SenderID)
+	if err != nil || has {
+		return msg
+	}
+	ap, err := e.ensureApproval(ctx, rc.Run.WorkspaceID, NewApproval{
+		Kind: ApprovalContactAlias, RunID: rc.Run.ID, Action: "contact_alias",
+		Resource: "clickup:" + rc.Trigger.SenderID, ExpiresAt: e.expiry(rc.Doc),
+	}, true)
+	if err != nil {
+		return msg
+	}
+	row := e.buttons(ap.Nonce, Button{Text: "Đặt tên"}, CallbackFreeText)
+	if len(row) > 0 {
+		msg.Buttons = append(msg.Buttons, row)
+	}
+	return msg
 }

@@ -3,6 +3,8 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -194,9 +196,52 @@ func (c *Client) DeleteWebhook(ctx context.Context, workspaceID, tokenRef string
 	return c.do(ctx, token, "deleteWebhook", map[string]any{"drop_pending_updates": false}, nil)
 }
 
+// maxUpdatesBytes bounds one getUpdates response (up to 100 updates).
+const maxUpdatesBytes = 8 << 20
+
+// GetUpdates long-polls getUpdates for the bot of tokenRef: updates with
+// update_id >= offset (offset 0: every unconfirmed update), waiting up to
+// timeoutSec seconds. Each update is returned raw. A call with offset
+// confirms every update below it. The HTTP client's timeout must exceed
+// timeoutSec. Errors are *relay.DeliveryError; "conflict" means a webhook
+// is set (or another poller runs).
+func (c *Client) GetUpdates(ctx context.Context, workspaceID, tokenRef string, offset int64, timeoutSec int, allowedUpdates []string) ([]json.RawMessage, error) {
+	token, err := c.token(ctx, workspaceID, tokenRef)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{"timeout": timeoutSec, "limit": 100, "allowed_updates": allowedUpdates}
+	if offset > 0 {
+		payload["offset"] = offset
+	}
+	var updates []json.RawMessage
+	if err := c.doLimit(ctx, token, "getUpdates", payload, &updates, maxUpdatesBytes); err != nil {
+		return nil, err
+	}
+	return updates, nil
+}
+
+// BotFingerprint returns a one-way digest of the bot token of tokenRef, so
+// two integrations of the same bot can be told apart without keeping or
+// logging the token.
+func (c *Client) BotFingerprint(ctx context.Context, workspaceID, tokenRef string) (string, error) {
+	token, err := c.token(ctx, workspaceID, tokenRef)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // do posts one Bot API method. Errors are *relay.DeliveryError with a safe
 // code; the token and the provider's text never appear in them.
 func (c *Client) do(ctx context.Context, token, method string, payload any, result any) error {
+	return c.doLimit(ctx, token, method, payload, result, 64<<10)
+}
+
+// doLimit is do with a response size limit. HTTP 409 on getUpdates (a
+// webhook is set, or another getUpdates poller) is the code "conflict".
+func (c *Client) doLimit(ctx context.Context, token, method string, payload any, result any, limit int64) error {
 	fail := func(code string, retry bool, after time.Duration) error {
 		return &relay.DeliveryError{Code: code, Retryable: retry, RetryAfter: after}
 	}
@@ -222,7 +267,7 @@ func (c *Client) do(ctx context.Context, token, method string, payload any, resu
 			RetryAfter int64 `json:"retry_after"`
 		} `json:"parameters"`
 	}
-	decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&envelope)
+	decodeErr := json.NewDecoder(io.LimitReader(resp.Body, limit)).Decode(&envelope)
 	code := resp.StatusCode
 	if envelope.ErrorCode != 0 {
 		code = envelope.ErrorCode
@@ -236,6 +281,8 @@ func (c *Client) do(ctx context.Context, token, method string, payload any, resu
 		return fail("rate_limited", true, after)
 	case code >= 500:
 		return fail("server", true, 0)
+	case code == http.StatusConflict && method == "getUpdates":
+		return fail("conflict", true, 0)
 	case code < 200 || code >= 300:
 		return fail("rejected", false, 0)
 	case decodeErr != nil:

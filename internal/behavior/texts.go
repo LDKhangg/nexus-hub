@@ -73,10 +73,13 @@ func (t texts) changeUnassign(task, user string) string {
 }
 
 // Replies and toasts.
-func (t texts) posted() string        { return t.pick("Đã đăng.", "Posted.") }
-func (t texts) answered() string      { return t.pick("Đã ghi câu trả lời.", "Answer recorded.") }
-func (t texts) skipped() string       { return t.pick("Đã bỏ qua.", "Skipped.") }
-func (t texts) canceled() string      { return t.pick("Đã huỷ.", "Canceled.") }
+func (t texts) posted() string   { return t.pick("Đã đăng.", "Posted.") }
+func (t texts) answered() string { return t.pick("Đã ghi câu trả lời.", "Answer recorded.") }
+func (t texts) skipped() string  { return t.pick("Đã bỏ qua.", "Skipped.") }
+func (t texts) canceled() string { return t.pick("Đã huỷ.", "Canceled.") }
+func (t texts) decisionRecorded() string {
+	return t.pick("Đã ghi nhận quyết định; Nexus sẽ thực hiện.", "Decision recorded; Nexus will apply it.")
+}
 func (t texts) thanks() string        { return t.pick("Đã ghi nhận.", "Noted.") }
 func (t texts) notApplicable() string { return t.pick("Không áp dụng.", "Not applicable.") }
 func (t texts) replyPrompt() string {
@@ -236,13 +239,16 @@ func (t texts) gateUnavailableLine(action, code string) string {
 		fmt.Sprintf("%s not run: AI gave no verdict (%s)", action, code))
 }
 
-// capRunes clips s to n runes with an ellipsis.
+// capRunes clips s to at most n runes, the ellipsis included.
 func capRunes(s string, n int) string {
 	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
+	if n <= 0 {
+		return ""
+	}
 	r := []rune(s)
-	return string(r[:n]) + "…"
+	return string(r[:n-1]) + "…"
 }
 
 // maxTelegramRunes keeps a message under Telegram's 4096-character limit.

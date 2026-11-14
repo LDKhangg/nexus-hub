@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
+	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
 
@@ -19,8 +20,12 @@ type commentTool struct {
 }
 
 // NewWriteTools returns github_pr_comment.
-func NewWriteTools(api API, s tools.Sanitizer) []tools.Tool {
-	return []tools.Tool{&commentTool{base: base{api: api, spec: tools.ToolSpec{
+func NewWriteTools(api API, s tools.Sanitizer, directories ...people.Resolver) []tools.Tool {
+	var directory people.Resolver
+	if len(directories) > 0 {
+		directory = directories[0]
+	}
+	return []tools.Tool{&commentTool{base: base{api: api, people: directory, spec: tools.ToolSpec{
 		Name:        "github_pr_comment",
 		Description: "Post a comment on a pull request or issue. Mentions are neutralized and the comment is marked as written by the bot.",
 		InputSchema: schema(`,"body":{"type":"string","maxLength":4000}`, "body"),
