@@ -696,10 +696,14 @@ resume workflow 42                 → asks first: "Làm" / "Huỷ"
 
 Reads answer at once. Changes (a contact name, report style, or workflow
 cancel/resume/retry) only run after you press **Làm**; **Huỷ** leaves them
-unchanged. Long answers are sent as ordered messages below Telegram's size
-limit. Recent conversation (up to 20 exchanges with a bounded text budget) is
-kept only in memory and is forgotten when Nexus restarts. Messages, prompts,
-tool inputs/results and answers are never logged.
+unchanged. A confirmed workflow change remains safely retryable from the same
+button after a temporary failure, but only until that confirmation expires;
+resume confirmations are pinned to the wait shown when they were proposed.
+Long answers are sent as ordered messages below Telegram's size limit. Recent
+conversation (up to 20 exchanges with a 64 KiB transmitted-history budget) is
+kept separately per workspace and chat, only in memory, and is forgotten when
+Nexus restarts. Messages, prompts, tool inputs/results and answers are never
+logged.
 
 The defaults are model `claude-opus-5-5`, a 180-second turn timeout and 30
 owner messages per chat per minute. Configure them with

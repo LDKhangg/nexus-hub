@@ -169,6 +169,10 @@ type Command struct {
 	WorkspaceID string
 
 	ExecutionID int64
+	// WaitID pins a resume authorization to one wait generation. Zero keeps
+	// the generic operator behavior for callers that did not approve a
+	// particular wait.
+	WaitID int64
 
 	IdempotencyKey string
 }

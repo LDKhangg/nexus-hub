@@ -12,7 +12,7 @@ import (
 )
 
 // The assistant's chat history: the owner's recent questions and the
-// assistant's final answers, per chat, in memory only. It is never stored,
+// assistant's final answers, per workspace and chat, in memory only. It is never stored,
 // never logged and is lost on restart. Tool calls and tool results are not
 // kept (the answers already carry what the owner saw). When a cap is hit
 // the oldest exchanges are dropped; a short, bounded digest of the dropped
@@ -20,9 +20,10 @@ import (
 
 const (
 	// assistantHistoryTurns is the number of exchanges (owner message plus
-	// answer) kept per chat.
+	// answer) kept per workspace and chat.
 	assistantHistoryTurns = 20
-	// assistantHistoryBytes bounds the kept text of one chat.
+	// assistantHistoryBytes bounds the transmitted history of one workspace/chat,
+	// including digest formatting.
 	assistantHistoryBytes = 64 << 10
 	// assistantHistoryAnswerRunes bounds one kept answer.
 	assistantHistoryAnswerRunes = 12000
@@ -43,7 +44,7 @@ type assistantExchange struct {
 
 func (e assistantExchange) size() int { return len(e.question) + len(e.answer) }
 
-// assistantHistory is one chat's bounded history.
+// assistantHistory is one workspace/chat's bounded history.
 type assistantHistory struct {
 	mu        sync.Mutex
 	exchanges []assistantExchange
@@ -51,17 +52,23 @@ type assistantHistory struct {
 	digest    []string // short excerpts of the newest dropped questions
 }
 
-// chatHistory returns the chat's history, creating it.
-func (a *Assistant) chatHistory(chatID int64) *assistantHistory {
+type assistantHistoryKey struct {
+	workspaceID string
+	chatID      int64
+}
+
+// chatHistory returns the workspace/chat history, creating it.
+func (a *Assistant) chatHistory(workspaceID string, chatID int64) *assistantHistory {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.history == nil {
-		a.history = map[int64]*assistantHistory{}
+		a.history = map[assistantHistoryKey]*assistantHistory{}
 	}
-	h := a.history[chatID]
+	key := assistantHistoryKey{workspaceID: workspaceID, chatID: chatID}
+	h := a.history[key]
 	if h == nil {
 		h = &assistantHistory{}
-		a.history[chatID] = h
+		a.history[key] = h
 	}
 	return h
 }
@@ -71,20 +78,60 @@ func (h *assistantHistory) add(question, answer string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.exchanges = append(h.exchanges, assistantExchange{question: question, answer: capRunes(answer, assistantHistoryAnswerRunes)})
-	total := 0
-	for _, e := range h.exchanges {
-		total += e.size()
-	}
-	for len(h.exchanges) > 1 && (len(h.exchanges) > assistantHistoryTurns || total > assistantHistoryBytes) {
+	for len(h.exchanges) > assistantHistoryTurns || (len(h.exchanges) > 1 && h.messageBytes() > assistantHistoryBytes) {
 		old := h.exchanges[0]
 		h.exchanges = h.exchanges[1:]
-		total -= old.size()
 		h.dropped++
 		h.digest = append(h.digest, oneLine(old.question, assistantDigestRunes))
 		if len(h.digest) > assistantDigestItems {
 			h.digest = h.digest[len(h.digest)-assistantDigestItems:]
 		}
 	}
+	if len(h.exchanges) == 1 {
+		prefix := ""
+		if h.dropped > 0 {
+			prefix = h.digestNote()
+		}
+		budget := max(assistantHistoryBytes-len(prefix), 0)
+		h.exchanges[0] = fitAssistantExchange(h.exchanges[0], budget)
+	}
+}
+
+func (h *assistantHistory) messageBytes() int {
+	total := 0
+	for _, e := range h.exchanges {
+		total += e.size()
+	}
+	if h.dropped > 0 && len(h.exchanges) > 0 {
+		total += len(h.digestNote())
+	}
+	return total
+}
+
+func fitAssistantExchange(e assistantExchange, budget int) assistantExchange {
+	if e.size() <= budget {
+		return e
+	}
+	qLimit := min(len(e.question), budget/2)
+	aLimit := min(len(e.answer), budget-qLimit)
+	qLimit = min(len(e.question), budget-aLimit)
+	return assistantExchange{
+		question: truncateAssistantBytes(e.question, qLimit),
+		answer:   truncateAssistantBytes(e.answer, aLimit),
+	}
+}
+
+func truncateAssistantBytes(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(s) <= limit {
+		return s
+	}
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return s[:limit]
 }
 
 // messages returns the history as alternating user/assistant messages,

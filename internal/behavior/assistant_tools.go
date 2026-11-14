@@ -664,6 +664,12 @@ func (w *InboxWorker) toolPropose(ctx context.Context, tt *assistantToolTurn, na
 			if !d.State.IsWaiting() {
 				return fmt.Sprintf("Execution %d is not waiting (%s); there is nothing to resume.", id, d.State), true
 			}
+			for _, wait := range d.Waits {
+				p.WaitID = max(p.WaitID, wait.ID)
+			}
+			if p.WaitID <= 0 {
+				return fmt.Sprintf("Execution %d has no waiting generation to resume.", id), true
+			}
 			text = "Tiếp tục " + label + "?"
 		case toolWorkflowRetry:
 			if d.State != workflow.StateFailed {
@@ -674,7 +680,16 @@ func (w *InboxWorker) toolPropose(ctx context.Context, tt *assistantToolTurn, na
 			}
 			text = "Thử lại " + label + " bằng một execution mới? Hành động đã biết sẽ không bị gửi lại."
 		}
-		action, p = name, assistantPayload{ExecutionID: id}
+		action = name
+		p.ExecutionID = id
+		switch name {
+		case toolWorkflowCancel:
+			p.IdempotencyKey = fmt.Sprintf("telegram:cancel:%s:%d", tt.u.WorkspaceID, id)
+		case toolWorkflowResume:
+			p.IdempotencyKey = fmt.Sprintf("telegram:resume:%s:%d:wait:%d", tt.u.WorkspaceID, id, p.WaitID)
+		case toolWorkflowRetry:
+			p.IdempotencyKey = fmt.Sprintf("telegram:retry:%s:%d", tt.u.WorkspaceID, id)
+		}
 	default:
 		return "Unknown tool.", true
 	}
@@ -695,10 +710,14 @@ func (w *InboxWorker) toolPropose(ctx context.Context, tt *assistantToolTurn, na
 // returns the owner's reply and an update code ("" when it took effect or
 // had already taken effect). Idempotency keys follow plan §3.3 like the
 // CLI's, with their own "telegram:" source.
-func (w *InboxWorker) workflowCommand(ctx context.Context, ws, action string, id int64) (string, string) {
+func (w *InboxWorker) workflowCommand(ctx context.Context, ws, action string, p assistantPayload) (string, string) {
 	a := w.d.Assistant
 	if a == nil || a.Workflows == nil || a.WorkflowCommands == nil {
 		return msgNotAvailable, "not_available"
+	}
+	id := p.ExecutionID
+	if id <= 0 || p.IdempotencyKey == "" {
+		return msgBadButton, NoteBadCallback
 	}
 	d, err := a.Workflows.GetExecutionDetail(ctx, ws, id)
 	if errors.Is(err, workflow.ErrNotFound) {
@@ -707,7 +726,7 @@ func (w *InboxWorker) workflowCommand(ctx context.Context, ws, action string, id
 	if err != nil {
 		return msgFailed, "handler_failed"
 	}
-	cmd := workflow.Command{WorkspaceID: ws, ExecutionID: id}
+	cmd := workflow.Command{WorkspaceID: ws, ExecutionID: id, WaitID: p.WaitID, IdempotencyKey: p.IdempotencyKey}
 	switch action {
 	case toolWorkflowCancel:
 		if d.State == workflow.StateCancelled {
@@ -716,7 +735,6 @@ func (w *InboxWorker) workflowCommand(ctx context.Context, ws, action string, id
 		if d.State.IsTerminal() {
 			return fmt.Sprintf("Execution #%d đã kết thúc (%s), không huỷ được.", id, d.State), "not_cancellable"
 		}
-		cmd.IdempotencyKey = fmt.Sprintf("telegram:cancel:%s:%d", ws, id)
 		e, err := a.WorkflowCommands.Cancel(ctx, cmd)
 		switch {
 		case errors.Is(err, workflow.ErrNotEligible), errors.Is(err, workflow.ErrConflict):
@@ -729,11 +747,6 @@ func (w *InboxWorker) workflowCommand(ctx context.Context, ws, action string, id
 		}
 		return fmt.Sprintf("Đã huỷ execution #%d (%s). Yêu cầu bên ngoài đang chạy dở không được hoàn tác.", e.ID, e.State), ""
 	case toolWorkflowResume:
-		var newest int64
-		for _, wv := range d.Waits {
-			newest = max(newest, wv.ID)
-		}
-		cmd.IdempotencyKey = fmt.Sprintf("telegram:resume:%s:%d:wait:%d", ws, id, newest)
 		e, err := a.WorkflowCommands.Resume(ctx, cmd)
 		switch {
 		case errors.Is(err, workflow.ErrNotEligible), errors.Is(err, workflow.ErrConflict):
@@ -757,7 +770,6 @@ func (w *InboxWorker) workflowCommand(ctx context.Context, ws, action string, id
 		}
 		return fmt.Sprintf("Đã tiếp tục execution #%d (%s).", e.ID, e.State), ""
 	case toolWorkflowRetry:
-		cmd.IdempotencyKey = fmt.Sprintf("telegram:retry:%s:%d", ws, id)
 		child, err := a.WorkflowCommands.Retry(ctx, cmd)
 		switch {
 		case errors.Is(err, workflow.ErrProviderUncertainty):

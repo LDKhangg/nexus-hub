@@ -448,11 +448,23 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 	if err != nil {
 		return "", "retry", false
 	}
-	if data.Kind.Decides() && (a.Decision != "" || !w.now().Before(a.ExpiresAt)) {
-		return msgStale, "stale", true
+	if a.TelegramMessageID != 0 && a.TelegramMessageID != msgID {
+		return msgStale, "stale", false
 	}
 	if a.Kind == ApprovalAssistantAction {
-		return w.assistantCallback(ctx, u, to, data, a, actor, corr)
+		if !w.now().Before(a.ExpiresAt) {
+			return msgStale, "stale", true
+		}
+		if a.Decision == "" {
+			return w.assistantCallback(ctx, u, to, data, a, actor, corr)
+		}
+		if a.Decision == DecisionApproved && data.Kind == CallbackApprove && a.DecidedBy == actor && isAssistantWorkflowAction(a.Action) {
+			return w.assistantCallback(ctx, u, to, data, a, actor, corr)
+		}
+		return msgStale, "stale", true
+	}
+	if data.Kind.Decides() && (a.Decision != "" || !w.now().Before(a.ExpiresAt)) {
+		return msgStale, "stale", true
 	}
 	hctx, cancel := context.WithTimeout(ctx, w.settings.HandlerTimeout)
 	defer cancel()

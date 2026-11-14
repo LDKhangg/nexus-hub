@@ -71,6 +71,7 @@ const (
 	msgAssistantWorking       = "Đang xử lý…"
 	msgAssistantRefused       = "Mình không thể trả lời yêu cầu này."
 	msgAssistantCut           = "\n\n(Câu trả lời bị cắt vì quá dài.)"
+	msgAssistantIncomplete    = "Câu trả lời bị gián đoạn khi gửi; mình đã dừng để tránh gửi trùng phần chưa rõ kết quả."
 )
 
 // Turn failures: busy (the turn or a call timed out, or the provider is
@@ -110,7 +111,7 @@ type Assistant struct {
 
 	mu      sync.Mutex
 	calls   map[int64][]time.Time // per chat, the calls in the last minute
-	history map[int64]*assistantHistory
+	history map[assistantHistoryKey]*assistantHistory
 }
 
 func (a *Assistant) rate() int {
@@ -305,7 +306,7 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 	if err != nil || p == nil {
 		return assistantTurnResult{}, errAssistantModel
 	}
-	hist := a.chatHistory(job.u.ChatID)
+	hist := a.chatHistory(job.u.WorkspaceID, job.u.ChatID)
 	prior := hist.messages()
 	var res assistantTurnResult
 	if tc, ok := p.(domain.ToolCallingProvider); ok {
@@ -413,10 +414,12 @@ func assistantBusyErr(err error) bool {
 // assistantPayload is what an assistant_action approval keeps: the minimal
 // arguments of the write, never the owner's message.
 type assistantPayload struct {
-	Ref         string `json:"ref,omitempty"`
-	Name        string `json:"name,omitempty"`
-	Style       string `json:"style,omitempty"`
-	ExecutionID int64  `json:"execution_id,omitempty"`
+	Ref            string `json:"ref,omitempty"`
+	Name           string `json:"name,omitempty"`
+	Style          string `json:"style,omitempty"`
+	ExecutionID    int64  `json:"execution_id,omitempty"`
+	WaitID         int64  `json:"wait_id,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 // assistantJob is one queued assistant request. text is the owner's
@@ -467,14 +470,10 @@ func (w *InboxWorker) runAssistant(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			timeout := assistantDefaultTimeout
-			if w.d.Assistant != nil {
-				timeout = w.d.Assistant.timeout()
-			}
-			// The turn's own deadline plus room to send the reply.
-			jctx, cancel := context.WithTimeout(ctx, timeout+w.settings.RequestTimeout*2)
-			out := w.assistantJob(jctx, job)
-			cancel()
+			// assistantJob gives model work its own deadline. Delivery remains
+			// attached to the worker and gives every ordered part a complete
+			// request budget, even when the model used its whole budget.
+			out := w.assistantJob(ctx, job)
 			if ctx.Err() != nil {
 				return
 			}
@@ -538,6 +537,12 @@ func (w *InboxWorker) assistantJob(ctx context.Context, job assistantJob) outcom
 func (w *InboxWorker) sendAssistantReply(ctx context.Context, to ChatRef, text string) outcome {
 	for _, part := range splitAssistantReply(text) {
 		if out := w.reply(ctx, to, part, ""); out.code != "" {
+			// The failed send may have reached Telegram. Never resend that
+			// part; a separate bounded notice truthfully marks the answer as
+			// incomplete when shutdown has not cancelled the worker.
+			if ctx.Err() == nil {
+				_ = w.reply(ctx, to, msgAssistantIncomplete, "")
+			}
 			return outcome{code: "reply_failed"}
 		}
 	}
@@ -640,22 +645,38 @@ func (w *InboxWorker) assistantCallback(ctx context.Context, u InboundUpdate, to
 	case intentPrefsStyle:
 		command, args = "/prefs", p.Style
 	case toolWorkflowCancel, toolWorkflowResume, toolWorkflowRetry:
-		if p.ExecutionID <= 0 {
+		if !validAssistantWorkflowPayload(u.WorkspaceID, a.Action, p) {
 			return msgBadButton, NoteBadCallback, true
 		}
 	default:
 		return msgBadButton, NoteBadCallback, true
 	}
-	if _, err := w.d.Approvals.Decide(ctx, u.WorkspaceID, a.Nonce, decision, "", actor, w.now()); err != nil {
-		text, code := handlerText("", err)
-		return text, code, code == "stale"
+	if a.Decision == "" {
+		decided, err := w.d.Approvals.Decide(ctx, u.WorkspaceID, a.Nonce, decision, "", actor, w.now())
+		if err == nil {
+			a = decided
+		} else if errors.Is(err, ErrDecided) && decision == DecisionApproved && isAssistantWorkflowAction(a.Action) {
+			// A concurrent press or an inbox replay can observe the open row
+			// before another worker commits the decision. Reload and apply the
+			// same replay checks below; the workflow command is idempotent.
+			a, err = w.d.Approvals.GetApprovalByNonce(ctx, u.WorkspaceID, a.Nonce)
+			if err != nil {
+				return msgFailed, "retry", false
+			}
+		} else {
+			text, code := handlerText("", err)
+			return text, code, code == "stale"
+		}
+	}
+	if a.Decision != decision || a.DecidedBy != actor || !w.now().Before(a.ExpiresAt) {
+		return msgStale, "stale", true
 	}
 	if decision == DecisionRejected {
 		return msgAssistantCancelled, "", true
 	}
 	if command == "" {
 		hctx, cancel := context.WithTimeout(ctx, w.settings.HandlerTimeout)
-		text, code := w.workflowCommand(hctx, u.WorkspaceID, a.Action, p.ExecutionID)
+		text, code := w.workflowCommand(hctx, u.WorkspaceID, a.Action, p)
 		cancel()
 		out := w.reply(ctx, to, text, code)
 		if code == "" && out.code == "" {
@@ -664,7 +685,9 @@ func (w *InboxWorker) assistantCallback(ctx context.Context, u InboundUpdate, to
 		if code == "" {
 			return msgAssistantDone, out.code, true
 		}
-		return msgAssistantNotDone, code, true
+		// Storage/provider failures are safe to retry with this same
+		// approved proposal. Keep its buttons until the original expiry.
+		return msgAssistantNotDone, code, code != "handler_failed"
 	}
 	out := w.command(ctx, InboundUpdate{
 		ID: u.ID, WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, UpdateID: u.UpdateID, ChatID: u.ChatID,
@@ -677,4 +700,35 @@ func (w *InboxWorker) assistantCallback(ctx context.Context, u InboundUpdate, to
 		return msgAssistantDone, out.code, true
 	}
 	return msgAssistantNotDone, out.code, true
+}
+
+func isAssistantWorkflowAction(action string) bool {
+	return action == toolWorkflowCancel || action == toolWorkflowResume || action == toolWorkflowRetry
+}
+
+func validAssistantWorkflowPayload(workspaceID, action string, p assistantPayload) bool {
+	if p.ExecutionID <= 0 {
+		return false
+	}
+	var expected string
+	switch action {
+	case toolWorkflowCancel:
+		if p.WaitID != 0 {
+			return false
+		}
+		expected = "telegram:cancel:" + workspaceID + ":" + strconv.FormatInt(p.ExecutionID, 10)
+	case toolWorkflowResume:
+		if p.WaitID <= 0 {
+			return false
+		}
+		expected = "telegram:resume:" + workspaceID + ":" + strconv.FormatInt(p.ExecutionID, 10) + ":wait:" + strconv.FormatInt(p.WaitID, 10)
+	case toolWorkflowRetry:
+		if p.WaitID != 0 {
+			return false
+		}
+		expected = "telegram:retry:" + workspaceID + ":" + strconv.FormatInt(p.ExecutionID, 10)
+	default:
+		return false
+	}
+	return p.IdempotencyKey == expected
 }
