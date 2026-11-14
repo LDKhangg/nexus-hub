@@ -67,9 +67,19 @@ func (w *InboxWorker) workflowOrAssistant(ctx context.Context, u InboundUpdate, 
 		return w.handleWorkflowRequest(ctx, u, to, actor, corr, "note", instruction, id)
 	}
 	if u.ReplyToMessageID > 0 && trimmed != "" && !strings.HasPrefix(trimmed, "/") {
-		return w.handleWorkflowRequest(ctx, u, to, actor, corr, "note", trimmed, 0)
+		if id, resolved := w.resolveWorkflowTarget(ctx, u, 0); resolved {
+			if isWorkflowQuestion(trimmed) {
+				return w.queueAssistantTextForWorkflow(ctx, u, to, actor, corr, text, id)
+			}
+			return w.executeWorkflowRequest(ctx, u, to, actor, corr, "note", trimmed, id)
+		}
 	}
 	return w.queueAssistantText(ctx, u, to, actor, corr, text)
+}
+
+func isWorkflowQuestion(text string) bool {
+	text = strings.TrimSpace(text)
+	return strings.HasSuffix(text, "?") || strings.HasSuffix(text, "？")
 }
 
 func leadingWorkflowInstruction(text string) (int64, string, bool) {

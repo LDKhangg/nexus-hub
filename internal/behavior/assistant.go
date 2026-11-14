@@ -332,7 +332,7 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 	if tc, ok := p.(domain.ToolCallingProvider); ok {
 		res, err = w.toolLoop(ctx, tc, job, prior)
 	} else {
-		res, err = a.plainTurn(ctx, p, prior, job.text)
+		res, err = a.plainTurnWithSystem(ctx, p, prior, job.text, assistantSystemForWorkflow(job.workflowID))
 	}
 	if err != nil {
 		return res, err
@@ -346,8 +346,12 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 // plainTurn answers with a provider that has no tool calling: the history
 // and the owner's text, no tools.
 func (a *Assistant) plainTurn(ctx context.Context, p domain.LLMProvider, prior []domain.Message, text string) (assistantTurnResult, error) {
+	return a.plainTurnWithSystem(ctx, p, prior, text, assistantSystem)
+}
+
+func (a *Assistant) plainTurnWithSystem(ctx context.Context, p domain.LLMProvider, prior []domain.Message, text, system string) (assistantTurnResult, error) {
 	msgs := append(append([]domain.Message(nil), prior...), domain.Message{Role: domain.UserRole, Text: text})
-	resp, err := p.Generate(ctx, &domain.LLMRequest{Model: a.Model, System: assistantSystem, MaxTokens: assistantMaxTokens, Messages: msgs})
+	resp, err := p.Generate(ctx, &domain.LLMRequest{Model: a.Model, System: system, MaxTokens: assistantMaxTokens, Messages: msgs})
 	if err != nil || resp == nil {
 		return assistantTurnResult{steps: 1}, assistantErr(ctx, err)
 	}
@@ -371,7 +375,7 @@ func (w *InboxWorker) toolLoop(ctx context.Context, tc domain.ToolCallingProvide
 			offered = nil // the last step must answer
 		}
 		resp, err := tc.GenerateWithTools(ctx, &domain.ToolRequest{
-			Model: a.Model, System: assistantSystem, MaxTokens: assistantMaxTokens,
+			Model: a.Model, System: assistantSystemForWorkflow(job.workflowID), MaxTokens: assistantMaxTokens,
 			Tools: offered, Turns: turns, CacheStatic: true,
 		})
 		res.steps++
@@ -404,6 +408,13 @@ func (w *InboxWorker) toolLoop(ctx context.Context, tc domain.ToolCallingProvide
 		turns = append(turns, domain.Turn{Role: domain.UserRole, Results: results})
 	}
 	return res, errAssistantModel
+}
+
+func assistantSystemForWorkflow(id int64) string {
+	if id <= 0 {
+		return assistantSystem
+	}
+	return assistantSystem + "\nThe owner's current message replies to " + workflow.FormatRef(id) + ". Treat that workflow as the resolved target for this turn."
 }
 
 // assistantErr maps a provider failure to a turn failure: busy for a
@@ -448,12 +459,13 @@ type assistantPayload struct {
 // message, kept in memory only until the job ends (and, after a
 // successful turn, in the bounded chat history).
 type assistantJob struct {
-	u      InboundUpdate
-	to     ChatRef
-	actor  string
-	corr   string
-	text   string
-	queued time.Time
+	u          InboundUpdate
+	to         ChatRef
+	actor      string
+	corr       string
+	text       string
+	workflowID int64
+	queued     time.Time
 }
 
 // assistant takes the staged text of one plain free-text message, checks
@@ -473,6 +485,10 @@ func (w *InboxWorker) assistant(ctx context.Context, u InboundUpdate, to ChatRef
 }
 
 func (w *InboxWorker) queueAssistantText(ctx context.Context, u InboundUpdate, to ChatRef, actor, corr, text string) outcome {
+	return w.queueAssistantTextForWorkflow(ctx, u, to, actor, corr, text, 0)
+}
+
+func (w *InboxWorker) queueAssistantTextForWorkflow(ctx context.Context, u InboundUpdate, to ChatRef, actor, corr, text string, workflowID int64) outcome {
 	a := w.d.Assistant
 	if a == nil || a.Models == nil {
 		return w.reply(ctx, to, msgHint, "")
@@ -481,7 +497,7 @@ func (w *InboxWorker) queueAssistantText(ctx context.Context, u InboundUpdate, t
 		return w.reply(ctx, to, msgAssistantBusy, "assistant_rate_limited")
 	}
 	select {
-	case w.assistantJobs <- assistantJob{u: u, to: to, actor: actor, corr: corr, text: text, queued: time.Now()}:
+	case w.assistantJobs <- assistantJob{u: u, to: to, actor: actor, corr: corr, text: text, workflowID: workflowID, queued: time.Now()}:
 		return outcome{code: "assistant_queued"}
 	default:
 		return w.reply(ctx, to, msgAssistantOverloaded, "assistant_queue_full")
