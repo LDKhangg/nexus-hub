@@ -254,7 +254,7 @@ func (s *BehaviorStore) RecordUpdate(ctx context.Context, workspaceID string, u 
 	}
 	_, err = s.q.InsertTelegramUpdate(ctx, sqlc.InsertTelegramUpdateParams{
 		WorkspaceID: ws, UpdateID: u.UpdateID, ChatID: u.ChatID, Kind: string(u.Kind), Command: u.Command, Args: u.Args,
-		IntegrationID: integration, Note: u.Note,
+		IntegrationID: integration, Note: u.Note, TelegramMessageID: optInt8(u.MessageID), ReplyToMessageID: optInt8(u.ReplyToMessageID),
 	})
 	if isNoRows(err) {
 		return false, nil
@@ -282,7 +282,8 @@ func (s *BehaviorStore) ClaimUpdate(ctx context.Context, now time.Time, lease ti
 	}
 	return &behavior.InboundUpdate{
 		ID: row.ID, WorkspaceID: uuidString(row.WorkspaceID), IntegrationID: uuidString(row.IntegrationID),
-		UpdateID: row.UpdateID, ChatID: row.ChatID, Kind: behavior.UpdateKind(row.Kind), Command: row.Command,
+		UpdateID: row.UpdateID, ChatID: row.ChatID, MessageID: row.TelegramMessageID.Int64, ReplyToMessageID: row.ReplyToMessageID.Int64,
+		Kind: behavior.UpdateKind(row.Kind), Command: row.Command,
 		Args: row.Args, Note: row.Note, Attempts: int(row.Attempts),
 		ClaimToken: tok, ReceivedAt: row.ReceivedAt.Time,
 	}, nil

@@ -27,8 +27,9 @@ import (
 //
 // The owner's text is never stored in the database or logged: the webhook
 // hands it to the worker through AssistantInbox, in memory. Recent turns of
-// the chat are kept in a bounded in-memory history (assistant_history.go)
-// so follow-ups work; a restart forgets them. The inbox worker only takes
+// the chat are kept in a bounded in-memory history (assistant_history.go),
+// and a sanitized persisted summary seeds the next process after restart.
+// The inbox worker only takes
 // the text and queues an assistant job; one assistant goroutine waits for
 // the model, so a slow model never holds up other Telegram updates.
 
@@ -103,15 +104,22 @@ type Assistant struct {
 	// Redact, when set, removes secrets from every tool result before the
 	// model sees it.
 	Redact func(string) string
+	// Conversations stores routing metadata and bounded summaries only.
+	// SummaryModel is the triage model used by the asynchronous summarizer.
+	Conversations   workflow.ConversationStore
+	SummaryModel    string
+	SummarySanitize func(string) string
 	// Timeout bounds one turn, tool steps included (assistant_timeout).
 	Timeout time.Duration
 	// RatePerMinute is each chat's message budget per minute
 	// (assistant_rate_per_minute); it only stops runaway loops.
 	RatePerMinute int
 
-	mu      sync.Mutex
-	calls   map[int64][]time.Time // per chat, the calls in the last minute
-	history map[assistantHistoryKey]*assistantHistory
+	mu        sync.Mutex
+	calls     map[int64][]time.Time // per chat, the calls in the last minute
+	history   map[assistantHistoryKey]*assistantHistory
+	summaries map[assistantSummaryKey]*assistantSummaryState
+	summaryWG sync.WaitGroup
 }
 
 func (a *Assistant) rate() int {
@@ -224,7 +232,7 @@ How to answer:
 - Answer anything the owner asks: general knowledge, programming and code, ideas, writing, planning, and questions about the hub itself. Give complete, useful answers; long answers are fine (the hub splits them into several Telegram messages).
 - Reply in Vietnamese unless the owner writes in another language or asks for one.
 - Plain text only: Telegram shows no Markdown formatting here. Use short paragraphs and simple "-" lists; code may be written as plain lines.
-- Earlier messages of this chat may be included for context. The hub keeps only recent ones, in memory, and forgets them on restart.
+- Earlier messages of this chat may be included for context. The hub keeps recent exchanges in memory and may restore a compact sanitized summary after restart.
 
 Hub tools:
 - When the answer needs hub data (contacts, behavior runs and their traces, report preferences and templates, workflow executions, their history and the job queue), call the tools and answer from their results. Never invent IDs, names, states or numbers; if a tool fails or finds nothing, say so.
@@ -234,10 +242,11 @@ Hub tools:
 
 // assistantTurnResult is what one turn produced.
 type assistantTurnResult struct {
-	text      string
-	cut       bool // the model stopped at its output limit
-	steps     int  // model calls
-	toolCalls int  // tool calls run
+	text           string
+	cut            bool // the model stopped at its output limit
+	steps          int  // model calls
+	toolCalls      int  // tool calls run
+	conversationID int64
 }
 
 // assistantDecision and parseAssistantDecision are retained as a narrow
@@ -306,7 +315,18 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 	if err != nil || p == nil {
 		return assistantTurnResult{}, errAssistantModel
 	}
-	hist := a.chatHistory(job.u.WorkspaceID, job.u.ChatID)
+	conversation, conversationErr := w.ensureConversation(ctx, job.to)
+	if conversationErr != nil {
+		log.Print("telegram assistant: conversation ensure failed")
+	}
+	hist, created := a.chatHistoryFor(job.u.WorkspaceID, job.u.IntegrationID, job.u.ChatID)
+	if created && conversation.ID > 0 {
+		if summary, summaryErr := a.Conversations.GetSummary(ctx, job.u.WorkspaceID, conversation.ID); summaryErr == nil {
+			hist.setSummary(summary)
+		} else {
+			log.Print("telegram assistant: conversation summary load failed")
+		}
+	}
 	prior := hist.messages()
 	var res assistantTurnResult
 	if tc, ok := p.(domain.ToolCallingProvider); ok {
@@ -318,6 +338,7 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 		return res, err
 	}
 	res.text = cleanAssistantReply(res.text)
+	res.conversationID = conversation.ID
 	hist.add(job.text, res.text)
 	return res, nil
 }
@@ -527,6 +548,8 @@ func (w *InboxWorker) assistantJob(ctx context.Context, job assistantJob) outcom
 	case err != nil:
 		return w.reply(ctx, to, msgFailed, "assistant_model_error")
 	}
+	ctx = withConversation(ctx, res.conversationID, UpdateText)
+	a.scheduleSummary(ctx, job.u.WorkspaceID, res.conversationID, assistantExchange{question: job.text, answer: res.text})
 	text := res.text
 	if text == "" {
 		if res.toolCalls > 0 {

@@ -329,18 +329,20 @@ type Approval struct {
 // message ID ("<query id> <message id>"); for a free-text reply, Args holds
 // the nonce of the approval the reply was staged on.
 type InboundUpdate struct {
-	ID            int64
-	WorkspaceID   string
-	IntegrationID string // the Telegram integration (bot) it came through
-	UpdateID      int64
-	ChatID        int64
-	Kind          UpdateKind
-	Command       string // at most 64 characters
-	Args          string // at most 512 characters
-	Note          string // a short code (see Note*), never content
-	Attempts      int
-	ClaimToken    string
-	ReceivedAt    time.Time
+	ID               int64
+	WorkspaceID      string
+	IntegrationID    string // the Telegram integration (bot) it came through
+	UpdateID         int64
+	ChatID           int64
+	MessageID        int64 // Telegram message identifier; never message content
+	ReplyToMessageID int64
+	Kind             UpdateKind
+	Command          string // at most 64 characters
+	Args             string // at most 512 characters
+	Note             string // a short code (see Note*), never content
+	Attempts         int
+	ClaimToken       string
+	ReceivedAt       time.Time
 }
 
 // Profile is the owner's personalization.

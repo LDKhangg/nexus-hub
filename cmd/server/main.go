@@ -133,6 +133,10 @@ func run() error {
 		assistant = &behavior.Assistant{
 			Models: ag.provider, Model: s.AssistantModel, Runs: behaviors, Inbox: behavior.NewAssistantInbox(),
 			Workflows: workflows.store, WorkflowCommands: workflows.commands, Redact: redactor.RedactSecrets,
+			Conversations: ag.conversations, SummaryModel: s.TriageModel,
+			SummarySanitize: func(text string) string {
+				return redactor.RedactSecrets(agent.CleanInput(text))
+			},
 			Timeout: s.AssistantTimeout, RatePerMinute: int(s.AssistantRatePerMinute),
 		}
 		telegramHandler.WithAssistant(assistant.Inbox)
@@ -140,10 +144,11 @@ func run() error {
 	inbox := behavior.NewInboxWorker(behavior.InboxDeps{
 		Inbox: behaviors, Approvals: behaviors, Defs: behaviors, Messenger: messenger,
 		Commands: commands, Undoer: engine, Callbacks: engine,
-		Tracer:    &behavior.TraceService{Store: behaviors, Profiles: behaviors, People: ag.people},
-		People:    ag.people,
-		Reports:   reportSettings,
-		Assistant: assistant,
+		Tracer:        &behavior.TraceService{Store: behaviors, Profiles: behaviors, People: ag.people},
+		People:        ag.people,
+		Reports:       reportSettings,
+		Assistant:     assistant,
+		Conversations: ag.conversations,
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
 	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows}
 	// Telegram updates arrive by webhook, or by long polling when the hub

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/people"
+	"github.com/LDKhangg/nexus-hub/internal/workflow"
 	"github.com/google/uuid"
 )
 
@@ -57,6 +58,8 @@ type InboxDeps struct {
 	Callbacks CallbackHandler
 	People    people.Directory
 	Reports   ReportSettings
+	// Conversations records routing metadata only. Nil preserves the legacy path.
+	Conversations workflow.ConversationStore
 	// Assistant, when set, answers the owner's plain free text.
 	Assistant *Assistant
 }
@@ -124,6 +127,9 @@ func waitFor(ctx context.Context, d time.Duration) error {
 // and returns only after the assistant job in progress has stopped.
 func (w *InboxWorker) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
+	if w.d.Assistant != nil {
+		defer w.d.Assistant.waitSummaries()
+	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -195,6 +201,7 @@ func (w *InboxWorker) dispatch(ctx context.Context, u InboundUpdate, corr string
 		return outcome{code: "no_integration"}
 	}
 	to := ChatRef{WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID}
+	ctx = w.recordInboundConversation(ctx, u, to)
 	actor := "telegram:" + strconv.FormatInt(u.ChatID, 10)
 	switch u.Kind {
 	case UpdateCallback:
@@ -240,9 +247,11 @@ func (w *InboxWorker) reply(ctx context.Context, to ChatRef, text, code string) 
 	}
 	sendCtx, cancel := context.WithTimeout(ctx, w.settings.RequestTimeout)
 	defer cancel()
-	if _, err := w.d.Messenger.SendMessage(sendCtx, to, OutMessage{Text: text}); err != nil {
+	id, err := w.d.Messenger.SendMessage(sendCtx, to, OutMessage{Text: text})
+	if err != nil {
 		return outcome{code: firstCode(code, "reply_failed")}
 	}
+	w.recordOutboundConversation(ctx, to, id, 0)
 	return outcome{code: code}
 }
 

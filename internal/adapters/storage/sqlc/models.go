@@ -527,6 +527,10 @@ type TelegramUpdate struct {
 	IntegrationID pgtype.UUID
 	// A short code such as args_too_long; never message text.
 	Note string
+	// Telegram message identifier only; no message body is stored.
+	TelegramMessageID pgtype.Int8
+	// Telegram replied-to message identifier only; no message body is stored.
+	ReplyToMessageID pgtype.Int8
 }
 
 // Explicit same-workspace related-to links. A link neither authorizes access nor automatically merges context. Metadata may record the confirmed URL or human decision.
