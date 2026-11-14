@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
@@ -18,6 +19,56 @@ type phase6ConversationFake struct {
 	summary   string
 	bindings  []string
 	resources []workflow.ResourceBinding
+}
+
+type phase6MessageLog struct {
+	ActionStore
+	mu      sync.Mutex
+	claimed bool
+	id      int64
+}
+
+func (s *phase6MessageLog) ClaimMessage(context.Context, string, int64, string) (bool, int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.claimed {
+		return false, s.id, nil
+	}
+	s.claimed = true
+	return true, 0, nil
+}
+
+func (s *phase6MessageLog) SetMessageID(_ context.Context, _ string, _ int64, _ string, id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.id = id
+	return nil
+}
+
+func (*phase6MessageLog) ReleaseMessage(context.Context, string, int64, string) error { return nil }
+
+func (s *phase6MessageLog) stored() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.id != 0
+}
+
+type phase6BindingTimeout struct {
+	workflow.ConversationStore
+	receipt    func() bool
+	sawReceipt bool
+	sawTimeout bool
+}
+
+func (s *phase6BindingTimeout) EnsureConversation(ctx context.Context, _ workflow.Conversation) (workflow.Conversation, error) {
+	s.sawReceipt = s.receipt()
+	_, s.sawTimeout = ctx.Deadline()
+	<-ctx.Done()
+	return workflow.Conversation{}, ctx.Err()
+}
+
+func (*phase6BindingTimeout) BindResource(ctx context.Context, _ workflow.ResourceBinding) error {
+	return ctx.Err()
 }
 
 func (f *phase6ConversationFake) EnsureConversation(_ context.Context, c workflow.Conversation) (workflow.Conversation, error) {
@@ -143,6 +194,34 @@ func TestPhase6WorkflowMessageBindings(t *testing.T) {
 		if store.resources[i] != want[i] {
 			t.Errorf("resource[%d]=%+v, want %+v", i, store.resources[i], want[i])
 		}
+	}
+}
+
+// TC-A4.3/A5.4 (REQ-4, REQ-5): the durable message receipt is committed
+// before best-effort workflow bindings. A timed-out binding neither fails the
+// successful send nor permits a retry to send it again.
+func TestPhase6SendOnceStoresReceiptBeforeBestEffortBinding(t *testing.T) {
+	logStore := &phase6MessageLog{}
+	binding := &phase6BindingTimeout{receipt: logStore.stored}
+	messenger := &p4Messenger{}
+	e := &Engine{
+		d: ActionDeps{Store: logStore, Messenger: messenger, Conversations: binding},
+		s: ActionSettings{RequestTimeout: 5 * time.Millisecond},
+	}
+	ctx := withWorkflowExecution(context.Background(), 9001)
+	run := Run{ID: 71, WorkspaceID: "ws-a"}
+	chat := ChatRef{WorkspaceID: "ws-a", IntegrationID: "bot-a", ChatID: 77}
+
+	id, err := e.sendOnce(ctx, run, "report", chat, OutMessage{Text: "done"})
+	if err != nil || id == 0 {
+		t.Fatalf("first send id=%d err=%v", id, err)
+	}
+	replayedID, err := e.sendOnce(ctx, run, "report", chat, OutMessage{Text: "done"})
+	if err != nil || replayedID != id || messenger.count() != 1 {
+		t.Fatalf("replay id=%d err=%v sends=%d, want stored id=%d and one send", replayedID, err, messenger.count(), id)
+	}
+	if !binding.sawReceipt || !binding.sawTimeout {
+		t.Fatalf("binding observed receipt=%v timeout=%v", binding.sawReceipt, binding.sawTimeout)
 	}
 }
 

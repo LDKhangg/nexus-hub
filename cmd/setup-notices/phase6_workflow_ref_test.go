@@ -22,11 +22,14 @@ func TestPhase6WorkflowCLIReferences(t *testing.T) {
 			t.Errorf("show %q = %v, want id=%d ref=%s", input, out, ex.ID, wantRef)
 		}
 	}
-	for _, input := range []string{"WF-0", "WF--1", "WF-nope", "0", "-1"} {
+	for _, input := range []string{"WF-0", "WF--1", "WF-nope", "0"} {
 		out, err := f.run("workflow", "show", input, "--workspace-id", f.ws)
 		if err == nil || out != "" || !strings.Contains(err.Error(), "execution reference") {
 			t.Errorf("show %q: out=%q err=%v", input, out, err)
 		}
+	}
+	if out, err := f.run("workflow", "show", "-1", "--workspace-id", f.ws); err == nil || out != "" {
+		t.Errorf("flag-like invalid reference: out=%q err=%v", out, err)
 	}
 
 	list, _ := objectItems(t, f.must("workflow", "list", "--workspace-id", f.ws), "executions")

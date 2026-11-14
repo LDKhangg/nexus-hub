@@ -282,6 +282,11 @@ func normalizeExecutorReportRun(text string, runID int64) string {
 	return strings.ReplaceAll(text, "/trace "+id, "/trace #RUN")
 }
 
+func withoutWorkflowRef(text, ref string) string {
+	text = strings.ReplaceAll(text, " · "+ref, "")
+	return strings.TrimSuffix(text, "\n"+ref)
+}
+
 // TC-C04/C05: the registered behavior model/actions executors use the real
 // durable stores and workflow worker, and a second worker pass repeats neither
 // the model request nor the Telegram provider effect.
@@ -497,6 +502,13 @@ func TestBehaviorWorkflowReportsAndUndoUseActualEngine(t *testing.T) {
 			}
 			legacyTexts := legacyMessenger.texts()
 			workflowText := normalizeExecutorReportRun(texts[0], br.run.ID)
+			if !tc.custom {
+				ref := workflow.FormatRef(br.ex.ID)
+				if !strings.Contains(workflowText, ref) {
+					t.Fatalf("workflow report %q lacks %s", workflowText, ref)
+				}
+				workflowText = withoutWorkflowRef(workflowText, ref)
+			}
 			legacyText := ""
 			if len(legacyTexts) == 1 {
 				legacyText = normalizeExecutorReportRun(legacyTexts[0], legacyRun.ID)
@@ -588,8 +600,16 @@ func TestBehaviorWorkflowCrashReclaimPreservesReceiptsAndUsage(t *testing.T) {
 		t.Fatalf("replayed providers model=%d telegram=%d", model.count(), messenger.count())
 	}
 	reclaimedTexts := assertMessages("crash/reclaim", br.run.ID, messenger)
+	ref := workflow.FormatRef(br.ex.ID)
+	if strings.Contains(strings.Join(normalTexts, "\n"), "WF-") {
+		t.Fatalf("legacy messages unexpectedly contain a workflow ref: %q", normalTexts)
+	}
+	if !strings.Contains(strings.Join(reclaimedTexts, "\n"), ref) {
+		t.Fatalf("reclaimed messages %q lack %s", reclaimedTexts, ref)
+	}
 	for i := range normalTexts {
-		if normalizeExecutorReportRun(normalTexts[i], normalRun.ID) != normalizeExecutorReportRun(reclaimedTexts[i], br.run.ID) {
+		reclaimed := withoutWorkflowRef(normalizeExecutorReportRun(reclaimedTexts[i], br.run.ID), ref)
+		if normalizeExecutorReportRun(normalTexts[i], normalRun.ID) != reclaimed {
 			t.Fatalf("crash/reclaim message[%d]=%q differs from normal=%q", i, reclaimedTexts[i], normalTexts[i])
 		}
 	}

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
 )
 
@@ -108,6 +109,7 @@ func TestPhase6StartExecutionCreatesResourceBindings(t *testing.T) {
 	}
 	v := e.enabledVersion(workspaceA, "phase6-resources")
 	req := e.startReq(workspaceA, v.ID, "resources", chainDef("one"))
+	req.References.Subject = behavior.TaskSubject("task-9")
 	req.ResourceReferences = []workflow.ResourceReference{{Kind: "github.pr", ExternalID: "org/repo#8"}, {Kind: "github.pr", ExternalID: "org/repo#8"}}
 	ex, err := e.store.StartExecution(e.ctx, req)
 	if err != nil {
@@ -118,6 +120,16 @@ func TestPhase6StartExecutionCreatesResourceBindings(t *testing.T) {
 		if findErr != nil || len(got) != 1 || got[0] != ex.ID {
 			t.Errorf("resource %+v executions=%v err=%v", resource, got, findErr)
 		}
+	}
+	chatReq := e.startReq(workspaceA, v.ID, "chat-resources", chainDef("one"))
+	chatReq.References.Subject = behavior.ChatSubject("message-7")
+	chatEx, err := e.store.StartExecution(e.ctx, chatReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.ExecutionsByResource(e.ctx, workspaceA, "clickup.chat", "message-7")
+	if err != nil || len(got) != 1 || got[0] != chatEx.ID {
+		t.Fatalf("chat subject executions=%v err=%v", got, err)
 	}
 }
 
@@ -137,9 +149,12 @@ func TestPhase6InstructionsConcurrentAndIdempotent(t *testing.T) {
 	if err != nil || first.Version != 1 || strings.ContainsRune(first.Text, '\x00') || len([]rune(first.Text)) != 2000 {
 		t.Fatalf("first instruction=%+v runes=%d err=%v", first, len([]rune(first.Text)), err)
 	}
-	replayed, err := store.AppendInstruction(e.ctx, workflow.InstructionRequest{WorkspaceID: workspaceA, ExecutionID: ex2.ID, ConversationID: conv.ID, TelegramUpdateID: 500, Text: "different"})
-	if err != nil || replayed.ExecutionID != ex1.ID || replayed.Text != first.Text {
-		t.Fatalf("workspace-wide replay=%+v err=%v", replayed, err)
+	replayed, err := store.AppendInstruction(e.ctx, workflow.InstructionRequest{WorkspaceID: workspaceA, ExecutionID: ex1.ID, ConversationID: conv.ID, TelegramUpdateID: 500, Text: "different"})
+	if err != nil || replayed != first {
+		t.Fatalf("same-execution replay=%+v err=%v", replayed, err)
+	}
+	if _, err := store.AppendInstruction(e.ctx, workflow.InstructionRequest{WorkspaceID: workspaceA, ExecutionID: ex2.ID, ConversationID: conv.ID, TelegramUpdateID: 500, Text: "different"}); !errors.Is(err, workflow.ErrConflict) {
+		t.Fatalf("cross-execution update reuse err=%v, want ErrConflict", err)
 	}
 
 	const concurrent = 8
@@ -223,7 +238,7 @@ func TestPhase6ConversationMigrationRoundTrip(t *testing.T) {
 		t.Fatalf("second Up: %v", err)
 	}
 	var tables int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('conversations','conversation_messages','conversation_workflows','workflow_resource_bindings','workflow_instructions')`).Scan(&tables); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('conversations','conversation_messages','conversation_workflows','resource_bindings','workflow_instructions')`).Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
 	if tables != 5 {

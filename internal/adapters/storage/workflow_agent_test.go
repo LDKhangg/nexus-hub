@@ -206,6 +206,7 @@ func TestAgentWorkflowLegacyEquivalence(t *testing.T) {
 	}
 	for name, d := range decisions {
 		var legacy, durable agentOutcome
+		var durableRef string
 		t.Run("TC-B40/"+name+"/legacy", func(t *testing.T) {
 			e := newAgentEnv(t, writeCfg)
 			seedThread(t, e)
@@ -227,6 +228,10 @@ func TestAgentWorkflowLegacyEquivalence(t *testing.T) {
 			}
 			durable = readAgentOutcome(t, e, id)
 			ex := a.executionOf(t, id)
+			durableRef = workflow.FormatRef(ex.ID)
+			if !strings.Contains(durable.Text, durableRef) {
+				t.Fatalf("TC-B40: durable report %q lacks %s", durable.Text, durableRef)
+			}
 			assertState(t, ex, workflow.StateCompleted, "")
 			var stepIn int64
 			_ = e.pool.QueryRow(e.ctx, `SELECT COALESCE(sum(input_tokens),0) FROM execution_steps WHERE execution_id=$1`, ex.ID).Scan(&stepIn)
@@ -234,6 +239,7 @@ func TestAgentWorkflowLegacyEquivalence(t *testing.T) {
 				t.Fatalf("TC-B40: step usage %d != batch usage %d (counted twice?)", stepIn, durable.In)
 			}
 		})
+		durable.Text = withoutWorkflowRef(durable.Text, durableRef)
 		if legacy.Text == "" || legacy != durable {
 			t.Fatalf("TC-B40 %s: durable outcome differs from legacy\nlegacy:  %+v\ndurable: %+v", name, legacy, durable)
 		}
