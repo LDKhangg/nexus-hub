@@ -15,10 +15,11 @@ import (
 
 // This file is the durable side of behavior runs: writes of a run executed
 // as workflow steps. Each one runs in a transaction that first locks the
-// workflow job fence (claim token, lease, execution state, cancellation and
-// deadline, step and attempt) and then the run, which must be the
-// execution's legacy run in the same workspace and not legacy-claimed. A
-// refused fence is behavior.ErrWorkflowFence; nothing is written.
+// execution, then the workflow job fence (claim token, lease, execution
+// state, cancellation and deadline, step and attempt) and then the run,
+// which must be the execution's legacy run in the same workspace and not
+// legacy-claimed. A refused fence is behavior.ErrWorkflowFence; nothing is
+// written.
 
 var _ behavior.DurableRunStore = (*BehaviorStore)(nil)
 
@@ -56,6 +57,14 @@ func (s *BehaviorStore) withDurableRun(ctx context.Context, f behavior.RunFence,
 	defer tx.Rollback(ctx)
 	q := sqlc.New(tx)
 	req := durableFenceRequest(f)
+	// Lock order everywhere is execution, then job: the reconciler and job
+	// results hold the execution before touching its job.
+	if _, err := q.LockWorkflowExecution(ctx, sqlc.LockWorkflowExecutionParams{WorkspaceID: ws, ID: f.ExecutionID}); err != nil {
+		if isNoRows(err) {
+			return behavior.ErrWorkflowFence
+		}
+		return err
+	}
 	job, err := lockWorkflowFence(ctx, q, ws, token, req)
 	if errors.Is(err, workflow.ErrStaleClaim) {
 		return behavior.ErrWorkflowFence

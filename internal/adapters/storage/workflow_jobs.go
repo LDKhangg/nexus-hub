@@ -228,6 +228,13 @@ func (s *WorkflowStore) CheckpointJob(ctx context.Context, req workflow.JobCheck
 	}
 	defer tx.Rollback(ctx)
 	q := sqlc.New(tx)
+	// Lock order everywhere is execution, then job.
+	if _, err := q.LockWorkflowExecution(ctx, sqlc.LockWorkflowExecutionParams{WorkspaceID: ws, ID: req.ExecutionID}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return workflow.Step{}, workflow.ErrStaleClaim
+		}
+		return workflow.Step{}, err
+	}
 	job, err := lockWorkflowFence(ctx, q, ws, token, req)
 	if err != nil {
 		return workflow.Step{}, err
