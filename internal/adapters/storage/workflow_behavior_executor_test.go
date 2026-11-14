@@ -210,7 +210,8 @@ func executorDoc(name string, dryRun bool) behavior.Doc {
 
 func executorRunDoc(name string, dryRun bool) behavior.Doc {
 	doc := executorDoc(name, dryRun)
-	doc.Triggers = []behavior.TriggerDoc{{Type: behavior.TriggerChatMessage, Filter: behavior.FilterDoc{Channel: behavior.StringList{"dm"}}}}
+	hasPRLink := true
+	doc.Triggers = []behavior.TriggerDoc{{Type: behavior.TriggerChatMessage, Filter: behavior.FilterDoc{Channel: behavior.StringList{"dm"}, HasPRLink: &hasPRLink}}}
 	doc.Actions = map[string][]behavior.ActionDoc{behavior.ActionsRun: {
 		{Type: behavior.ActionPRApprove, Params: map[string]string{"account": "owner"}},
 		{Type: behavior.ActionChatReaction, Params: map[string]string{"reaction": "white_check_mark"}},
@@ -317,6 +318,9 @@ func TestBehaviorWorkflowApprovalContinuesThroughEngine(t *testing.T) {
 	if err != nil || len(approvals) != 1 || approvals[0].Kind != behavior.ApprovalPostDraft {
 		t.Fatalf("approvals=%#v err=%v", approvals, err)
 	}
+	if f.messenger.count() != 1 {
+		t.Fatalf("approval prompt count=%d", f.messenger.count())
+	}
 	restartedWorkflow, err := NewWorkflowStore(e.pool)
 	if err != nil {
 		t.Fatal(err)
@@ -335,7 +339,10 @@ func TestBehaviorWorkflowApprovalContinuesThroughEngine(t *testing.T) {
 	if got := e.execution(workspaceA, br.ex.ID).State; got != workflow.StateCompleted {
 		t.Fatalf("resumed execution state=%s", got)
 	}
-	if f.model.count() != 1 || f.messenger.count() != 2 {
+	// The approval prompt is the Telegram presentation for this item. A
+	// successful approved draft is applied silently, without a duplicate
+	// outcome message (workflow_signals.go ApplyDecision contract).
+	if f.model.count() != 1 || f.messenger.count() != 1 {
 		t.Fatalf("provider counts model=%d telegram=%d", f.model.count(), f.messenger.count())
 	}
 	if e.signalCount(br.ex.ID) != 1 {

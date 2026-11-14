@@ -162,10 +162,14 @@ func TestWorkflowCLITimelineAndDeadLetter(t *testing.T) {
 		t.Fatal(err)
 	}
 	show := f.must("workflow", "show", fmt.Sprint(ex.ID), "--workspace-id", f.ws)
-	for _, want := range []string{`"state":"FAILED"`, `"reason":"attempts_exhausted"`, `"behavior":"restore-cli"`} {
+	behaviorDigest := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte("restore-cli")))
+	for _, want := range []string{`"state":"FAILED"`, `"reason":"attempts_exhausted"`, `"behavior_digest":"` + behaviorDigest + `"`} {
 		if !strings.Contains(show, want) {
 			t.Fatalf("show missing %s: %s", want, show)
 		}
+	}
+	if strings.Contains(show, "restore-cli") {
+		t.Fatalf("show leaked raw behavior name: %s", show)
 	}
 	events, cursor := objectItems(t, f.must("workflow", "history", fmt.Sprint(ex.ID), "--workspace-id", f.ws, "--limit", "1"), "events")
 	if len(events) != 1 || cursor == "" {
