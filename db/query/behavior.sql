@@ -256,12 +256,21 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND nonce = sqlc.arg(nonce)
   AND decision IS NULL AND expires_at > sqlc.arg(at_time)::timestamptz
 RETURNING *;
 
--- name: ExpireApprovals :many
+-- name: ListDueApprovals :many
+-- Open approvals past their expiry with the execution of their wait (0 for
+-- none), read before expiring them so bound executions are locked first.
+SELECT a.workspace_id, a.id, COALESCE(w.execution_id, 0)::bigint AS execution_id
+FROM public.approvals a
+LEFT JOIN public.workflow_waits w ON w.workspace_id = a.workspace_id AND w.approval_id = a.id
+WHERE a.decision IS NULL AND a.expires_at <= sqlc.arg(at_time)::timestamptz
+ORDER BY a.expires_at, a.id
+LIMIT sqlc.arg(max_rows)::int;
+
+-- name: ExpireApproval :one
+-- Expires one open approval past its expiry; no row when it is decided.
 UPDATE public.approvals SET decision = 'expired', decided_by = 'system', decided_at = now(), updated_at = now()
-WHERE id IN (SELECT a.id FROM public.approvals a
-             WHERE a.decision IS NULL AND a.expires_at <= sqlc.arg(at_time)::timestamptz
-             ORDER BY a.expires_at, a.id
-             FOR UPDATE SKIP LOCKED LIMIT sqlc.arg(max_rows)::int)
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id)
+  AND decision IS NULL AND expires_at <= sqlc.arg(at_time)::timestamptz
 RETURNING *;
 
 -- name: SetApprovalMessage :execrows

@@ -596,59 +596,46 @@ func (q *Queries) DecideApproval(ctx context.Context, arg DecideApprovalParams) 
 	return i, err
 }
 
-const expireApprovals = `-- name: ExpireApprovals :many
+const expireApproval = `-- name: ExpireApproval :one
 UPDATE public.approvals SET decision = 'expired', decided_by = 'system', decided_at = now(), updated_at = now()
-WHERE id IN (SELECT a.id FROM public.approvals a
-             WHERE a.decision IS NULL AND a.expires_at <= $1::timestamptz
-             ORDER BY a.expires_at, a.id
-             FOR UPDATE SKIP LOCKED LIMIT $2::int)
+WHERE workspace_id = $1 AND id = $2
+  AND decision IS NULL AND expires_at <= $3::timestamptz
 RETURNING id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer
 `
 
-type ExpireApprovalsParams struct {
-	AtTime  pgtype.Timestamptz
-	MaxRows int32
+type ExpireApprovalParams struct {
+	WorkspaceID pgtype.UUID
+	ID          int64
+	AtTime      pgtype.Timestamptz
 }
 
-func (q *Queries) ExpireApprovals(ctx context.Context, arg ExpireApprovalsParams) ([]Approval, error) {
-	rows, err := q.db.Query(ctx, expireApprovals, arg.AtTime, arg.MaxRows)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []Approval
-	for rows.Next() {
-		var i Approval
-		if err := rows.Scan(
-			&i.ID,
-			&i.WorkspaceID,
-			&i.Kind,
-			&i.RunID,
-			&i.ItemID,
-			&i.Action,
-			&i.Resource,
-			&i.Payload,
-			&i.Options,
-			&i.Nonce,
-			&i.ExpiresAt,
-			&i.Decision,
-			&i.Answer,
-			&i.DecidedBy,
-			&i.DecidedAt,
-			&i.TelegramMessageID,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.ReplyMessageID,
-			&i.PendingAnswer,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
+// Expires one open approval past its expiry; no row when it is decided.
+func (q *Queries) ExpireApproval(ctx context.Context, arg ExpireApprovalParams) (Approval, error) {
+	row := q.db.QueryRow(ctx, expireApproval, arg.WorkspaceID, arg.ID, arg.AtTime)
+	var i Approval
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Kind,
+		&i.RunID,
+		&i.ItemID,
+		&i.Action,
+		&i.Resource,
+		&i.Payload,
+		&i.Options,
+		&i.Nonce,
+		&i.ExpiresAt,
+		&i.Decision,
+		&i.Answer,
+		&i.DecidedBy,
+		&i.DecidedAt,
+		&i.TelegramMessageID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ReplyMessageID,
+		&i.PendingAnswer,
+	)
+	return i, err
 }
 
 const failExhaustedBehaviorRuns = `-- name: FailExhaustedBehaviorRuns :execrows
@@ -1741,6 +1728,48 @@ func (q *Queries) ListDecisions(ctx context.Context, arg ListDecisionsParams) ([
 			&i.CreatedAt,
 			&i.ForgottenAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDueApprovals = `-- name: ListDueApprovals :many
+SELECT a.workspace_id, a.id, COALESCE(w.execution_id, 0)::bigint AS execution_id
+FROM public.approvals a
+LEFT JOIN public.workflow_waits w ON w.workspace_id = a.workspace_id AND w.approval_id = a.id
+WHERE a.decision IS NULL AND a.expires_at <= $1::timestamptz
+ORDER BY a.expires_at, a.id
+LIMIT $2::int
+`
+
+type ListDueApprovalsParams struct {
+	AtTime  pgtype.Timestamptz
+	MaxRows int32
+}
+
+type ListDueApprovalsRow struct {
+	WorkspaceID pgtype.UUID
+	ID          int64
+	ExecutionID int64
+}
+
+// Open approvals past their expiry with the execution of their wait (0 for
+// none), read before expiring them so bound executions are locked first.
+func (q *Queries) ListDueApprovals(ctx context.Context, arg ListDueApprovalsParams) ([]ListDueApprovalsRow, error) {
+	rows, err := q.db.Query(ctx, listDueApprovals, arg.AtTime, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListDueApprovalsRow
+	for rows.Next() {
+		var i ListDueApprovalsRow
+		if err := rows.Scan(&i.WorkspaceID, &i.ID, &i.ExecutionID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

@@ -9,6 +9,13 @@ RETURNING *;
 SELECT * FROM public.workflow_waits
 WHERE workspace_id = sqlc.arg(workspace_id) AND approval_id = sqlc.arg(approval_id);
 
+-- name: GetWorkflowWaitByApprovalNonce :one
+-- The wait of an approval found by its nonce, read before the decision so
+-- the execution can be locked first (lock order: execution, then approval).
+SELECT w.* FROM public.workflow_waits w
+JOIN public.approvals a ON a.workspace_id = w.workspace_id AND a.id = w.approval_id
+WHERE w.workspace_id = sqlc.arg(workspace_id) AND a.nonce = sqlc.arg(nonce);
+
 -- name: ListStepWaits :many
 SELECT w.id AS wait_id, w.wait_kind, sqlc.embed(a),
   COALESCE(sg.id, 0)::bigint AS signal_row_id, sg.consumed_at
@@ -40,10 +47,15 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id)
   AND consumed_at IS NULL;
 
 -- name: ListUnsignalledDecidedWaits :many
--- Bound approvals whose decision is recorded but whose signal is missing.
+-- Bound approvals whose decision is recorded but whose signal is missing,
+-- on an open wait of a live execution. A closed wait or a terminal
+-- execution never gets a signal: its decision took the legacy route.
 SELECT w.* FROM public.workflow_waits w
 JOIN public.approvals a ON a.workspace_id = w.workspace_id AND a.id = w.approval_id
+JOIN public.workflow_executions e ON e.workspace_id = w.workspace_id AND e.id = w.execution_id
 WHERE a.decision IS NOT NULL
+  AND w.closed_at IS NULL
+  AND e.state NOT IN ('COMPLETED','FAILED','CANCELLED')
   AND (sqlc.narg(execution_id)::bigint IS NULL
        OR (w.workspace_id = sqlc.narg(workspace_id)::uuid AND w.execution_id = sqlc.narg(execution_id)::bigint))
   AND NOT EXISTS (SELECT 1 FROM public.workflow_signals sg

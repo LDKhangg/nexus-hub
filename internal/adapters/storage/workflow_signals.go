@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -25,7 +26,10 @@ import (
 //     an execution.
 //   - Deciding or expiring a bound approval records one signal
 //     (workflow_signals) in the same transaction as the decision and, when
-//     the step is waiting, queues the step again in that transaction.
+//     the step is waiting, queues the step again in that transaction. The
+//     execution is locked first; when the wait is closed or the execution
+//     is terminal, no signal is recorded and the decision takes the legacy
+//     route, exactly as for an unbound approval.
 //   - The step's fenced continuation applies the decision and marks the
 //     signal consumed; a step that ends its attempt in a wait while an
 //     unconsumed signal exists is queued again at once (WaitJob).
@@ -129,18 +133,50 @@ func wakeWaitingStepTx(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, exe
 	return queued, true, nil
 }
 
+// liveApprovalWaitTx returns the approval's wait when it is open and its
+// execution is not terminal. It locks the execution (a no-op when the
+// caller already holds it): closing waits and ending an execution happen
+// under that lock, so the answer holds until the transaction ends. A closed
+// wait or a terminal execution reports false: a decision on it takes the
+// legacy route and never gets a signal.
+func liveApprovalWaitTx(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, approvalID int64) (sqlc.WorkflowWait, bool, error) {
+	wait, err := q.GetWorkflowWaitByApproval(ctx, sqlc.GetWorkflowWaitByApprovalParams{WorkspaceID: ws, ApprovalID: approvalID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return sqlc.WorkflowWait{}, false, nil
+	}
+	if err != nil {
+		return sqlc.WorkflowWait{}, false, err
+	}
+	execution, err := q.LockWorkflowExecution(ctx, sqlc.LockWorkflowExecutionParams{WorkspaceID: ws, ID: wait.ExecutionID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return sqlc.WorkflowWait{}, false, nil
+	}
+	if err != nil {
+		return sqlc.WorkflowWait{}, false, err
+	}
+	// Re-read under the lock: the wait may have closed after the first read.
+	wait, err = q.GetWorkflowWaitByApproval(ctx, sqlc.GetWorkflowWaitByApprovalParams{WorkspaceID: ws, ApprovalID: approvalID})
+	if err != nil {
+		return sqlc.WorkflowWait{}, false, err
+	}
+	if wait.ClosedAt.Valid || workflow.State(execution.State).IsTerminal() {
+		return sqlc.WorkflowWait{}, false, nil
+	}
+	return wait, true, nil
+}
+
 // recordApprovalSignalTx records the signal of a decided approval when it
-// is bound to an execution step, and wakes the step. It returns the bound
-// execution ID, 0 for an approval without a wait.
+// is bound to an open wait of a live execution, and wakes the step. It
+// returns the bound execution ID, or 0 when the decision takes the legacy
+// route (no wait, a closed wait or a terminal execution). The caller locks
+// the bound execution before it decides the approval (lock order:
+// execution, then approval).
 func recordApprovalSignalTx(ctx context.Context, q *sqlc.Queries, approval sqlc.Approval, at time.Time) (int64, error) {
 	if !approval.Decision.Valid {
 		return 0, nil
 	}
-	wait, err := q.GetWorkflowWaitByApproval(ctx, sqlc.GetWorkflowWaitByApprovalParams{WorkspaceID: approval.WorkspaceID, ApprovalID: approval.ID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, nil
-	}
-	if err != nil {
+	wait, live, err := liveApprovalWaitTx(ctx, q, approval.WorkspaceID, approval.ID)
+	if err != nil || !live {
 		return 0, err
 	}
 	if err := insertWaitSignal(ctx, q, wait, approval.Decision.String, approvalSignalID(approval.ID)); err != nil {
@@ -175,16 +211,21 @@ func listMissingSignalWaits(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID
 }
 
 // repairWaitSignalTx records the signal of one bound approval whose
-// decision is recorded without one.
+// decision is recorded without one, only while its wait is open and its
+// execution live (checked under the execution lock).
 func repairWaitSignalTx(ctx context.Context, q *sqlc.Queries, wait sqlc.WorkflowWait) error {
-	approval, err := q.GetApproval(ctx, sqlc.GetApprovalParams{WorkspaceID: wait.WorkspaceID, ID: wait.ApprovalID})
+	live, ok, err := liveApprovalWaitTx(ctx, q, wait.WorkspaceID, wait.ApprovalID)
+	if err != nil || !ok {
+		return err
+	}
+	approval, err := q.GetApproval(ctx, sqlc.GetApprovalParams{WorkspaceID: live.WorkspaceID, ID: live.ApprovalID})
 	if err != nil {
 		return err
 	}
 	if !approval.Decision.Valid {
 		return nil
 	}
-	return insertWaitSignal(ctx, q, wait, approval.Decision.String, approvalSignalID(approval.ID))
+	return insertWaitSignal(ctx, q, live, approval.Decision.String, approvalSignalID(approval.ID))
 }
 
 // repairMissingSignalsTx records the signals of bound approvals whose
@@ -211,7 +252,11 @@ func closeExecutionWaits(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, e
 
 // --- behavior side (BehaviorStore) ---
 
-// decideApprovalTx takes the decision and records its signal atomically.
+// decideApprovalTx takes the decision and, for an approval bound to an open
+// wait of a live execution, records its signal atomically. The bound
+// execution is locked before the approval row (lock order: execution, then
+// approval), so a decision either wakes a live wait or takes the legacy
+// route (ExecutionID 0), never neither and never both.
 func (s *BehaviorStore) decideApprovalTx(ctx context.Context, params sqlc.DecideApprovalParams, now time.Time) (behavior.Approval, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -219,6 +264,17 @@ func (s *BehaviorStore) decideApprovalTx(ctx context.Context, params sqlc.Decide
 	}
 	defer tx.Rollback(ctx)
 	q := sqlc.New(tx)
+	// A wait is created with its approval, so one not found here never
+	// appears later in this transaction.
+	wait, err := q.GetWorkflowWaitByApprovalNonce(ctx, sqlc.GetWorkflowWaitByApprovalNonceParams{WorkspaceID: params.WorkspaceID, Nonce: params.Nonce})
+	switch {
+	case err == nil:
+		if _, err := q.LockWorkflowExecution(ctx, sqlc.LockWorkflowExecutionParams{WorkspaceID: wait.WorkspaceID, ID: wait.ExecutionID}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return behavior.Approval{}, err
+		}
+	case !errors.Is(err, pgx.ErrNoRows):
+		return behavior.Approval{}, err
+	}
 	row, err := q.DecideApproval(ctx, params)
 	if err != nil {
 		return behavior.Approval{}, err
@@ -235,8 +291,11 @@ func (s *BehaviorStore) decideApprovalTx(ctx context.Context, params sqlc.Decide
 	return a, nil
 }
 
-// expireApprovalsTx expires due approvals and records the signals of bound
-// ones atomically.
+// expireApprovalsTx expires due approvals and records the signals of ones
+// bound to an open wait of a live execution atomically. The bound
+// executions are locked first, in ID order, then each approval is expired;
+// an approval on a closed wait or a terminal execution is returned with
+// ExecutionID 0 and gets the legacy expiry handling.
 func (s *BehaviorStore) expireApprovalsTx(ctx context.Context, now time.Time, limit int) ([]behavior.Approval, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -244,12 +303,36 @@ func (s *BehaviorStore) expireApprovalsTx(ctx context.Context, now time.Time, li
 	}
 	defer tx.Rollback(ctx)
 	q := sqlc.New(tx)
-	rows, err := q.ExpireApprovals(ctx, sqlc.ExpireApprovalsParams{AtTime: ts(now), MaxRows: int32(clamp(limit, 1, 1000))})
+	due, err := q.ListDueApprovals(ctx, sqlc.ListDueApprovalsParams{AtTime: ts(now), MaxRows: int32(clamp(limit, 1, 1000))})
 	if err != nil {
 		return nil, err
 	}
-	out := make([]behavior.Approval, 0, len(rows))
-	for _, r := range rows {
+	bound := make(map[int64]pgtype.UUID)
+	for _, d := range due {
+		if d.ExecutionID != 0 {
+			bound[d.ExecutionID] = d.WorkspaceID
+		}
+	}
+	executionIDs := make([]int64, 0, len(bound))
+	for id := range bound {
+		executionIDs = append(executionIDs, id)
+	}
+	slices.Sort(executionIDs)
+	for _, id := range executionIDs {
+		if _, err := q.LockWorkflowExecution(ctx, sqlc.LockWorkflowExecutionParams{WorkspaceID: bound[id], ID: id}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+	}
+	out := make([]behavior.Approval, 0, len(due))
+	for _, d := range due {
+		r, err := q.ExpireApproval(ctx, sqlc.ExpireApprovalParams{AtTime: ts(now), WorkspaceID: d.WorkspaceID, ID: d.ID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Decided or expired by another transaction meanwhile.
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
 		executionID, err := recordApprovalSignalTx(ctx, q, r, now)
 		if err != nil {
 			return nil, err
@@ -432,7 +515,7 @@ func (s *WorkflowStore) HandleSignal(ctx context.Context, signal workflow.Signal
 	if err != nil {
 		return err
 	}
-	if wait.ExecutionID != signal.ExecutionID || wait.StepKey != signal.BlockedStepKey {
+	if wait.ExecutionID != signal.ExecutionID || wait.StepKey != signal.BlockedStepKey || wait.ClosedAt.Valid {
 		return workflow.ErrNotEligible
 	}
 	approval, err := q.GetApproval(ctx, sqlc.GetApprovalParams{WorkspaceID: ws, ID: approvalID})

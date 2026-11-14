@@ -143,6 +143,35 @@ func (q *Queries) GetWorkflowWaitByApproval(ctx context.Context, arg GetWorkflow
 	return i, err
 }
 
+const getWorkflowWaitByApprovalNonce = `-- name: GetWorkflowWaitByApprovalNonce :one
+SELECT w.id, w.workspace_id, w.execution_id, w.step_key, w.approval_id, w.wait_kind, w.created_at, w.closed_at FROM public.workflow_waits w
+JOIN public.approvals a ON a.workspace_id = w.workspace_id AND a.id = w.approval_id
+WHERE w.workspace_id = $1 AND a.nonce = $2
+`
+
+type GetWorkflowWaitByApprovalNonceParams struct {
+	WorkspaceID pgtype.UUID
+	Nonce       string
+}
+
+// The wait of an approval found by its nonce, read before the decision so
+// the execution can be locked first (lock order: execution, then approval).
+func (q *Queries) GetWorkflowWaitByApprovalNonce(ctx context.Context, arg GetWorkflowWaitByApprovalNonceParams) (WorkflowWait, error) {
+	row := q.db.QueryRow(ctx, getWorkflowWaitByApprovalNonce, arg.WorkspaceID, arg.Nonce)
+	var i WorkflowWait
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepKey,
+		&i.ApprovalID,
+		&i.WaitKind,
+		&i.CreatedAt,
+		&i.ClosedAt,
+	)
+	return i, err
+}
+
 const insertWorkflowSignal = `-- name: InsertWorkflowSignal :one
 INSERT INTO public.workflow_signals (
   workspace_id, signal_id, execution_id, step_key, wait_id, reference_kind, reference_id, decision)
@@ -301,7 +330,10 @@ func (q *Queries) ListStepWaits(ctx context.Context, arg ListStepWaitsParams) ([
 const listUnsignalledDecidedWaits = `-- name: ListUnsignalledDecidedWaits :many
 SELECT w.id, w.workspace_id, w.execution_id, w.step_key, w.approval_id, w.wait_kind, w.created_at, w.closed_at FROM public.workflow_waits w
 JOIN public.approvals a ON a.workspace_id = w.workspace_id AND a.id = w.approval_id
+JOIN public.workflow_executions e ON e.workspace_id = w.workspace_id AND e.id = w.execution_id
 WHERE a.decision IS NOT NULL
+  AND w.closed_at IS NULL
+  AND e.state NOT IN ('COMPLETED','FAILED','CANCELLED')
   AND ($1::bigint IS NULL
        OR (w.workspace_id = $2::uuid AND w.execution_id = $1::bigint))
   AND NOT EXISTS (SELECT 1 FROM public.workflow_signals sg
@@ -315,7 +347,9 @@ type ListUnsignalledDecidedWaitsParams struct {
 	WorkspaceID pgtype.UUID
 }
 
-// Bound approvals whose decision is recorded but whose signal is missing.
+// Bound approvals whose decision is recorded but whose signal is missing,
+// on an open wait of a live execution. A closed wait or a terminal
+// execution never gets a signal: its decision took the legacy route.
 func (q *Queries) ListUnsignalledDecidedWaits(ctx context.Context, arg ListUnsignalledDecidedWaitsParams) ([]WorkflowWait, error) {
 	rows, err := q.db.Query(ctx, listUnsignalledDecidedWaits, arg.ExecutionID, arg.WorkspaceID)
 	if err != nil {
