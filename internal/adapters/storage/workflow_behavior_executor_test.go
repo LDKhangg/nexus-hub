@@ -544,7 +544,7 @@ func TestBehaviorWorkflowCrashReclaimPreservesReceiptsAndUsage(t *testing.T) {
 		if len(texts) != 2 || texts[0] == "" || texts[1] == "" || texts[0] == texts[1] {
 			t.Fatalf("%s messages=%q; want one informational notice and one run report", label, texts)
 		}
-		for i, key := range []string{behavior.DigestKeyFYI, "run_action:2"} {
+		for i, key := range []string{behavior.DigestKeyNotify, "run_action:2"} {
 			var messageID int64
 			err := e.pool.QueryRow(e.ctx, `SELECT telegram_message_id FROM behavior_messages WHERE workspace_id=$1 AND run_id=$2 AND msg_key=$3`, workspaceA, runID, key).Scan(&messageID)
 			if err != nil || messageID != int64(101+i) {

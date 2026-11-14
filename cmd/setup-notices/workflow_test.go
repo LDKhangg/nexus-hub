@@ -220,7 +220,7 @@ func TestWorkflowCLIReasonCodesAndUnknownFallback(t *testing.T) {
 
 	assertFailedReason("behavior-reason", workflow.ReasonCode(behavior.CodeRunMissing), behavior.CodeRunMissing, "")
 	assertFailedReason("agent-reason", workflow.ReasonCode(agent.CodeInvalidDecision), agent.CodeInvalidDecision, "")
-	const callerText = "caller-private-reason-text"
+	const callerText = "caller_private_reason_text"
 	assertFailedReason("unknown-reason", workflow.ReasonCode(callerText), "unknown", callerText)
 
 	signalled := f.start(t, "signal-reasons", workflow.References{}, "model")
