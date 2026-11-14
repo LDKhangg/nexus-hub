@@ -244,22 +244,27 @@ func TestResumePinsOptionalWaitGeneration(t *testing.T) {
 	})
 
 	t.Run("matching and zero wait IDs remain accepted", func(t *testing.T) {
-		e := newWFEnv(t)
-		for _, pinned := range []bool{true, false} {
-			br, _, aps := e.waitingRun(workspaceA, fmt.Sprintf("task:compatible:%t", pinned), nil, behavior.ApprovalPostDraft)
-			detail, err := e.store.GetExecutionDetail(e.ctx, workspaceA, br.ex.ID)
-			if err != nil || len(detail.Waits) != 1 {
-				t.Fatalf("detail=%#v err=%v", detail, err)
-			}
-			mustExec(t, e.ctx, e.pool, `UPDATE approvals SET decision='approved', decided_by='owner', decided_at=now() WHERE id=$1`, aps[0].ID)
-			waitID := int64(0)
-			if pinned {
-				waitID = detail.Waits[0].ID
-			}
-			cmd := workflow.Command{WorkspaceID: workspaceA, ExecutionID: br.ex.ID, WaitID: waitID, IdempotencyKey: fmt.Sprintf("resume-compatible-%t", pinned)}
-			if _, err := e.store.ResumeExecution(e.ctx, cmd); err != nil {
-				t.Fatalf("pinned=%t resume: %v", pinned, err)
-			}
+		for _, tc := range []struct {
+			name   string
+			pinned bool
+		}{{"matching wait ID", true}, {"zero wait ID", false}} {
+			t.Run(tc.name, func(t *testing.T) {
+				e := newWFEnv(t)
+				br, _, aps := e.waitingRun(workspaceA, fmt.Sprintf("task:compatible:%t", tc.pinned), nil, behavior.ApprovalPostDraft)
+				detail, err := e.store.GetExecutionDetail(e.ctx, workspaceA, br.ex.ID)
+				if err != nil || len(detail.Waits) != 1 {
+					t.Fatalf("detail=%#v err=%v", detail, err)
+				}
+				mustExec(t, e.ctx, e.pool, `UPDATE approvals SET decision='approved', decided_by='owner', decided_at=now() WHERE id=$1`, aps[0].ID)
+				waitID := int64(0)
+				if tc.pinned {
+					waitID = detail.Waits[0].ID
+				}
+				cmd := workflow.Command{WorkspaceID: workspaceA, ExecutionID: br.ex.ID, WaitID: waitID, IdempotencyKey: fmt.Sprintf("resume-compatible-%t", tc.pinned)}
+				if _, err := e.store.ResumeExecution(e.ctx, cmd); err != nil {
+					t.Fatalf("pinned=%t resume: %v", tc.pinned, err)
+				}
+			})
 		}
 	})
 }

@@ -543,9 +543,12 @@ func TestPhase4TelegramAssistant(t *testing.T) {
 			t.Fatal(err)
 		}
 		for k := range payload {
-			if k != "ref" && k != "name" && k != "style" {
+			if k != "ref" && k != "name" && k != "style" && k != "chat_id" {
 				t.Fatalf("payload keeps extra field %q: %s", k, row.Payload)
 			}
+		}
+		if chatID, ok := payload["chat_id"].(float64); !ok || int64(chatID) != 77 {
+			t.Fatalf("payload chat_id=%v, want proposing chat 77: %s", payload["chat_id"], row.Payload)
 		}
 		if !strings.Contains(logs.String(), "code=assistant_answer") {
 			t.Fatalf("job log line missing: %q", logs.String())
@@ -729,7 +732,7 @@ func TestPhase4TelegramAssistant(t *testing.T) {
 		for _, input := range []string{
 			`{"ref":"clickup:1 evil","name":"Boss"}`,
 			`{"ref":"../../etc","name":"Boss"}`,
-			`{"ref":"clickup:1","name":" \\u202e\\n "}`,
+			`{"ref":"clickup:1","name":" \u202e\n "}`,
 			`{"ref":"","name":"Boss"}`,
 		} {
 			e = d5ToolEnv(d5ProposalModel(toolContactAlias, input))
