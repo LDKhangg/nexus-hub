@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage"
+	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
 	"github.com/google/uuid"
 )
@@ -290,19 +291,58 @@ func TestWorkflowCLINoPayloadLeak(t *testing.T) {
 // reads neither mutate the execution nor expose legacy payload content.
 func TestLegacyInspectTraceLinks(t *testing.T) {
 	f := newWorkflowCLIFixture(t)
-	ex := f.start(t, "legacy-links", workflow.References{
-		SourceKind: "legacy.behavior", SourceID: "run:71", Subject: "task:9", OperationKey: "legacy:71", LegacyRunID: 71, LegacyJobID: 91,
-	}, "model")
-	var before string
-	if err := f.pool.QueryRow(f.ctx, `SELECT row_to_json(e)::text FROM workflow_executions e WHERE id=$1`, ex.ID).Scan(&before); err != nil {
+	behaviors, err := storage.NewBehaviorStore(f.pool)
+	if err != nil {
 		t.Fatal(err)
 	}
-	out := f.must("workflow", "show", fmt.Sprint(ex.ID), "--workspace-id", f.ws)
-	if !strings.Contains(out, `"legacy_run_id":71`) || !strings.Contains(out, `"legacy_job_id":91`) {
-		t.Fatalf("legacy links missing: %s", out)
+	version, err := behaviors.GetVersion(f.ctx, f.ws, "restore-cli", 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	var after string
-	if err := f.pool.QueryRow(f.ctx, `SELECT row_to_json(e)::text FROM workflow_executions e WHERE id=$1`, ex.ID).Scan(&after); err != nil || after != before {
-		t.Fatalf("read changed execution=%v err=%v", after != before, err)
+	trigger, err := json.Marshal(behavior.TriggerData{Type: behavior.TriggerCommentAdded, EventKey: "legacy-event-71", TaskID: "task-9", CommentID: "comment-71"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, created, err := behaviors.CreateRun(f.ctx, f.ws, behavior.NewRun{
+		BehaviorID: version.BehaviorID, VersionID: version.ID, Version: version.Version,
+		TriggerKind: behavior.TriggerCommentAdded, Trigger: trigger, Subject: behavior.TaskSubject("task-9"), Revision: "legacy-event-71", RunAt: time.Now().Add(-time.Minute),
+	})
+	if err != nil || !created {
+		t.Fatalf("legacy run created=%v err=%v", created, err)
+	}
+	cutover := decodeObject(t, f.must("workflow", "cutover", "--workspace-id", f.ws, "--apply"))
+	behaviorRuns, ok := cutover["behavior_runs"].(map[string]any)
+	if !ok || cutover["imported_executions"] != float64(1) || behaviorRuns["pending"] != float64(1) {
+		t.Fatalf("cutover counters=%v", cutover)
+	}
+	var parentID int64
+	if err := f.pool.QueryRow(f.ctx, `SELECT id FROM workflow_executions WHERE legacy_run_id=$1`, run.ID).Scan(&parentID); err != nil {
+		t.Fatal(err)
+	}
+	job := f.claim(t)
+	if job.ExecutionID != parentID {
+		t.Fatalf("claimed execution=%d want migrated parent=%d", job.ExecutionID, parentID)
+	}
+	if err := f.store.FailJob(f.ctx, jobResult(job, workflow.ReasonAttemptsExhausted, nil)); err != nil {
+		t.Fatal(err)
+	}
+	retry := decodeObject(t, f.must("workflow", "retry", fmt.Sprint(parentID), "--workspace-id", f.ws))
+	childID := int64(retry["retry_execution_id"].(float64))
+
+	trace := f.must("trace", "--workspace-id", f.ws, fmt.Sprint(run.ID), "--json")
+	for _, want := range []string{fmt.Sprintf(`"id": %d`, run.ID), fmt.Sprintf(`"execution_id": %d`, parentID), fmt.Sprintf(`"execution_id": %d`, childID), fmt.Sprintf(`"parent_execution_id": %d`, parentID)} {
+		if !strings.Contains(trace, want) {
+			t.Fatalf("trace missing %s: %s", want, trace)
+		}
+	}
+	show := f.must("workflow", "show", fmt.Sprint(parentID), "--workspace-id", f.ws)
+	if !strings.Contains(show, fmt.Sprintf(`"legacy_run_id":%d`, run.ID)) {
+		t.Fatalf("workflow show lacks legacy run link: %s", show)
+	}
+	inspect := f.must("inspect")
+	for _, want := range []string{fmt.Sprintf(`"execution_id":%d`, parentID), fmt.Sprintf(`"execution_id":%d`, childID), fmt.Sprintf(`"legacy_run_id":%d`, run.ID)} {
+		if !strings.Contains(inspect, want) {
+			t.Fatalf("inspect missing %s", want)
+		}
 	}
 }

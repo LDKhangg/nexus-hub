@@ -288,6 +288,65 @@ func TestWorkflowCutoverNoDualClaimers(t *testing.T) {
 	}
 }
 
+// TC-C18/TC-C23 (REQ-13, REQ-14, REQ-16; D-P1): after apply, the existing
+// ingest path creates runs that only the durable starter can schedule. The
+// cutover report matches imported rows, the legacy claimer is fenced, and
+// both legacy and durable claims carry the behavior's real name.
+func TestWorkflowCutoverPostApplyIngestUsesDurableExecution(t *testing.T) {
+	e := newWFEnv(t)
+	doc := wfDoc("post-cutover-ingest")
+	doc.Triggers = []behavior.TriggerDoc{{Type: behavior.TriggerChatMessage}}
+	e.publishEnabled(workspaceA, doc)
+	before := e.legacyRun(workspaceA, doc.Name, "task:before")
+	claimed := e.legacyClaim(5 * time.Minute)
+	if claimed == nil || claimed.ID != before.ID || claimed.BehaviorName != doc.Name {
+		t.Fatalf("D-P1: legacy claim=%+v", claimed)
+	}
+
+	report, err := e.store.Cutover(e.ctx, workspaceA, true)
+	if err != nil || !report.Applied || report.BehaviorRunsRunning != 1 || report.BehaviorRunsLeaseLive != 1 || report.ImportedExecutions != 1 {
+		t.Fatalf("TC-C18: cutover report=%+v err=%v", report, err)
+	}
+	if n := e.count(`SELECT count(*) FROM workflow_executions WHERE legacy_run_id=$1`, before.ID); n != report.ImportedExecutions {
+		t.Fatalf("TC-C18: imported rows=%d report=%d", n, report.ImportedExecutions)
+	}
+	if run := e.legacyClaim(time.Minute); run != nil {
+		t.Fatalf("TC-C23: legacy claimer received post-cutover run %+v", run)
+	}
+
+	messageID := "post-cutover-message-1"
+	event := behavior.Event{
+		Type: behavior.TriggerChatMessage, Key: behavior.ChatSubject(messageID), MessageID: messageID,
+		IntegrationID: "clickup-source", ChannelID: "dm-1", ChannelType: "dm", TeamID: "team-1",
+	}
+	created, err := e.behaviors.StartChatRuns(e.ctx, workspaceA, []behavior.Event{event})
+	if err != nil || created != 1 {
+		t.Fatalf("TC-C23: ingest created=%d err=%v", created, err)
+	}
+	if n, err := e.store.StartPendingBehaviorRuns(e.ctx, workspaceA, e.base, 10); err != nil || n != 1 {
+		t.Fatalf("TC-C23: durable starter=%d err=%v", n, err)
+	}
+	var runID, executionID int64
+	if err := e.pool.QueryRow(e.ctx, `SELECT r.id,x.id FROM behavior_runs r JOIN workflow_executions x ON x.legacy_run_id=r.id WHERE r.revision=$1`, behavior.ChatSubject(messageID)).Scan(&runID, &executionID); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.count(`SELECT count(*) FROM workflow_executions`); n != 2 {
+		t.Fatalf("TC-C23: executions=%d want cutover import plus ingested execution", n)
+	}
+	if run := e.legacyClaim(time.Minute); run != nil {
+		t.Fatalf("TC-C23: legacy claimer received durable run %+v", run)
+	}
+
+	job := e.claim(e.base)
+	if job.ExecutionID != executionID {
+		t.Fatalf("TC-C23: claimed execution=%d want ingested=%d", job.ExecutionID, executionID)
+	}
+	durable, err := e.behaviors.BeginDurableRunAttempt(e.ctx, fenceOf(job, e.base), runID, e.base.Add(10*time.Minute))
+	if err != nil || durable.BehaviorName != doc.Name {
+		t.Fatalf("D-P1: durable run=%+v err=%v", durable, err)
+	}
+}
+
 // TC-P704 (REQ-14): imports keep IDs, receipts and references: the
 // execution's operation key is behavior_run:<id>, the legacy run link is
 // kept, historical tool runs still resolve their run, and receipt keys are
