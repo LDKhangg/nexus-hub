@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -164,15 +165,52 @@ func TestMigration00003_Constraints(t *testing.T) {
 			t.Fatalf("RLS off on %s", table)
 		}
 	}
+	// goose runs Downs newest first: every later migration's Down runs
+	// before 00003's (later tables reference agent_jobs), then 00003 Down,
+	// then every Up again in order. The 00003 round trip is still proven.
 	_, file, _, _ := runtime.Caller(0)
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(file), "../../../db/migrations/00003_create_agent_core.sql"))
-	if err != nil {
-		t.Fatal(err)
+	paths, err := filepath.Glob(filepath.Join(filepath.Dir(file), "../../../db/migrations/*.sql"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("migrations: %v", err)
 	}
-	up, down, _ := strings.Cut(string(data), "-- +goose Down")
-	mustExec(t, ctx, pool, down)
+	sort.Strings(paths)
+	type migration struct{ name, up, down string }
+	var later []migration
+	var core migration
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		up, down, _ := strings.Cut(string(data), "-- +goose Down")
+		m := migration{name: filepath.Base(path), up: up, down: down}
+		switch {
+		case m.name < "00003":
+		case strings.HasPrefix(m.name, "00003_"):
+			core = m
+		default:
+			later = append(later, m)
+		}
+	}
+	if core.name != "00003_create_agent_core.sql" {
+		t.Fatalf("00003 not found: %q", core.name)
+	}
+	for i := len(later) - 1; i >= 0; i-- {
+		if _, err := pool.Exec(ctx, later[i].down); err != nil {
+			t.Fatalf("down %s: %v", later[i].name, err)
+		}
+	}
+	mustExec(t, ctx, pool, core.down)
 	if scalar[bool](t, ctx, pool, `SELECT to_regclass('public.agent_jobs') IS NOT NULL`) {
 		t.Fatal("Down left agent_jobs")
 	}
-	mustExec(t, ctx, pool, up)
+	mustExec(t, ctx, pool, core.up)
+	if !scalar[bool](t, ctx, pool, `SELECT to_regclass('public.agent_jobs') IS NOT NULL`) {
+		t.Fatal("Up did not recreate agent_jobs")
+	}
+	for _, m := range later {
+		if _, err := pool.Exec(ctx, m.up); err != nil {
+			t.Fatalf("up %s: %v", m.name, err)
+		}
+	}
 }

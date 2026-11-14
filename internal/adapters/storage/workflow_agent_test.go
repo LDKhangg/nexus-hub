@@ -62,6 +62,7 @@ type agentWF struct {
 	worker *workflow.Worker
 	clock  *manualClock
 	ps     agent.PipelineSettings
+	orch   *agent.Orchestrator
 }
 
 var testPipelineSettings = agent.PipelineSettings{Limits: tools.DefaultLimits(), MaxInputTokens: 60000, MaxOutputTokens: 6000,
@@ -89,7 +90,12 @@ func newAgentWF(t *testing.T, e agentEnv, o *agent.Orchestrator, store agent.Dur
 		t.Fatal(err)
 	}
 	clock := &manualClock{now: time.Now().Add(time.Second)}
-	return agentWF{agentEnv: e, wf: wf, aws: aws, reg: reg, clock: clock, ps: testPipelineSettings,
+	// P7: the durable starters only serve a cut-over workspace; a second
+	// cutover of the same workspace is a no-op.
+	if _, err := wf.Cutover(e.ctx, workspaceA, true); err != nil {
+		t.Fatalf("cutover: %v", err)
+	}
+	return agentWF{agentEnv: e, wf: wf, aws: aws, reg: reg, clock: clock, ps: testPipelineSettings, orch: o,
 		worker: workflow.NewWorker(wf, reg, clock, workflow.WorkerSettings{Workers: 1, PollInterval: time.Millisecond})}
 }
 
@@ -234,37 +240,40 @@ func TestAgentWorkflowLegacyEquivalence(t *testing.T) {
 	}
 }
 
-// TC-B41 (REQ-13): adoption respects debounce/max-wait (run_at) and the
-// thread exclusion in both directions; concurrent adopters start one
-// execution per batch; the legacy claimer never takes an adopted batch or
-// another job of its thread.
+// TC-B41 (REQ-13, P7): adoption respects debounce/max-wait (run_at) and
+// the thread exclusion; a legacy lease taken before the cutover stays
+// unavailable until it ends, then the job is adopted and the late legacy
+// claimant's writes fail; concurrent adopters start one execution per
+// batch; the legacy claimer takes nothing of the cut-over workspace.
 func TestAgentWorkflowDebounceAndThreadExclusion(t *testing.T) {
 	e := newAgentEnv(t, enabledCfg)
 	mustExec(t, e.ctx, e.pool, `INSERT INTO hub_threads(id,workspace_id,integration_id,thread_type,external_id,title) VALUES($1,$2,$3,'task','def','Other')`, threadB, workspaceA, integrationA)
-	a := newAgentWF(t, e, investigateOrch(t, e, &countingTriager{d: agent.TriageDecision{Category: agent.CategoryNotify}}, nil, 60000), nil)
 	e.message(t, "c1", "external_user", "hello")
-	future := e.job(t, time.Now().Add(time.Hour))
-	if n := a.startDue(t); n != 0 {
-		t.Fatalf("TC-B41: adopted a batch before its debounce ended (%d)", n)
-	}
-	mustExec(t, e.ctx, e.pool, `UPDATE agent_jobs SET run_at=now()-interval '1 second' WHERE id=$1`, future)
-	// A legacy claim on the thread blocks adoption of its next batch.
+	first := e.job(t, time.Now().Add(-time.Second))
 	legacy, err := e.store.Claim(e.ctx, time.Now())
-	if err != nil || legacy == nil {
-		t.Fatalf("legacy claim: %+v %v", legacy, err)
+	if err != nil || legacy == nil || legacy.ID != first {
+		t.Fatalf("legacy claim before cutover: %+v %v", legacy, err)
 	}
-	second := e.job(t, time.Now().Add(-time.Second))
-	if n := a.startDue(t); n != 0 {
-		t.Fatalf("TC-B41: adopted %d while the thread has a legacy claim", n)
+	later := e.job(t, time.Now().Add(-time.Second)) // same thread, behind the lease
+	a := newAgentWF(t, e, investigateOrch(t, e, &countingTriager{d: agent.TriageDecision{Category: agent.CategoryNotify}}, nil, 60000), nil)
+	start := func(at time.Time) int {
+		n, err := a.aws.StartDueBatches(a.ctx, workspaceA, at, a.ps, 10)
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		return n
 	}
-	if err := e.store.CommitOutcome(e.ctx, *legacy, agent.JobResult{Outcome: agent.OutcomeIgnore}); err != nil {
+	var other int64
+	if err := e.pool.QueryRow(e.ctx, `INSERT INTO agent_jobs(workspace_id,source_integration_id,thread_id,run_at) VALUES($1,$2,$3,now()+interval '1 hour') RETURNING id`, workspaceA, integrationA, threadB).Scan(&other); err != nil {
 		t.Fatal(err)
 	}
-	// Other thread's batch and this thread's batch: concurrent adopters.
-	var otherJob int64
-	if err := e.pool.QueryRow(e.ctx, `INSERT INTO agent_jobs(workspace_id,source_integration_id,thread_id,run_at) VALUES($1,$2,$3,now()-interval '2 seconds') RETURNING id`, workspaceA, integrationA, threadB).Scan(&otherJob); err != nil {
-		t.Fatal(err)
+	if n := start(time.Now()); n != 0 {
+		t.Fatalf("TC-B41: adopted %d: debounce or the live legacy lease was ignored", n)
 	}
+	if j, err := e.store.Claim(e.ctx, time.Now().Add(2*time.Hour)); err != nil || j != nil {
+		t.Fatalf("TC-B41: legacy claimer took work of a cut-over workspace: %+v %v", j, err)
+	}
+	mustExec(t, e.ctx, e.pool, `UPDATE agent_jobs SET run_at=now()-interval '1 second' WHERE id=$1`, other)
 	var total atomic.Int32
 	parallel(3, func(int) {
 		n, err := a.aws.StartDueBatches(a.ctx, workspaceA, time.Now(), a.ps, 10)
@@ -273,23 +282,24 @@ func TestAgentWorkflowDebounceAndThreadExclusion(t *testing.T) {
 		}
 		total.Add(int32(n))
 	})
-	if total.Load() != 2 || countRows(t, e.ctx, e.pool, "workflow_executions") != 2 {
-		t.Fatalf("TC-B41: concurrent adopters started %d (executions %d), want 2", total.Load(), countRows(t, e.ctx, e.pool, "workflow_executions"))
+	if total.Load() != 1 || countRows(t, e.ctx, e.pool, "workflow_executions") != 1 {
+		t.Fatalf("TC-B41: concurrent adopters started %d (executions %d), want only the other thread's batch", total.Load(), countRows(t, e.ctx, e.pool, "workflow_executions"))
 	}
-	// The oldest batch went first: the other thread's earlier run_at.
-	var firstAdopted int64
-	_ = e.pool.QueryRow(e.ctx, `SELECT legacy_job_id FROM workflow_executions ORDER BY id LIMIT 1`).Scan(&firstAdopted)
-	if firstAdopted != otherJob {
-		t.Logf("TC-B41: first adopted %d (other %d, second %d); concurrent order may vary", firstAdopted, otherJob, second)
+	// The legacy lease ends: the legacy-processing job goes first.
+	afterLease := time.Now().Add(AgentLease + time.Second)
+	if n := start(afterLease); n != 1 {
+		t.Fatalf("TC-B41: legacy-processing job not adopted after its lease (%d)", n)
 	}
-	// Legacy claimer: neither adopted batch nor a new job of their threads.
-	e.message(t, "c2", "external_user", "more")
-	e.job(t, time.Now().Add(-time.Second))
-	if j, err := e.store.Claim(e.ctx, time.Now().Add(48*time.Hour)); err != nil || j != nil {
-		t.Fatalf("TC-B41: legacy claimer took work of a workflow-owned thread: %+v %v", j, err)
+	var adopted int64
+	_ = e.pool.QueryRow(e.ctx, `SELECT legacy_job_id FROM workflow_executions ORDER BY id DESC LIMIT 1`).Scan(&adopted)
+	if adopted != first {
+		t.Fatalf("TC-B41: adopted %d, want the leased job %d (later %d)", adopted, first, later)
 	}
-	if n := a.startDue(t); n != 0 {
-		t.Fatalf("TC-B41: second batch adopted while the thread is busy (%d)", n)
+	if err := e.store.CommitOutcome(e.ctx, *legacy, agent.JobResult{Outcome: agent.OutcomeIgnore}); !errors.Is(err, agent.ErrStaleAgentClaim) {
+		t.Fatalf("TC-B41: late legacy commit after adoption: %v", err)
+	}
+	if n := start(afterLease.Add(time.Hour)); n != 0 {
+		t.Fatalf("TC-B41: second batch adopted while its thread is busy (%d)", n)
 	}
 }
 
@@ -555,32 +565,96 @@ func TestAgentWorkflowBudgetAndFallback(t *testing.T) {
 	})
 }
 
-// TC-B46 (REQ-5, REQ-8, REQ-13): cancelling (or failing) a pipeline
-// execution must not block later comments of its thread forever: the
-// thread's next batch can still be processed.
+// TC-B46 (REQ-5, REQ-8, REQ-13, P7): a pipeline execution that is
+// cancelled or fails before its report releases its batch through
+// ReleaseOrphanBatches: failed with the execution reason, one fallback
+// notice (agent_job:<id>), cursor at the batch end, and the thread's next
+// batch is adopted and reported; a second release does nothing.
 func TestAgentWorkflowCancelDoesNotBlockThread(t *testing.T) {
-	e := newAgentEnv(t, enabledCfg)
-	e.message(t, "c1", "external_user", "first")
-	id := e.job(t, time.Now().Add(-time.Second))
-	tr := &countingTriager{d: agent.TriageDecision{Category: agent.CategoryNotify, Summary: "s"}}
-	a := newAgentWF(t, e, investigateOrch(t, e, tr, nil, 60000), nil)
-	a.startDue(t)
-	ex := a.executionOf(t, id)
-	if _, err := a.wf.CancelExecution(a.ctx, workflow.Command{WorkspaceID: workspaceA, ExecutionID: ex.ID, IdempotencyKey: "op-cancel"}); err != nil {
-		t.Fatal(err)
+	end := map[string]func(a agentWF, ex workflow.Execution){
+		"cancel": func(a agentWF, ex workflow.Execution) {
+			if _, err := a.wf.CancelExecution(a.ctx, workflow.Command{WorkspaceID: workspaceA, ExecutionID: ex.ID, IdempotencyKey: "op-cancel"}); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"failed": func(a agentWF, ex workflow.Execution) {
+			if _, err := a.wf.TransitionExecution(a.ctx, workflow.TransitionRequest{WorkspaceID: workspaceA, ExecutionID: ex.ID,
+				From: workflow.StateQueued, To: workflow.StateFailed, Reason: workflow.ReasonSideEffectUncertain}); err != nil {
+				t.Fatal(err)
+			}
+		},
 	}
-	a.drain(t)
-	if tr.calls.Load() != 0 {
-		t.Fatal("TC-B46: cancelled batch still called the model")
-	}
-	e.message(t, "c2", "external_user", "second, after the cancel")
-	e.job(t, time.Now().Add(-time.Second))
-	n := a.startDue(t)
-	j, err := e.store.Claim(e.ctx, time.Now().Add(time.Hour))
-	var status string
-	_ = e.pool.QueryRow(e.ctx, `SELECT status FROM agent_jobs WHERE id=$1`, id).Scan(&status)
-	if err != nil || (n == 0 && j == nil) {
-		t.Fatalf("TC-B46: the thread is blocked after cancel: cancelled batch status %q, adopted %d, legacy claim %+v (%v)", status, n, j, err)
+	for name, stop := range end {
+		t.Run("TC-B46/"+name, func(t *testing.T) {
+			e := newAgentEnv(t, enabledCfg)
+			m1 := e.message(t, "c1", "external_user", "first FIRST-MARK")
+			id := e.job(t, time.Now().Add(-time.Second))
+			tr := &countingTriager{d: agent.TriageDecision{Category: agent.CategoryNotify, Summary: "s"}}
+			a := newAgentWF(t, e, investigateOrch(t, e, tr, nil, 60000), nil)
+			if a.startDue(t) != 1 {
+				t.Fatal("not adopted")
+			}
+			ex := a.executionOf(t, id)
+			stop(a, ex)
+			a.drain(t)
+			if tr.calls.Load() != 0 {
+				t.Fatal("TC-B46: ended batch still called the model")
+			}
+			m2 := e.message(t, "c2", "external_user", "second SECOND-MARK")
+			e.job(t, time.Now().Add(-time.Second))
+			if n := a.startDue(t); n != 0 {
+				t.Fatalf("TC-B46: adopted %d before the orphan was released", n)
+			}
+			n, err := a.orch.ReleaseOrphanBatches(a.ctx, a.aws, workspaceA, 10)
+			if err != nil || n != 1 {
+				t.Fatalf("TC-B46: released %d (%v)", n, err)
+			}
+			if again, err := a.orch.ReleaseOrphanBatches(a.ctx, a.aws, workspaceA, 10); err != nil || again != 0 {
+				t.Fatalf("TC-B46: second release %d (%v)", again, err)
+			}
+			var status, code, key, text string
+			var through int64
+			_ = e.pool.QueryRow(e.ctx, `SELECT status, COALESCE(last_error_code,''), COALESCE(through_message_id,0) FROM agent_jobs WHERE id=$1`, id).Scan(&status, &code, &through)
+			_ = e.pool.QueryRow(e.ctx, `SELECT dedupe_key, payload->>'text' FROM outbound_actions ORDER BY id LIMIT 1`).Scan(&key, &text)
+			// The release loads the batch when it runs, so its cursor may cover
+			// comments that arrived after the execution ended; every comment it
+			// covers must then be in the notice (no skipped comment).
+			if status != "failed" || code != string(a.executionOf(t, id).Reason) && code != agent.CodeExecutionEnded || (through != m1 && through != m2) ||
+				key != "agent_job:"+itoa(id) || countRows(t, e.ctx, e.pool, "outbound_actions") != 1 {
+				t.Fatalf("TC-B46: released batch status %q code %q through %d (m1 %d m2 %d) key %q outbox %d", status, code, through, m1, m2, key, countRows(t, e.ctx, e.pool, "outbound_actions"))
+			}
+			if !strings.Contains(text, "FIRST-MARK") || (through == m2) != strings.Contains(text, "SECOND-MARK") {
+				t.Fatalf("TC-B46: fallback notice (through %d) does not match its cursor: %q", through, text)
+			}
+			// The thread is free: a new comment is adopted and reported once,
+			// and nothing already covered is reported again.
+			m3 := e.message(t, "c3", "external_user", "third THIRD-MARK")
+			// Ingest enqueues a job only when the thread has no pending one.
+			mustExec(t, e.ctx, e.pool, `INSERT INTO agent_jobs(workspace_id,source_integration_id,thread_id,run_at) VALUES($1,$2,$3,now()) ON CONFLICT DO NOTHING`, workspaceA, integrationA, threadA)
+			for round := 0; round < 3; round++ {
+				mustExec(t, e.ctx, e.pool, `UPDATE agent_jobs SET run_at=now()-interval '1 second' WHERE status='pending'`)
+				if a.startDue(t) == 0 {
+					break
+				}
+				a.drain(t)
+			}
+			var last int64
+			_ = e.pool.QueryRow(e.ctx, `SELECT COALESCE(max(through_message_id),0) FROM agent_jobs WHERE status='done'`).Scan(&last)
+			var reports string
+			_ = e.pool.QueryRow(e.ctx, `SELECT string_agg(payload->>'text','|' ORDER BY id) FROM outbound_actions`).Scan(&reports)
+			// A notify report carries the triage summary, not the comments.
+			if n := countRows(t, e.ctx, e.pool, "outbound_actions"); n != 2 {
+				t.Fatalf("TC-B46: %d outbox rows, want the fallback and one report: %q", n, reports)
+			}
+			for _, mark := range []string{"FIRST-MARK", "SECOND-MARK"} {
+				if strings.Count(reports, mark) != 1 {
+					t.Fatalf("TC-B46: %s reported %d times (cursor %d, m3 %d): %q", mark, strings.Count(reports, mark), last, m3, reports)
+				}
+			}
+			if last != m3 {
+				t.Fatalf("TC-B46: thread cursor %d, want %d", last, m3)
+			}
+		})
 	}
 }
 
