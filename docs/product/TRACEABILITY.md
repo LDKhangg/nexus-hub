@@ -4,7 +4,7 @@ Status of every PCC-001 requirement. Statuses follow PCC §10.1.2: `PENDING`, `I
 
 Snapshot: 2026-11-12. Phase 1 merged; Phase 2 under test and review. Nothing is `VERIFIED` against the PCC yet: Phase 1/2 work covers parts of the IDs marked `IN_PROGRESS`.
 
-Update 2026-11-15: Phase 5 (durable workflow engine + open Telegram assistant) passed Test and Review on feature/phase5 2ac779b, deployed locally, merge pending; its IDs are IN_PROGRESS until merged.
+Update 2026-11-15: Phase 5 (durable workflow engine + open Telegram assistant) merged into develop 65be4ac (CI 43631958237 green) after Test PASS and Review APPROVE on 2ac779b; its scoped IDs are VERIFIED. E2E-005 live part stays open (Phase 12/13).
 
 Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889383 green (664 tests). Open test debt: TD-6, TD3-2, TD3-3, TD3d-2, TD3d-3 (independent reviews of Phases 2/3/3d and live ClickUp payload facts). Per-ID statuses are updated per phase when the owner asks.
 
@@ -82,42 +82,42 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-070 | Artifact references. | 8 | PENDING |  |
 | FR-071 | Workspace cleanup và retention. | 8 | PENDING |  |
 | FR-072 | Ngăn concurrent write conflicts đối với cùng repository/branch. | 8 | PENDING |  |
-| FR-073 | Create workflow definition. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-074 | Update draft workflow. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-075 | Validate workflow schema. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-076 | Publish workflow version. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-077 | Enable/disable workflow. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-078 | Define triggers. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-079 | Define orchestration settings. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-080 | Define worker constraints. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-081 | Define notification rules. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-082 | Define approval rules. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-083 | Define retries/timeouts. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-084 | Persist immutable published versions. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-085 | Execution luôn tham chiếu một workflow version cụ thể. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-086 | Có cơ chế xuất/nhập config dạng JSON/YAML. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-087 | State machine với valid transitions. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-088 | Persistent execution records. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-089 | Step-level checkpoints. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-090 | Event history. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-091 | Retry policy. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-092 | Cancellation. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-093 | Resume/recovery. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-094 | Execution timeout. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-095 | Dead-letter hoặc failed-job inspection. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-096 | Dependency-aware task progression. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
+| FR-073 | Create workflow definition. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-074 | Update draft workflow. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-075 | Validate workflow schema. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-076 | Publish workflow version. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-077 | Enable/disable workflow. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-078 | Define triggers. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-079 | Define orchestration settings. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-080 | Define worker constraints. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-081 | Define notification rules. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-082 | Define approval rules. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-083 | Define retries/timeouts. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-084 | Persist immutable published versions. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-085 | Execution luôn tham chiếu một workflow version cụ thể. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-086 | Có cơ chế xuất/nhập config dạng JSON/YAML. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-087 | State machine với valid transitions. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-088 | Persistent execution records. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-089 | Step-level checkpoints. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-090 | Event history. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-091 | Retry policy. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-092 | Cancellation. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-093 | Resume/recovery. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-094 | Execution timeout. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-095 | Dead-letter hoặc failed-job inspection. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-096 | Dependency-aware task progression. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-097 | Không giữ worker khi đang chờ user. | 8 | PENDING |  |
-| FR-098 | Optimistic locking/leases để tránh nhiều scheduler cùng claim một job. | 2, 5 | IN_PROGRESS | Phase 2: agent job leases + thread lock; Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-099 | Reconciliation sau process restart. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-100 | Persistent job queue. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
+| FR-098 | Optimistic locking/leases để tránh nhiều scheduler cùng claim một job. | 2, 5 | IN_PROGRESS | Phase 2: agent job leases + thread lock; Phase 5: generic queue leases + fenced claims, merged develop 65be4ac |
+| FR-099 | Reconciliation sau process restart. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-100 | Persistent job queue. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-101 | Configurable per-user workflow concurrency. | 8 | PENDING |  |
 | FR-102 | Configurable worker pool size. | 8 | PENDING |  |
 | FR-103 | Worker capability matching. | 8 | PENDING |  |
 | FR-104 | Priority scheduling. | 8 | PENDING |  |
 | FR-105 | Resource conflict handling. | 8 | PENDING |  |
-| FR-106 | Job leases và lease expiration. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
+| FR-106 | Job leases và lease expiration. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-107 | Worker heartbeat hoặc tương đương. | 8 | PENDING |  |
-| FR-108 | Queue visibility. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
+| FR-108 | Queue visibility. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-109 | Backpressure khi quá tải. | 8 | PENDING |  |
 | FR-110 | Worker allocation được audit. | 8 | PENDING |  |
 | FR-111 | Rule schema có version. | 9 | PENDING |  |
