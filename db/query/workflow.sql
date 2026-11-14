@@ -118,3 +118,162 @@ SELECT s.workspace_id, sqlc.arg(child_execution_id), s.step_key, s.position, s.k
 FROM public.execution_steps s
 WHERE s.workspace_id = sqlc.arg(workspace_id) AND s.execution_id = sqlc.arg(parent_execution_id)
 ORDER BY s.position;
+
+-- name: InsertWorkflowJob :one
+INSERT INTO public.jobs (workspace_id, execution_id, step_key, due_at, max_attempts)
+VALUES (sqlc.arg(workspace_id), sqlc.arg(execution_id), sqlc.arg(step_key), sqlc.arg(due_at), sqlc.arg(max_attempts))
+ON CONFLICT (execution_id) WHERE status IN ('pending','processing') DO NOTHING
+RETURNING *;
+
+-- name: SelectDueWorkflowJob :one
+SELECT j.* FROM public.jobs j
+JOIN public.workflow_executions e
+  ON e.workspace_id = j.workspace_id AND e.id = j.execution_id
+WHERE j.status = 'pending' AND j.due_at <= sqlc.arg(at_time)::timestamptz
+  AND j.attempts < j.max_attempts
+  AND e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','COMPLETED','FAILED','CANCELLED')
+  AND (e.deadline_at IS NULL OR e.deadline_at > sqlc.arg(at_time)::timestamptz)
+ORDER BY CASE WHEN j.status = 'processing' THEN 0 ELSE 1 END, j.due_at, j.id
+FOR UPDATE OF j SKIP LOCKED
+LIMIT 1;
+
+-- name: ClaimWorkflowJobByID :one
+UPDATE public.jobs
+SET status = 'processing', attempts = attempts + 1, claim_token = sqlc.arg(claim_token),
+    lease_expires_at = sqlc.arg(lease_expires_at), last_error_code = NULL, updated_at = sqlc.arg(at_time)
+WHERE id = sqlc.arg(id) AND workspace_id = sqlc.arg(workspace_id)
+  AND status IN ('pending','processing')
+RETURNING *;
+
+-- name: LockWorkflowJobFence :one
+SELECT j.* FROM public.jobs j
+JOIN public.workflow_executions e
+  ON e.workspace_id = j.workspace_id AND e.id = j.execution_id
+WHERE j.workspace_id = sqlc.arg(workspace_id) AND j.id = sqlc.arg(id)
+  AND j.status = 'processing' AND j.claim_token = sqlc.arg(claim_token)
+  AND j.lease_expires_at > sqlc.arg(at_time)::timestamptz
+  AND e.state IN ('TRIAGING','PLANNING','RUNNING','EVALUATING')
+  AND e.cancelled_at IS NULL
+  AND (e.deadline_at IS NULL OR e.deadline_at > sqlc.arg(at_time)::timestamptz)
+FOR UPDATE OF j;
+
+-- name: StartExecutionStepAttempt :one
+UPDATE public.execution_steps
+SET state = 'RUNNING', attempts = attempts + 1, updated_at = sqlc.arg(at_time)
+WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id)
+  AND step_key = sqlc.arg(step_key) AND state IN ('PENDING','RUNNING')
+RETURNING *;
+
+-- name: UpdateExecutionStepProgress :one
+UPDATE public.execution_steps
+SET checkpoint = COALESCE(sqlc.narg(checkpoint), checkpoint),
+    input_tokens = input_tokens + sqlc.arg(input_tokens),
+    output_tokens = output_tokens + sqlc.arg(output_tokens),
+    cache_read_tokens = cache_read_tokens + sqlc.arg(cache_read_tokens),
+    cache_write_tokens = cache_write_tokens + sqlc.arg(cache_write_tokens),
+    updated_at = sqlc.arg(at_time)
+WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id)
+  AND step_key = sqlc.arg(step_key) AND state = 'RUNNING' AND attempts = sqlc.arg(expected_attempt)
+RETURNING *;
+
+-- name: SetExecutionStepState :one
+UPDATE public.execution_steps
+SET state = sqlc.arg(state), updated_at = sqlc.arg(at_time)
+WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id)
+  AND step_key = sqlc.arg(step_key)
+RETURNING *;
+
+-- name: FinishWorkflowJob :one
+UPDATE public.jobs
+SET status = sqlc.arg(status), claim_token = NULL, lease_expires_at = NULL,
+    last_error_code = sqlc.narg(error_code), dead_letter_reason = sqlc.narg(dead_letter_reason),
+    updated_at = sqlc.arg(at_time)
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id)
+  AND status = 'processing' AND claim_token = sqlc.arg(claim_token)
+RETURNING *;
+
+-- name: RetryWorkflowJob :one
+UPDATE public.jobs
+SET status = 'pending', due_at = sqlc.arg(due_at), claim_token = NULL, lease_expires_at = NULL,
+    last_error_code = sqlc.arg(error_code), updated_at = sqlc.arg(at_time)
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id)
+  AND status = 'processing' AND claim_token = sqlc.arg(claim_token)
+RETURNING *;
+
+-- name: FindReadyExecutionStep :one
+SELECT s.* FROM public.execution_steps s
+WHERE s.workspace_id = sqlc.arg(workspace_id) AND s.execution_id = sqlc.arg(execution_id)
+  AND s.state = 'PENDING'
+  AND NOT EXISTS (
+    SELECT 1 FROM unnest(s.depends_on) dependency
+    WHERE NOT EXISTS (
+      SELECT 1 FROM public.execution_steps completed
+      WHERE completed.workspace_id = s.workspace_id AND completed.execution_id = s.execution_id
+        AND completed.step_key = dependency AND completed.state = 'SUCCEEDED'))
+ORDER BY s.position
+LIMIT 1;
+
+-- name: CountUnfinishedExecutionSteps :one
+SELECT COUNT(*) FROM public.execution_steps
+WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id)
+  AND state <> 'SUCCEEDED';
+
+-- name: ListReconcileWorkflowExecutions :many
+SELECT e.* FROM public.workflow_executions e
+WHERE e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','COMPLETED','FAILED','CANCELLED')
+  AND (e.deadline_at IS NOT NULL AND e.deadline_at <= sqlc.arg(at_time)::timestamptz
+       OR NOT EXISTS (SELECT 1 FROM public.jobs j WHERE j.execution_id = e.id AND j.status IN ('pending','processing')))
+ORDER BY e.updated_at, e.id
+FOR UPDATE OF e SKIP LOCKED
+LIMIT 100;
+
+-- name: ListExpiredWorkflowJobs :many
+SELECT j.* FROM public.jobs j
+JOIN public.workflow_executions e ON e.workspace_id = j.workspace_id AND e.id = j.execution_id
+WHERE j.status = 'processing' AND j.lease_expires_at <= sqlc.arg(at_time)::timestamptz
+  AND e.state NOT IN ('COMPLETED','FAILED','CANCELLED')
+ORDER BY j.lease_expires_at, j.id
+FOR UPDATE OF j SKIP LOCKED
+LIMIT 100;
+
+-- name: ResetExpiredWorkflowJob :one
+UPDATE public.jobs
+SET status = 'pending', due_at = sqlc.arg(due_at), claim_token = NULL, lease_expires_at = NULL,
+    last_error_code = sqlc.arg(error_code), updated_at = sqlc.arg(at_time)
+WHERE id = sqlc.arg(id) AND workspace_id = sqlc.arg(workspace_id) AND status = 'processing'
+RETURNING *;
+
+-- name: DeadLetterWorkflowJobByID :one
+UPDATE public.jobs
+SET status = 'dead_letter', claim_token = NULL, lease_expires_at = NULL,
+    last_error_code = sqlc.arg(reason), dead_letter_reason = sqlc.arg(reason), updated_at = sqlc.arg(at_time)
+WHERE id = sqlc.arg(id) AND workspace_id = sqlc.arg(workspace_id)
+  AND status IN ('pending','processing')
+RETURNING *;
+
+-- name: GetWorkflowJob :one
+SELECT * FROM public.jobs WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id);
+
+-- name: GetActiveWorkflowJobForExecution :one
+SELECT * FROM public.jobs
+WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id)
+  AND status IN ('pending','processing')
+FOR UPDATE;
+
+-- name: FindReconcileExecutionStep :one
+SELECT s.* FROM public.execution_steps s
+WHERE s.workspace_id = sqlc.arg(workspace_id) AND s.execution_id = sqlc.arg(execution_id)
+  AND (s.state = 'RUNNING' OR (s.state = 'PENDING' AND NOT EXISTS (
+    SELECT 1 FROM unnest(s.depends_on) dependency
+    WHERE NOT EXISTS (
+      SELECT 1 FROM public.execution_steps completed
+      WHERE completed.workspace_id = s.workspace_id AND completed.execution_id = s.execution_id
+        AND completed.step_key = dependency AND completed.state = 'SUCCEEDED'))))
+ORDER BY CASE WHEN s.state = 'RUNNING' THEN 0 ELSE 1 END, s.position
+LIMIT 1;
+
+-- name: ListWorkflowDeadLetters :many
+SELECT * FROM public.jobs
+WHERE workspace_id = sqlc.arg(workspace_id) AND status = 'dead_letter'
+ORDER BY updated_at DESC, id DESC
+LIMIT sqlc.arg(row_limit);

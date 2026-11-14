@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
@@ -180,7 +181,27 @@ func (s *WorkflowStore) StartExecutionTx(ctx context.Context, tx pgx.Tx, req wor
 	if err := insertWorkflowEvent(ctx, q, ws, row.ID, workflow.EventStarted, "", workflow.StateReceived, "", 0, workflow.ReasonAccepted, "", workflow.Usage{}); err != nil {
 		return workflow.Execution{}, err
 	}
-	return mapWorkflowExecution(row)
+	ready, err := q.FindReadyExecutionStep(ctx, sqlc.FindReadyExecutionStepParams{WorkspaceID: ws, ExecutionID: row.ID})
+	if err != nil {
+		return workflow.Execution{}, err
+	}
+	if _, err := q.InsertWorkflowJob(ctx, sqlc.InsertWorkflowJobParams{
+		WorkspaceID: ws, ExecutionID: row.ID, StepKey: ready.StepKey, DueAt: ts(time.Now()), MaxAttempts: int32(req.Definition.Retry.MaxAttempts),
+	}); err != nil {
+		return workflow.Execution{}, err
+	}
+	queued, err := q.UpdateWorkflowExecutionState(ctx, sqlc.UpdateWorkflowExecutionStateParams{
+		WorkspaceID: ws, ID: row.ID, FromState: string(workflow.StateReceived), ToState: string(workflow.StateQueued),
+		ReasonCode: workflowText(string(workflow.ReasonAccepted)),
+	})
+	if err != nil {
+		return workflow.Execution{}, err
+	}
+	if err := insertWorkflowEvent(ctx, q, ws, row.ID, workflow.EventTransition, workflow.StateReceived, workflow.StateQueued,
+		ready.StepKey, 0, workflow.ReasonAccepted, "", workflow.Usage{}); err != nil {
+		return workflow.Execution{}, err
+	}
+	return mapWorkflowExecution(queued)
 }
 
 // TransitionExecution atomically changes lifecycle state and appends history.
@@ -328,6 +349,31 @@ func (s *WorkflowStore) RetryExecution(ctx context.Context, command workflow.Com
 		workflow.ReasonManualRetry, command.IdempotencyKey, workflow.Usage{}); err != nil {
 		return workflow.Execution{}, err
 	}
+	ready, err := q.FindReadyExecutionStep(ctx, sqlc.FindReadyExecutionStepParams{WorkspaceID: ws, ExecutionID: child.ID})
+	if err != nil {
+		return workflow.Execution{}, err
+	}
+	var definition workflow.Definition
+	if err := json.Unmarshal(child.Definition, &definition); err != nil {
+		return workflow.Execution{}, err
+	}
+	if _, err := q.InsertWorkflowJob(ctx, sqlc.InsertWorkflowJobParams{
+		WorkspaceID: ws, ExecutionID: child.ID, StepKey: ready.StepKey, DueAt: ts(time.Now()),
+		MaxAttempts: int32(definition.Retry.MaxAttempts),
+	}); err != nil {
+		return workflow.Execution{}, err
+	}
+	child, err = q.UpdateWorkflowExecutionState(ctx, sqlc.UpdateWorkflowExecutionStateParams{
+		WorkspaceID: ws, ID: child.ID, FromState: string(workflow.StateReceived), ToState: string(workflow.StateQueued),
+		ReasonCode: workflowText(string(workflow.ReasonManualRetry)),
+	})
+	if err != nil {
+		return workflow.Execution{}, err
+	}
+	if err := insertWorkflowEvent(ctx, q, ws, child.ID, workflow.EventTransition, workflow.StateReceived, workflow.StateQueued,
+		ready.StepKey, 0, workflow.ReasonManualRetry, "", workflow.Usage{}); err != nil {
+		return workflow.Execution{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return workflow.Execution{}, err
 	}
@@ -335,56 +381,29 @@ func (s *WorkflowStore) RetryExecution(ctx context.Context, command workflow.Com
 }
 
 // RecordCheckpoint atomically updates cumulative usage and appends its event.
+// JobID, ClaimToken and At are mandatory so the legacy checkpoint seam cannot
+// bypass the same lease fence used by workers.
 func (s *WorkflowStore) RecordCheckpoint(ctx context.Context, req workflow.CheckpointRequest) (workflow.Step, error) {
-	ws, err := parseDBID(req.WorkspaceID)
-	if err != nil || req.ExecutionID <= 0 || req.ExpectedAttempt < 1 || strings.TrimSpace(req.StepKey) == "" {
+	if req.ExecutionID <= 0 || req.ExpectedAttempt < 1 || strings.TrimSpace(req.StepKey) == "" {
 		return workflow.Step{}, workflowInvalid("checkpoint request")
 	}
-	if req.Usage.InputTokens < 0 || req.Usage.OutputTokens < 0 || req.Usage.CacheReadTokens < 0 || req.Usage.CacheWriteTokens < 0 {
-		return workflow.Step{}, workflowInvalid("usage")
-	}
-	checkpoint, err := workflow.MarshalCheckpoint(req.Checkpoint)
-	if err != nil {
-		return workflow.Step{}, err
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return workflow.Step{}, err
-	}
-	defer tx.Rollback(ctx)
-	q := sqlc.New(tx)
-	execution, err := q.LockWorkflowExecution(ctx, sqlc.LockWorkflowExecutionParams{WorkspaceID: ws, ID: req.ExecutionID})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return workflow.Step{}, workflow.ErrNotFound
-		}
-		return workflow.Step{}, err
-	}
-	if !workflow.State(execution.State).IsActive() {
-		return workflow.Step{}, workflow.ErrStaleClaim
-	}
-	row, err := q.RecordExecutionCheckpoint(ctx, sqlc.RecordExecutionCheckpointParams{
-		WorkspaceID: ws, ExecutionID: req.ExecutionID, StepKey: req.StepKey, ExpectedAttempt: int32(req.ExpectedAttempt),
-		Checkpoint: checkpoint, InputTokens: req.Usage.InputTokens, OutputTokens: req.Usage.OutputTokens,
-		CacheReadTokens: req.Usage.CacheReadTokens, CacheWriteTokens: req.Usage.CacheWriteTokens,
+	checkpoint := req.Checkpoint
+	step, err := s.CheckpointJob(ctx, workflow.JobCheckpointRequest{
+		JobID:           req.JobID,
+		WorkspaceID:     req.WorkspaceID,
+		ExecutionID:     req.ExecutionID,
+		StepKey:         req.StepKey,
+		ExpectedAttempt: req.ExpectedAttempt,
+		ClaimToken:      req.ClaimToken,
+		IdempotencyKey:  req.IdempotencyKey,
+		At:              req.At,
+		Checkpoint:      &checkpoint,
+		Usage:           req.Usage,
 	})
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return workflow.Step{}, workflow.ErrStaleClaim
-		}
 		return workflow.Step{}, err
 	}
-	if err := insertWorkflowEvent(ctx, q, ws, req.ExecutionID, workflow.EventCheckpoint, workflow.State(execution.State), workflow.State(execution.State),
-		req.StepKey, req.ExpectedAttempt, workflow.ReasonCheckpoint, req.IdempotencyKey, req.Usage); err != nil {
-		if isUniqueViolation(err) {
-			return workflow.Step{}, workflow.ErrConflict
-		}
-		return workflow.Step{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return workflow.Step{}, err
-	}
-	return mapWorkflowStep(row)
+	return step, nil
 }
 
 // Signal persistence and eligibility are introduced with the approval bridge.

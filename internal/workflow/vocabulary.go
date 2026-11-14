@@ -46,6 +46,10 @@ const ReasonNonRetryable ReasonCode = "non_retryable"
 const ReasonSideEffectUncertain ReasonCode = "side_effect_uncertain"
 const ReasonManualRetry ReasonCode = "manual_retry"
 const ReasonCheckpoint ReasonCode = "checkpoint"
+const ReasonStepSucceeded ReasonCode = "step_succeeded"
+const ReasonStepRetry ReasonCode = "step_retry"
+const ReasonStepWaiting ReasonCode = "step_waiting"
+const ReasonLeaseExpired ReasonCode = "lease_expired"
 
 // EventKind identifies an immutable execution-history record.
 type EventKind string

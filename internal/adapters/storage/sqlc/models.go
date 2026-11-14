@@ -295,6 +295,23 @@ type Integration struct {
 	UpdatedAt            pgtype.Timestamptz
 }
 
+type Job struct {
+	ID               int64
+	WorkspaceID      pgtype.UUID
+	ExecutionID      int64
+	StepKey          string
+	Status           string
+	DueAt            pgtype.Timestamptz
+	Attempts         int32
+	MaxAttempts      int32
+	ClaimToken       pgtype.UUID
+	LeaseExpiresAt   pgtype.Timestamptz
+	LastErrorCode    pgtype.Text
+	DeadLetterReason pgtype.Text
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
+}
+
 type MessageLog struct {
 	ID       int64
 	ThreadID pgtype.UUID

@@ -200,6 +200,8 @@ type StepContext struct {
 type StepResult struct {
 	Checkpoint *Checkpoint
 
+	Usage Usage
+
 	WaitState State
 
 	WaitReferences []CheckpointReference
@@ -226,7 +228,13 @@ type TransitionRequest struct {
 
 // CheckpointRequest atomically records one bounded checkpoint, usage and event.
 type CheckpointRequest struct {
+	JobID int64
+
 	WorkspaceID string
+
+	ClaimToken string
+
+	At time.Time
 
 	ExecutionID int64
 

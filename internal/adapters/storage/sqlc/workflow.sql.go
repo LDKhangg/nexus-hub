@@ -30,6 +30,51 @@ func (q *Queries) CancelExecutionSteps(ctx context.Context, arg CancelExecutionS
 	return result.RowsAffected(), nil
 }
 
+const claimWorkflowJobByID = `-- name: ClaimWorkflowJobByID :one
+UPDATE public.jobs
+SET status = 'processing', attempts = attempts + 1, claim_token = $1,
+    lease_expires_at = $2, last_error_code = NULL, updated_at = $3
+WHERE id = $4 AND workspace_id = $5
+  AND status IN ('pending','processing')
+RETURNING id, workspace_id, execution_id, step_key, status, due_at, attempts, max_attempts, claim_token, lease_expires_at, last_error_code, dead_letter_reason, created_at, updated_at
+`
+
+type ClaimWorkflowJobByIDParams struct {
+	ClaimToken     pgtype.UUID
+	LeaseExpiresAt pgtype.Timestamptz
+	AtTime         pgtype.Timestamptz
+	ID             int64
+	WorkspaceID    pgtype.UUID
+}
+
+func (q *Queries) ClaimWorkflowJobByID(ctx context.Context, arg ClaimWorkflowJobByIDParams) (Job, error) {
+	row := q.db.QueryRow(ctx, claimWorkflowJobByID,
+		arg.ClaimToken,
+		arg.LeaseExpiresAt,
+		arg.AtTime,
+		arg.ID,
+		arg.WorkspaceID,
+	)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepKey,
+		&i.Status,
+		&i.DueAt,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.ClaimToken,
+		&i.LeaseExpiresAt,
+		&i.LastErrorCode,
+		&i.DeadLetterReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const copyRetryExecutionSteps = `-- name: CopyRetryExecutionSteps :exec
 INSERT INTO public.execution_steps (
   workspace_id, execution_id, step_key, position, kind, depends_on, state, attempts,
@@ -54,6 +99,24 @@ func (q *Queries) CopyRetryExecutionSteps(ctx context.Context, arg CopyRetryExec
 	return err
 }
 
+const countUnfinishedExecutionSteps = `-- name: CountUnfinishedExecutionSteps :one
+SELECT COUNT(*) FROM public.execution_steps
+WHERE workspace_id = $1 AND execution_id = $2
+  AND state <> 'SUCCEEDED'
+`
+
+type CountUnfinishedExecutionStepsParams struct {
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+}
+
+func (q *Queries) CountUnfinishedExecutionSteps(ctx context.Context, arg CountUnfinishedExecutionStepsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countUnfinishedExecutionSteps, arg.WorkspaceID, arg.ExecutionID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countUnsafeRetrySteps = `-- name: CountUnsafeRetrySteps :one
 SELECT COUNT(*) FROM public.execution_steps
 WHERE workspace_id = $1 AND execution_id = $2
@@ -71,6 +134,218 @@ func (q *Queries) CountUnsafeRetrySteps(ctx context.Context, arg CountUnsafeRetr
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const deadLetterWorkflowJobByID = `-- name: DeadLetterWorkflowJobByID :one
+UPDATE public.jobs
+SET status = 'dead_letter', claim_token = NULL, lease_expires_at = NULL,
+    last_error_code = $1, dead_letter_reason = $1, updated_at = $2
+WHERE id = $3 AND workspace_id = $4
+  AND status IN ('pending','processing')
+RETURNING id, workspace_id, execution_id, step_key, status, due_at, attempts, max_attempts, claim_token, lease_expires_at, last_error_code, dead_letter_reason, created_at, updated_at
+`
+
+type DeadLetterWorkflowJobByIDParams struct {
+	Reason      pgtype.Text
+	AtTime      pgtype.Timestamptz
+	ID          int64
+	WorkspaceID pgtype.UUID
+}
+
+func (q *Queries) DeadLetterWorkflowJobByID(ctx context.Context, arg DeadLetterWorkflowJobByIDParams) (Job, error) {
+	row := q.db.QueryRow(ctx, deadLetterWorkflowJobByID,
+		arg.Reason,
+		arg.AtTime,
+		arg.ID,
+		arg.WorkspaceID,
+	)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepKey,
+		&i.Status,
+		&i.DueAt,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.ClaimToken,
+		&i.LeaseExpiresAt,
+		&i.LastErrorCode,
+		&i.DeadLetterReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const findReadyExecutionStep = `-- name: FindReadyExecutionStep :one
+SELECT s.id, s.workspace_id, s.execution_id, s.step_key, s.position, s.kind, s.depends_on, s.state, s.attempts, s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_write_tokens, s.checkpoint, s.created_at, s.updated_at FROM public.execution_steps s
+WHERE s.workspace_id = $1 AND s.execution_id = $2
+  AND s.state = 'PENDING'
+  AND NOT EXISTS (
+    SELECT 1 FROM unnest(s.depends_on) dependency
+    WHERE NOT EXISTS (
+      SELECT 1 FROM public.execution_steps completed
+      WHERE completed.workspace_id = s.workspace_id AND completed.execution_id = s.execution_id
+        AND completed.step_key = dependency AND completed.state = 'SUCCEEDED'))
+ORDER BY s.position
+LIMIT 1
+`
+
+type FindReadyExecutionStepParams struct {
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+}
+
+func (q *Queries) FindReadyExecutionStep(ctx context.Context, arg FindReadyExecutionStepParams) (ExecutionStep, error) {
+	row := q.db.QueryRow(ctx, findReadyExecutionStep, arg.WorkspaceID, arg.ExecutionID)
+	var i ExecutionStep
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepKey,
+		&i.Position,
+		&i.Kind,
+		&i.DependsOn,
+		&i.State,
+		&i.Attempts,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheReadTokens,
+		&i.CacheWriteTokens,
+		&i.Checkpoint,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const findReconcileExecutionStep = `-- name: FindReconcileExecutionStep :one
+SELECT s.id, s.workspace_id, s.execution_id, s.step_key, s.position, s.kind, s.depends_on, s.state, s.attempts, s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_write_tokens, s.checkpoint, s.created_at, s.updated_at FROM public.execution_steps s
+WHERE s.workspace_id = $1 AND s.execution_id = $2
+  AND (s.state = 'RUNNING' OR (s.state = 'PENDING' AND NOT EXISTS (
+    SELECT 1 FROM unnest(s.depends_on) dependency
+    WHERE NOT EXISTS (
+      SELECT 1 FROM public.execution_steps completed
+      WHERE completed.workspace_id = s.workspace_id AND completed.execution_id = s.execution_id
+        AND completed.step_key = dependency AND completed.state = 'SUCCEEDED'))))
+ORDER BY CASE WHEN s.state = 'RUNNING' THEN 0 ELSE 1 END, s.position
+LIMIT 1
+`
+
+type FindReconcileExecutionStepParams struct {
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+}
+
+func (q *Queries) FindReconcileExecutionStep(ctx context.Context, arg FindReconcileExecutionStepParams) (ExecutionStep, error) {
+	row := q.db.QueryRow(ctx, findReconcileExecutionStep, arg.WorkspaceID, arg.ExecutionID)
+	var i ExecutionStep
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepKey,
+		&i.Position,
+		&i.Kind,
+		&i.DependsOn,
+		&i.State,
+		&i.Attempts,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheReadTokens,
+		&i.CacheWriteTokens,
+		&i.Checkpoint,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const finishWorkflowJob = `-- name: FinishWorkflowJob :one
+UPDATE public.jobs
+SET status = $1, claim_token = NULL, lease_expires_at = NULL,
+    last_error_code = $2, dead_letter_reason = $3,
+    updated_at = $4
+WHERE workspace_id = $5 AND id = $6
+  AND status = 'processing' AND claim_token = $7
+RETURNING id, workspace_id, execution_id, step_key, status, due_at, attempts, max_attempts, claim_token, lease_expires_at, last_error_code, dead_letter_reason, created_at, updated_at
+`
+
+type FinishWorkflowJobParams struct {
+	Status           string
+	ErrorCode        pgtype.Text
+	DeadLetterReason pgtype.Text
+	AtTime           pgtype.Timestamptz
+	WorkspaceID      pgtype.UUID
+	ID               int64
+	ClaimToken       pgtype.UUID
+}
+
+func (q *Queries) FinishWorkflowJob(ctx context.Context, arg FinishWorkflowJobParams) (Job, error) {
+	row := q.db.QueryRow(ctx, finishWorkflowJob,
+		arg.Status,
+		arg.ErrorCode,
+		arg.DeadLetterReason,
+		arg.AtTime,
+		arg.WorkspaceID,
+		arg.ID,
+		arg.ClaimToken,
+	)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepKey,
+		&i.Status,
+		&i.DueAt,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.ClaimToken,
+		&i.LeaseExpiresAt,
+		&i.LastErrorCode,
+		&i.DeadLetterReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getActiveWorkflowJobForExecution = `-- name: GetActiveWorkflowJobForExecution :one
+SELECT id, workspace_id, execution_id, step_key, status, due_at, attempts, max_attempts, claim_token, lease_expires_at, last_error_code, dead_letter_reason, created_at, updated_at FROM public.jobs
+WHERE workspace_id = $1 AND execution_id = $2
+  AND status IN ('pending','processing')
+FOR UPDATE
+`
+
+type GetActiveWorkflowJobForExecutionParams struct {
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+}
+
+func (q *Queries) GetActiveWorkflowJobForExecution(ctx context.Context, arg GetActiveWorkflowJobForExecutionParams) (Job, error) {
+	row := q.db.QueryRow(ctx, getActiveWorkflowJobForExecution, arg.WorkspaceID, arg.ExecutionID)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepKey,
+		&i.Status,
+		&i.DueAt,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.ClaimToken,
+		&i.LeaseExpiresAt,
+		&i.LastErrorCode,
+		&i.DeadLetterReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getExecutionEventByIdempotency = `-- name: GetExecutionEventByIdempotency :one
@@ -259,6 +534,37 @@ func (q *Queries) GetWorkflowExecutionByTrigger(ctx context.Context, arg GetWork
 		&i.CancelledAt,
 		&i.StartedAt,
 		&i.FinishedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getWorkflowJob = `-- name: GetWorkflowJob :one
+SELECT id, workspace_id, execution_id, step_key, status, due_at, attempts, max_attempts, claim_token, lease_expires_at, last_error_code, dead_letter_reason, created_at, updated_at FROM public.jobs WHERE workspace_id = $1 AND id = $2
+`
+
+type GetWorkflowJobParams struct {
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+func (q *Queries) GetWorkflowJob(ctx context.Context, arg GetWorkflowJobParams) (Job, error) {
+	row := q.db.QueryRow(ctx, getWorkflowJob, arg.WorkspaceID, arg.ID)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepKey,
+		&i.Status,
+		&i.DueAt,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.ClaimToken,
+		&i.LeaseExpiresAt,
+		&i.LastErrorCode,
+		&i.DeadLetterReason,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -502,6 +808,49 @@ func (q *Queries) InsertWorkflowExecution(ctx context.Context, arg InsertWorkflo
 	return i, err
 }
 
+const insertWorkflowJob = `-- name: InsertWorkflowJob :one
+INSERT INTO public.jobs (workspace_id, execution_id, step_key, due_at, max_attempts)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (execution_id) WHERE status IN ('pending','processing') DO NOTHING
+RETURNING id, workspace_id, execution_id, step_key, status, due_at, attempts, max_attempts, claim_token, lease_expires_at, last_error_code, dead_letter_reason, created_at, updated_at
+`
+
+type InsertWorkflowJobParams struct {
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+	StepKey     string
+	DueAt       pgtype.Timestamptz
+	MaxAttempts int32
+}
+
+func (q *Queries) InsertWorkflowJob(ctx context.Context, arg InsertWorkflowJobParams) (Job, error) {
+	row := q.db.QueryRow(ctx, insertWorkflowJob,
+		arg.WorkspaceID,
+		arg.ExecutionID,
+		arg.StepKey,
+		arg.DueAt,
+		arg.MaxAttempts,
+	)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepKey,
+		&i.Status,
+		&i.DueAt,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.ClaimToken,
+		&i.LeaseExpiresAt,
+		&i.LastErrorCode,
+		&i.DeadLetterReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const listExecutionSteps = `-- name: ListExecutionSteps :many
 SELECT id, workspace_id, execution_id, step_key, position, kind, depends_on, state, attempts, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, checkpoint, created_at, updated_at FROM public.execution_steps
 WHERE workspace_id = $1 AND execution_id = $2
@@ -537,6 +886,151 @@ func (q *Queries) ListExecutionSteps(ctx context.Context, arg ListExecutionSteps
 			&i.CacheReadTokens,
 			&i.CacheWriteTokens,
 			&i.Checkpoint,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listExpiredWorkflowJobs = `-- name: ListExpiredWorkflowJobs :many
+SELECT j.id, j.workspace_id, j.execution_id, j.step_key, j.status, j.due_at, j.attempts, j.max_attempts, j.claim_token, j.lease_expires_at, j.last_error_code, j.dead_letter_reason, j.created_at, j.updated_at FROM public.jobs j
+JOIN public.workflow_executions e ON e.workspace_id = j.workspace_id AND e.id = j.execution_id
+WHERE j.status = 'processing' AND j.lease_expires_at <= $1::timestamptz
+  AND e.state NOT IN ('COMPLETED','FAILED','CANCELLED')
+ORDER BY j.lease_expires_at, j.id
+FOR UPDATE OF j SKIP LOCKED
+LIMIT 100
+`
+
+func (q *Queries) ListExpiredWorkflowJobs(ctx context.Context, atTime pgtype.Timestamptz) ([]Job, error) {
+	rows, err := q.db.Query(ctx, listExpiredWorkflowJobs, atTime)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Job
+	for rows.Next() {
+		var i Job
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.ExecutionID,
+			&i.StepKey,
+			&i.Status,
+			&i.DueAt,
+			&i.Attempts,
+			&i.MaxAttempts,
+			&i.ClaimToken,
+			&i.LeaseExpiresAt,
+			&i.LastErrorCode,
+			&i.DeadLetterReason,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReconcileWorkflowExecutions = `-- name: ListReconcileWorkflowExecutions :many
+SELECT e.id, e.workspace_id, e.behavior_version_id, e.trigger_key, e.correlation_id, e.state, e.reason_code, e.definition, e.source_kind, e.source_id, e.subject, e.revision, e.operation_key, e.legacy_run_id, e.legacy_job_id, e.parent_execution_id, e.deadline_at, e.cancelled_at, e.started_at, e.finished_at, e.created_at, e.updated_at FROM public.workflow_executions e
+WHERE e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','COMPLETED','FAILED','CANCELLED')
+  AND (e.deadline_at IS NOT NULL AND e.deadline_at <= $1::timestamptz
+       OR NOT EXISTS (SELECT 1 FROM public.jobs j WHERE j.execution_id = e.id AND j.status IN ('pending','processing')))
+ORDER BY e.updated_at, e.id
+FOR UPDATE OF e SKIP LOCKED
+LIMIT 100
+`
+
+func (q *Queries) ListReconcileWorkflowExecutions(ctx context.Context, atTime pgtype.Timestamptz) ([]WorkflowExecution, error) {
+	rows, err := q.db.Query(ctx, listReconcileWorkflowExecutions, atTime)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []WorkflowExecution
+	for rows.Next() {
+		var i WorkflowExecution
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.BehaviorVersionID,
+			&i.TriggerKey,
+			&i.CorrelationID,
+			&i.State,
+			&i.ReasonCode,
+			&i.Definition,
+			&i.SourceKind,
+			&i.SourceID,
+			&i.Subject,
+			&i.Revision,
+			&i.OperationKey,
+			&i.LegacyRunID,
+			&i.LegacyJobID,
+			&i.ParentExecutionID,
+			&i.DeadlineAt,
+			&i.CancelledAt,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkflowDeadLetters = `-- name: ListWorkflowDeadLetters :many
+SELECT id, workspace_id, execution_id, step_key, status, due_at, attempts, max_attempts, claim_token, lease_expires_at, last_error_code, dead_letter_reason, created_at, updated_at FROM public.jobs
+WHERE workspace_id = $1 AND status = 'dead_letter'
+ORDER BY updated_at DESC, id DESC
+LIMIT $2
+`
+
+type ListWorkflowDeadLettersParams struct {
+	WorkspaceID pgtype.UUID
+	RowLimit    int32
+}
+
+func (q *Queries) ListWorkflowDeadLetters(ctx context.Context, arg ListWorkflowDeadLettersParams) ([]Job, error) {
+	rows, err := q.db.Query(ctx, listWorkflowDeadLetters, arg.WorkspaceID, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Job
+	for rows.Next() {
+		var i Job
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.ExecutionID,
+			&i.StepKey,
+			&i.Status,
+			&i.DueAt,
+			&i.Attempts,
+			&i.MaxAttempts,
+			&i.ClaimToken,
+			&i.LeaseExpiresAt,
+			&i.LastErrorCode,
+			&i.DeadLetterReason,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -591,6 +1085,53 @@ func (q *Queries) LockWorkflowExecution(ctx context.Context, arg LockWorkflowExe
 	return i, err
 }
 
+const lockWorkflowJobFence = `-- name: LockWorkflowJobFence :one
+SELECT j.id, j.workspace_id, j.execution_id, j.step_key, j.status, j.due_at, j.attempts, j.max_attempts, j.claim_token, j.lease_expires_at, j.last_error_code, j.dead_letter_reason, j.created_at, j.updated_at FROM public.jobs j
+JOIN public.workflow_executions e
+  ON e.workspace_id = j.workspace_id AND e.id = j.execution_id
+WHERE j.workspace_id = $1 AND j.id = $2
+  AND j.status = 'processing' AND j.claim_token = $3
+  AND j.lease_expires_at > $4::timestamptz
+  AND e.state IN ('TRIAGING','PLANNING','RUNNING','EVALUATING')
+  AND e.cancelled_at IS NULL
+  AND (e.deadline_at IS NULL OR e.deadline_at > $4::timestamptz)
+FOR UPDATE OF j
+`
+
+type LockWorkflowJobFenceParams struct {
+	WorkspaceID pgtype.UUID
+	ID          int64
+	ClaimToken  pgtype.UUID
+	AtTime      pgtype.Timestamptz
+}
+
+func (q *Queries) LockWorkflowJobFence(ctx context.Context, arg LockWorkflowJobFenceParams) (Job, error) {
+	row := q.db.QueryRow(ctx, lockWorkflowJobFence,
+		arg.WorkspaceID,
+		arg.ID,
+		arg.ClaimToken,
+		arg.AtTime,
+	)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepKey,
+		&i.Status,
+		&i.DueAt,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.ClaimToken,
+		&i.LeaseExpiresAt,
+		&i.LastErrorCode,
+		&i.DeadLetterReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const recordExecutionCheckpoint = `-- name: RecordExecutionCheckpoint :one
 UPDATE public.execution_steps
 SET checkpoint = $1,
@@ -623,6 +1164,283 @@ func (q *Queries) RecordExecutionCheckpoint(ctx context.Context, arg RecordExecu
 		arg.OutputTokens,
 		arg.CacheReadTokens,
 		arg.CacheWriteTokens,
+		arg.WorkspaceID,
+		arg.ExecutionID,
+		arg.StepKey,
+		arg.ExpectedAttempt,
+	)
+	var i ExecutionStep
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepKey,
+		&i.Position,
+		&i.Kind,
+		&i.DependsOn,
+		&i.State,
+		&i.Attempts,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheReadTokens,
+		&i.CacheWriteTokens,
+		&i.Checkpoint,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const resetExpiredWorkflowJob = `-- name: ResetExpiredWorkflowJob :one
+UPDATE public.jobs
+SET status = 'pending', due_at = $1, claim_token = NULL, lease_expires_at = NULL,
+    last_error_code = $2, updated_at = $3
+WHERE id = $4 AND workspace_id = $5 AND status = 'processing'
+RETURNING id, workspace_id, execution_id, step_key, status, due_at, attempts, max_attempts, claim_token, lease_expires_at, last_error_code, dead_letter_reason, created_at, updated_at
+`
+
+type ResetExpiredWorkflowJobParams struct {
+	DueAt       pgtype.Timestamptz
+	ErrorCode   pgtype.Text
+	AtTime      pgtype.Timestamptz
+	ID          int64
+	WorkspaceID pgtype.UUID
+}
+
+func (q *Queries) ResetExpiredWorkflowJob(ctx context.Context, arg ResetExpiredWorkflowJobParams) (Job, error) {
+	row := q.db.QueryRow(ctx, resetExpiredWorkflowJob,
+		arg.DueAt,
+		arg.ErrorCode,
+		arg.AtTime,
+		arg.ID,
+		arg.WorkspaceID,
+	)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepKey,
+		&i.Status,
+		&i.DueAt,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.ClaimToken,
+		&i.LeaseExpiresAt,
+		&i.LastErrorCode,
+		&i.DeadLetterReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const retryWorkflowJob = `-- name: RetryWorkflowJob :one
+UPDATE public.jobs
+SET status = 'pending', due_at = $1, claim_token = NULL, lease_expires_at = NULL,
+    last_error_code = $2, updated_at = $3
+WHERE workspace_id = $4 AND id = $5
+  AND status = 'processing' AND claim_token = $6
+RETURNING id, workspace_id, execution_id, step_key, status, due_at, attempts, max_attempts, claim_token, lease_expires_at, last_error_code, dead_letter_reason, created_at, updated_at
+`
+
+type RetryWorkflowJobParams struct {
+	DueAt       pgtype.Timestamptz
+	ErrorCode   pgtype.Text
+	AtTime      pgtype.Timestamptz
+	WorkspaceID pgtype.UUID
+	ID          int64
+	ClaimToken  pgtype.UUID
+}
+
+func (q *Queries) RetryWorkflowJob(ctx context.Context, arg RetryWorkflowJobParams) (Job, error) {
+	row := q.db.QueryRow(ctx, retryWorkflowJob,
+		arg.DueAt,
+		arg.ErrorCode,
+		arg.AtTime,
+		arg.WorkspaceID,
+		arg.ID,
+		arg.ClaimToken,
+	)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepKey,
+		&i.Status,
+		&i.DueAt,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.ClaimToken,
+		&i.LeaseExpiresAt,
+		&i.LastErrorCode,
+		&i.DeadLetterReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const selectDueWorkflowJob = `-- name: SelectDueWorkflowJob :one
+SELECT j.id, j.workspace_id, j.execution_id, j.step_key, j.status, j.due_at, j.attempts, j.max_attempts, j.claim_token, j.lease_expires_at, j.last_error_code, j.dead_letter_reason, j.created_at, j.updated_at FROM public.jobs j
+JOIN public.workflow_executions e
+  ON e.workspace_id = j.workspace_id AND e.id = j.execution_id
+WHERE j.status = 'pending' AND j.due_at <= $1::timestamptz
+  AND j.attempts < j.max_attempts
+  AND e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','COMPLETED','FAILED','CANCELLED')
+  AND (e.deadline_at IS NULL OR e.deadline_at > $1::timestamptz)
+ORDER BY CASE WHEN j.status = 'processing' THEN 0 ELSE 1 END, j.due_at, j.id
+FOR UPDATE OF j SKIP LOCKED
+LIMIT 1
+`
+
+func (q *Queries) SelectDueWorkflowJob(ctx context.Context, atTime pgtype.Timestamptz) (Job, error) {
+	row := q.db.QueryRow(ctx, selectDueWorkflowJob, atTime)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepKey,
+		&i.Status,
+		&i.DueAt,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.ClaimToken,
+		&i.LeaseExpiresAt,
+		&i.LastErrorCode,
+		&i.DeadLetterReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const setExecutionStepState = `-- name: SetExecutionStepState :one
+UPDATE public.execution_steps
+SET state = $1, updated_at = $2
+WHERE workspace_id = $3 AND execution_id = $4
+  AND step_key = $5
+RETURNING id, workspace_id, execution_id, step_key, position, kind, depends_on, state, attempts, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, checkpoint, created_at, updated_at
+`
+
+type SetExecutionStepStateParams struct {
+	State       string
+	AtTime      pgtype.Timestamptz
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+	StepKey     string
+}
+
+func (q *Queries) SetExecutionStepState(ctx context.Context, arg SetExecutionStepStateParams) (ExecutionStep, error) {
+	row := q.db.QueryRow(ctx, setExecutionStepState,
+		arg.State,
+		arg.AtTime,
+		arg.WorkspaceID,
+		arg.ExecutionID,
+		arg.StepKey,
+	)
+	var i ExecutionStep
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepKey,
+		&i.Position,
+		&i.Kind,
+		&i.DependsOn,
+		&i.State,
+		&i.Attempts,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheReadTokens,
+		&i.CacheWriteTokens,
+		&i.Checkpoint,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const startExecutionStepAttempt = `-- name: StartExecutionStepAttempt :one
+UPDATE public.execution_steps
+SET state = 'RUNNING', attempts = attempts + 1, updated_at = $1
+WHERE workspace_id = $2 AND execution_id = $3
+  AND step_key = $4 AND state IN ('PENDING','RUNNING')
+RETURNING id, workspace_id, execution_id, step_key, position, kind, depends_on, state, attempts, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, checkpoint, created_at, updated_at
+`
+
+type StartExecutionStepAttemptParams struct {
+	AtTime      pgtype.Timestamptz
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+	StepKey     string
+}
+
+func (q *Queries) StartExecutionStepAttempt(ctx context.Context, arg StartExecutionStepAttemptParams) (ExecutionStep, error) {
+	row := q.db.QueryRow(ctx, startExecutionStepAttempt,
+		arg.AtTime,
+		arg.WorkspaceID,
+		arg.ExecutionID,
+		arg.StepKey,
+	)
+	var i ExecutionStep
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepKey,
+		&i.Position,
+		&i.Kind,
+		&i.DependsOn,
+		&i.State,
+		&i.Attempts,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheReadTokens,
+		&i.CacheWriteTokens,
+		&i.Checkpoint,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateExecutionStepProgress = `-- name: UpdateExecutionStepProgress :one
+UPDATE public.execution_steps
+SET checkpoint = COALESCE($1, checkpoint),
+    input_tokens = input_tokens + $2,
+    output_tokens = output_tokens + $3,
+    cache_read_tokens = cache_read_tokens + $4,
+    cache_write_tokens = cache_write_tokens + $5,
+    updated_at = $6
+WHERE workspace_id = $7 AND execution_id = $8
+  AND step_key = $9 AND state = 'RUNNING' AND attempts = $10
+RETURNING id, workspace_id, execution_id, step_key, position, kind, depends_on, state, attempts, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, checkpoint, created_at, updated_at
+`
+
+type UpdateExecutionStepProgressParams struct {
+	Checkpoint       []byte
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	AtTime           pgtype.Timestamptz
+	WorkspaceID      pgtype.UUID
+	ExecutionID      int64
+	StepKey          string
+	ExpectedAttempt  int32
+}
+
+func (q *Queries) UpdateExecutionStepProgress(ctx context.Context, arg UpdateExecutionStepProgressParams) (ExecutionStep, error) {
+	row := q.db.QueryRow(ctx, updateExecutionStepProgress,
+		arg.Checkpoint,
+		arg.InputTokens,
+		arg.OutputTokens,
+		arg.CacheReadTokens,
+		arg.CacheWriteTokens,
+		arg.AtTime,
 		arg.WorkspaceID,
 		arg.ExecutionID,
 		arg.StepKey,
