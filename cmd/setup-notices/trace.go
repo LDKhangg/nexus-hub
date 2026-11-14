@@ -62,12 +62,32 @@ func traceCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io
 	if directory, err := storage.NewPeopleRepository(pool); err == nil {
 		behavior.ResolveTraceSender(ctx, directory, *ws, &t)
 	}
+	// Link the run to its durable executions; the run's IDs are unchanged.
+	if workflows, err := storage.NewWorkflowStore(pool); err == nil {
+		if links, err := workflows.ExecutionLinksForRun(ctx, *ws, t.Run.ID); err == nil {
+			t.Executions = links
+		}
+	}
 	if *asJSON {
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
 		return enc.Encode(t)
 	}
-	_, err = io.WriteString(out, behavior.RenderTraceFull(t, traceLocation(ctx, store, *ws), *item != ""))
+	text := behavior.RenderTraceFull(t, traceLocation(ctx, store, *ws), *item != "")
+	if len(t.Executions) > 0 {
+		text += "Executions (workflow show <id>):\n"
+		for _, e := range t.Executions {
+			line := "• #" + strconv.FormatInt(e.ExecutionID, 10) + " · " + e.State
+			if e.Reason != "" {
+				line += " · " + e.Reason
+			}
+			if e.ParentExecutionID != 0 {
+				line += " · retry of #" + strconv.FormatInt(e.ParentExecutionID, 10)
+			}
+			text += line + "\n"
+		}
+	}
+	_, err = io.WriteString(out, text)
 	return err
 }
 

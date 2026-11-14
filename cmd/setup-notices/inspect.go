@@ -54,6 +54,12 @@ func inspect(ctx context.Context, pool *pgxpool.Pool, out io.Writer) error {
 			[]string{"run_id", "job_id", "step", "tool", "tier", "repo", "account", "status", "error_code", "duration_ms"}},
 		{"outbound_actions", `SELECT id, kind, status, attempts, COALESCE(last_error_code,''), COALESCE(provider_message_id,0) FROM outbound_actions ORDER BY id DESC LIMIT 100`,
 			[]string{"action_id", "kind", "status", "attempts", "error_code", "provider_message_id"}},
+		// Durable executions link to the legacy run/job IDs above; those IDs
+		// are unchanged. No definition, checkpoint or approval content.
+		{"workflow_executions", `SELECT id, workspace_id::text, state, COALESCE(reason_code,''), behavior_version_id, COALESCE(parent_execution_id,0), COALESCE(legacy_run_id,0), COALESCE(legacy_job_id,0), updated_at FROM workflow_executions ORDER BY id DESC LIMIT 100`,
+			[]string{"execution_id", "workspace_id", "state", "reason", "version_id", "parent_execution_id", "legacy_run_id", "legacy_job_id", "updated_at"}},
+		{"jobs", `SELECT id, execution_id, step_key, status, attempts, max_attempts, COALESCE(last_error_code,''), COALESCE(dead_letter_reason,''), due_at FROM jobs ORDER BY id DESC LIMIT 100`,
+			[]string{"job_id", "execution_id", "step", "status", "attempts", "max_attempts", "error_code", "dead_letter_reason", "due_at"}},
 		{"credentials", `SELECT workspace_id::text, name, kind, updated_at FROM credentials ORDER BY workspace_id, name`,
 			[]string{"workspace_id", "name", "kind", "updated_at"}},
 	}

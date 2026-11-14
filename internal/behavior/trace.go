@@ -112,6 +112,19 @@ type Trace struct {
 	// flags, or the code of why there is none.
 	Verdict   *RunVerdict      `json:"verdict,omitempty"`
 	ToolCalls []ToolCallRecord `json:"tool_calls"`
+	// Executions link the run to its durable workflow executions (the
+	// imported or durable execution and its retry children). The CLI fills
+	// it; the run's own IDs are unchanged.
+	Executions []TraceExecution `json:"executions,omitempty"`
+}
+
+// TraceExecution is one durable execution linked to a run: IDs, state and
+// reason code only.
+type TraceExecution struct {
+	ExecutionID       int64  `json:"execution_id"`
+	State             string `json:"state"`
+	Reason            string `json:"reason,omitempty"`
+	ParentExecutionID int64  `json:"parent_execution_id,omitempty"`
 }
 
 // TraceRun is the run part of a trace.
