@@ -217,11 +217,13 @@ func renderDefault(report Report, v Values, prefs Prefs, language string) string
 					hint += " · " + v.WorkflowRef
 				}
 				lines = append(lines, cleanValue(hint))
+			} else if v.WorkflowRef != "" {
+				lines = append(lines, cleanValue(v.WorkflowRef))
 			}
 		}
 	}
-	if prefs.ShowTraceHint && report.TraceHint != "" && v.WorkflowRef != "" && prefs.Style != StyleDetailed {
-		lines = append(lines, cleanValue(report.TraceHint+" · "+v.WorkflowRef))
+	if v.WorkflowRef != "" && prefs.Style != StyleDetailed {
+		lines = append(lines, cleanValue(v.WorkflowRef))
 	}
 	reason := ""
 	if v.Reason != "" && needsReason(report.Kind) {
