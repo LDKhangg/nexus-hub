@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -19,6 +20,27 @@ const (
 // InstructionReader is the narrow read side needed at workflow checkpoints.
 type InstructionReader interface {
 	ListInstructions(context.Context, string, int64) ([]Instruction, error)
+}
+
+// OwnerInstructionsUsedVersion returns the highest instruction version
+// referenced by a persisted step checkpoint.
+func OwnerInstructionsUsedVersion(steps []Step) int64 {
+	var usedVersion int64
+	for _, step := range steps {
+		if step.Checkpoint == nil {
+			continue
+		}
+		for _, reference := range step.Checkpoint.References {
+			if reference.Kind != CheckpointOwnerInstructions {
+				continue
+			}
+			version, err := strconv.ParseInt(reference.ReferenceID, 10, 64)
+			if err == nil && version > usedVersion {
+				usedVersion = version
+			}
+		}
+	}
+	return usedVersion
 }
 
 // FormatOwnerInstructions renders owner guidance as a separate prompt block.

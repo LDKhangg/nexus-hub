@@ -427,26 +427,11 @@ func workflowInstructionMetadata(instructions []workflow.Instruction, steps []wo
 			latest = instruction
 		}
 	}
-	var usedVersion int64
-	for _, step := range steps {
-		if step.Checkpoint == nil {
-			continue
-		}
-		for _, reference := range step.Checkpoint.References {
-			if reference.Kind != workflow.CheckpointOwnerInstructions {
-				continue
-			}
-			version, err := strconv.ParseInt(reference.ReferenceID, 10, 64)
-			if err == nil && version > usedVersion {
-				usedVersion = version
-			}
-		}
-	}
 	return map[string]any{
 		"count":          len(instructions),
 		"latest_version": latest.Version,
 		"latest_at":      workflowTimeV(latest.CreatedAt),
-		"used_version":   usedVersion,
+		"used_version":   workflow.OwnerInstructionsUsedVersion(steps),
 	}
 }
 

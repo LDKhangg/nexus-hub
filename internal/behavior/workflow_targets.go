@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
@@ -194,7 +195,7 @@ func (w *InboxWorker) clarifyWorkflowTarget(ctx context.Context, u InboundUpdate
 	state := conversationFromContext(ctx)
 	items := w.activeBoundWorkflows(ctx, u.WorkspaceID, state.id)
 	if len(items) == 0 || w.d.Approvals == nil {
-		return w.reply(ctx, to, "Không tìm thấy workflow đang hoạt động phù hợp trong cuộc trò chuyện này.", "workflow_target_not_found")
+		return w.reply(ctx, to, "Không tìm thấy workflow đang hoạt động phù hợp. Hãy ghi rõ mã WF-id, ví dụ: WF-123 <nội dung>.", "workflow_target_not_found")
 	}
 	p := workflowTargetPayload{ChatID: u.ChatID, Kind: kind, Text: text, UpdateID: u.UpdateID,
 		MessageID: u.MessageID, ConversationID: state.id, Candidates: make([]int64, len(items))}
@@ -277,7 +278,7 @@ func (w *InboxWorker) executeWorkflowRequest(ctx context.Context, u InboundUpdat
 }
 
 func (w *InboxWorker) appendWorkflowInstruction(ctx context.Context, u InboundUpdate, to ChatRef, id int64, text string) outcome {
-	text = strings.TrimSpace(text)
+	text = sanitizeWorkflowInstruction(text)
 	state := conversationFromContext(ctx)
 	if w.d.Conversations == nil || state.id <= 0 || text == "" || utf8.RuneCountInString(text) > 2000 {
 		return w.reply(ctx, to, "Yêu cầu bổ sung phải có từ 1 đến 2.000 ký tự.", "usage")
@@ -306,15 +307,29 @@ func (w *InboxWorker) workflowList(ctx context.Context, u InboundUpdate, to Chat
 	if r == nil {
 		return w.reply(ctx, to, msgNotAvailable, "not_available")
 	}
-	items, _, err := r.ListExecutions(ctx, workflow.ExecutionQuery{WorkspaceID: u.WorkspaceID, Limit: 20})
-	if err != nil {
-		return w.reply(ctx, to, msgFailed, "handler_failed")
-	}
-	lines := make([]string, 0, len(items))
-	for _, item := range items {
-		if !item.State.IsTerminal() {
-			lines = append(lines, fmt.Sprintf("%s · %s · %s", workflow.FormatRef(item.ID), oneLine(item.BehaviorName, 60), item.State))
+	const (
+		listLimit = 20
+		maxPages  = 10
+	)
+	lines := make([]string, 0, listLimit)
+	var before int64
+	for page := 0; page < maxPages && len(lines) < listLimit; page++ {
+		items, next, err := r.ListExecutions(ctx, workflow.ExecutionQuery{WorkspaceID: u.WorkspaceID, BeforeID: before, Limit: listLimit})
+		if err != nil {
+			return w.reply(ctx, to, msgFailed, "handler_failed")
 		}
+		for _, item := range items {
+			if !item.State.IsTerminal() {
+				lines = append(lines, fmt.Sprintf("%s · %s · %s", workflow.FormatRef(item.ID), oneLine(item.BehaviorName, 60), item.State))
+				if len(lines) == listLimit {
+					break
+				}
+			}
+		}
+		if next <= 0 || next == before {
+			break
+		}
+		before = next
 	}
 	if len(lines) == 0 {
 		return w.reply(ctx, to, "Không có workflow đang hoạt động.", "")
@@ -349,9 +364,18 @@ func (w *InboxWorker) workflowStatus(ctx context.Context, u InboundUpdate, to Ch
 	}
 	if w.d.Conversations != nil {
 		if instructions, err := w.d.Conversations.ListInstructions(ctx, u.WorkspaceID, id); err == nil && len(instructions) > 0 {
-			latest := instructions[len(instructions)-1]
-			lines = append(lines, fmt.Sprintf("Yêu cầu mới nhất: v%d · %s · %s", latest.Version,
-				latest.CreatedAt.UTC().Format(time.RFC3339), oneLine(latest.Text, 240)))
+			latest := instructions[0]
+			for _, instruction := range instructions[1:] {
+				if instruction.Version > latest.Version {
+					latest = instruction
+				}
+			}
+			steps, err := r.ListSteps(ctx, u.WorkspaceID, id)
+			if err != nil {
+				return w.reply(ctx, to, msgFailed, "handler_failed")
+			}
+			lines = append(lines, fmt.Sprintf("Yêu cầu: v%d (%s) · %d bản · used v%d", latest.Version,
+				latest.CreatedAt.UTC().Format(time.RFC3339), len(instructions), workflow.OwnerInstructionsUsedVersion(steps)))
 		}
 		if lister, ok := w.d.Conversations.(workflow.ResourceLister); ok {
 			if resources, err := lister.ListResources(ctx, u.WorkspaceID, id); err == nil {
@@ -422,6 +446,7 @@ func (w *InboxWorker) toolWorkflowNote(ctx context.Context, tt *assistantToolTur
 		return toolErr(errToolArgs)
 	}
 	text, err := args.str("text")
+	text = sanitizeWorkflowInstruction(text)
 	if err != nil || text == "" || utf8.RuneCountInString(text) > 2000 {
 		return "Instruction text must contain 1 to 2,000 characters.", true
 	}
@@ -447,4 +472,15 @@ func (w *InboxWorker) toolWorkflowNote(ctx context.Context, tt *assistantToolTur
 	_ = w.d.Conversations.BindWorkflow(ctx, tt.u.WorkspaceID, conversation.ID, id, "assistant_instruction")
 	tt.proposed[toolWorkflowNote] = true
 	return fmt.Sprintf("%s: instruction accepted (v%d).", workflow.FormatRef(id), ins.Version), false
+}
+
+func sanitizeWorkflowInstruction(text string) string {
+	text = strings.ToValidUTF8(text, "")
+	clean := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, text)
+	return strings.TrimSpace(clean)
 }
