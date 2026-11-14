@@ -43,6 +43,144 @@ func (q *Queries) AddAgentUsage(ctx context.Context, arg AddAgentUsageParams) (i
 	return result.RowsAffected(), nil
 }
 
+const addDurableAgentUsage = `-- name: AddDurableAgentUsage :execrows
+UPDATE public.agent_jobs SET input_tokens = input_tokens + $1::int,
+  output_tokens = output_tokens + $2::int,
+  cache_read_tokens = cache_read_tokens + $3::int,
+  cache_write_tokens = cache_write_tokens + $4::int, updated_at = now()
+WHERE workspace_id = $5 AND id = $6 AND status = 'processing'
+  AND workflow_execution_id IS NOT NULL
+`
+
+type AddDurableAgentUsageParams struct {
+	Input       int32
+	Output      int32
+	CacheRead   int32
+	CacheWrite  int32
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+func (q *Queries) AddDurableAgentUsage(ctx context.Context, arg AddDurableAgentUsageParams) (int64, error) {
+	result, err := q.db.Exec(ctx, addDurableAgentUsage,
+		arg.Input,
+		arg.Output,
+		arg.CacheRead,
+		arg.CacheWrite,
+		arg.WorkspaceID,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const adoptAgentBatch = `-- name: AdoptAgentBatch :one
+UPDATE public.agent_jobs SET status = 'processing', workflow_execution_id = $1,
+  claim_token = NULL, locked_until = 'infinity'::timestamptz, workflow_attempt_deadline = NULL, updated_at = now()
+WHERE workspace_id = $2 AND id = $3 AND status = 'pending'
+  AND workflow_execution_id IS NULL
+RETURNING id, workspace_id, source_integration_id, thread_id, status, attempts, run_at, first_enqueued_at, locked_until, claim_token, through_message_id, last_error_code, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at, updated_at, workflow_execution_id, workflow_attempt_deadline
+`
+
+type AdoptAgentBatchParams struct {
+	ExecutionID pgtype.Int8
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+// Hands a due pending batch to its workflow execution.
+func (q *Queries) AdoptAgentBatch(ctx context.Context, arg AdoptAgentBatchParams) (AgentJob, error) {
+	row := q.db.QueryRow(ctx, adoptAgentBatch, arg.ExecutionID, arg.WorkspaceID, arg.ID)
+	var i AgentJob
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.SourceIntegrationID,
+		&i.ThreadID,
+		&i.Status,
+		&i.Attempts,
+		&i.RunAt,
+		&i.FirstEnqueuedAt,
+		&i.LockedUntil,
+		&i.ClaimToken,
+		&i.ThroughMessageID,
+		&i.LastErrorCode,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheReadTokens,
+		&i.CacheWriteTokens,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.WorkflowExecutionID,
+		&i.WorkflowAttemptDeadline,
+	)
+	return i, err
+}
+
+const agentThreadBusy = `-- name: AgentThreadBusy :one
+SELECT EXISTS (SELECT 1 FROM public.agent_jobs p
+               WHERE p.workspace_id = $1::uuid AND p.thread_id = $2::uuid
+                 AND p.id <> $3 AND p.status = 'processing')::bool AS busy
+`
+
+type AgentThreadBusyParams struct {
+	WorkspaceID pgtype.UUID
+	ThreadID    pgtype.UUID
+	ID          int64
+}
+
+// Whether another job of the thread is processing, seen after the thread's
+// advisory lock was taken.
+func (q *Queries) AgentThreadBusy(ctx context.Context, arg AgentThreadBusyParams) (bool, error) {
+	row := q.db.QueryRow(ctx, agentThreadBusy, arg.WorkspaceID, arg.ThreadID, arg.ID)
+	var busy bool
+	err := row.Scan(&busy)
+	return busy, err
+}
+
+const beginDurableAgentAttempt = `-- name: BeginDurableAgentAttempt :one
+UPDATE public.agent_jobs SET attempts = attempts + 1, workflow_attempt_deadline = $1::timestamptz, updated_at = now()
+WHERE workspace_id = $2 AND id = $3 AND status = 'processing'
+  AND workflow_execution_id IS NOT NULL
+RETURNING id, workspace_id, source_integration_id, thread_id, status, attempts, run_at, first_enqueued_at, locked_until, claim_token, through_message_id, last_error_code, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at, updated_at, workflow_execution_id, workflow_attempt_deadline
+`
+
+type BeginDurableAgentAttemptParams struct {
+	Deadline    pgtype.Timestamptz
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+func (q *Queries) BeginDurableAgentAttempt(ctx context.Context, arg BeginDurableAgentAttemptParams) (AgentJob, error) {
+	row := q.db.QueryRow(ctx, beginDurableAgentAttempt, arg.Deadline, arg.WorkspaceID, arg.ID)
+	var i AgentJob
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.SourceIntegrationID,
+		&i.ThreadID,
+		&i.Status,
+		&i.Attempts,
+		&i.RunAt,
+		&i.FirstEnqueuedAt,
+		&i.LockedUntil,
+		&i.ClaimToken,
+		&i.ThroughMessageID,
+		&i.LastErrorCode,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheReadTokens,
+		&i.CacheWriteTokens,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.WorkflowExecutionID,
+		&i.WorkflowAttemptDeadline,
+	)
+	return i, err
+}
+
 const checkAgentThreadLease = `-- name: CheckAgentThreadLease :one
 SELECT EXISTS (SELECT 1 FROM public.agent_jobs p
                WHERE p.thread_id = $1::uuid AND p.id <> $2
@@ -174,6 +312,90 @@ func (q *Queries) FinishAgentJob(ctx context.Context, arg FinishAgentJobParams) 
 	return result.RowsAffected(), nil
 }
 
+const finishDurableAgentBatch = `-- name: FinishDurableAgentBatch :execrows
+UPDATE public.agent_jobs SET status = $1::text, through_message_id = $2,
+  last_error_code = $3, locked_until = NULL, workflow_attempt_deadline = NULL, updated_at = now()
+WHERE workspace_id = $4 AND id = $5 AND status = 'processing'
+  AND workflow_execution_id IS NOT NULL
+`
+
+type FinishDurableAgentBatchParams struct {
+	Status      string
+	Through     pgtype.Int8
+	Code        pgtype.Text
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+func (q *Queries) FinishDurableAgentBatch(ctx context.Context, arg FinishDurableAgentBatchParams) (int64, error) {
+	result, err := q.db.Exec(ctx, finishDurableAgentBatch,
+		arg.Status,
+		arg.Through,
+		arg.Code,
+		arg.WorkspaceID,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const getAgentBatch = `-- name: GetAgentBatch :one
+SELECT id, workspace_id, source_integration_id, thread_id, status, attempts, run_at, first_enqueued_at, locked_until, claim_token, through_message_id, last_error_code, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at, updated_at, workflow_execution_id, workflow_attempt_deadline FROM public.agent_jobs WHERE workspace_id = $1 AND id = $2
+`
+
+type GetAgentBatchParams struct {
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+func (q *Queries) GetAgentBatch(ctx context.Context, arg GetAgentBatchParams) (AgentJob, error) {
+	row := q.db.QueryRow(ctx, getAgentBatch, arg.WorkspaceID, arg.ID)
+	var i AgentJob
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.SourceIntegrationID,
+		&i.ThreadID,
+		&i.Status,
+		&i.Attempts,
+		&i.RunAt,
+		&i.FirstEnqueuedAt,
+		&i.LockedUntil,
+		&i.ClaimToken,
+		&i.ThroughMessageID,
+		&i.LastErrorCode,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheReadTokens,
+		&i.CacheWriteTokens,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.WorkflowExecutionID,
+		&i.WorkflowAttemptDeadline,
+	)
+	return i, err
+}
+
+const getAgentBatchResultID = `-- name: GetAgentBatchResultID :one
+SELECT id FROM public.agent_batch_results
+WHERE workspace_id = $1 AND agent_job_id = $2 AND stage = $3
+`
+
+type GetAgentBatchResultIDParams struct {
+	WorkspaceID pgtype.UUID
+	AgentJobID  int64
+	Stage       string
+}
+
+func (q *Queries) GetAgentBatchResultID(ctx context.Context, arg GetAgentBatchResultIDParams) (int64, error) {
+	row := q.db.QueryRow(ctx, getAgentBatchResultID, arg.WorkspaceID, arg.AgentJobID, arg.Stage)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
 const getAgentThread = `-- name: GetAgentThread :one
 SELECT title, rolling_summary, external_id FROM public.hub_threads WHERE workspace_id = $1 AND id = $2
 `
@@ -196,6 +418,34 @@ func (q *Queries) GetAgentThread(ctx context.Context, arg GetAgentThreadParams) 
 	return i, err
 }
 
+const getInternalBehaviorVersion = `-- name: GetInternalBehaviorVersion :one
+SELECT v.id, v.workspace_id, v.behavior_id, v.version, v.document, v.vars, v.source, v.published_at FROM public.behavior_versions v
+JOIN public.behaviors b ON b.workspace_id = v.workspace_id AND b.id = v.behavior_id
+WHERE v.workspace_id = $1 AND v.id = $2 AND b.internal_kind = $3::text
+`
+
+type GetInternalBehaviorVersionParams struct {
+	WorkspaceID  pgtype.UUID
+	ID           int64
+	InternalKind string
+}
+
+func (q *Queries) GetInternalBehaviorVersion(ctx context.Context, arg GetInternalBehaviorVersionParams) (BehaviorVersion, error) {
+	row := q.db.QueryRow(ctx, getInternalBehaviorVersion, arg.WorkspaceID, arg.ID, arg.InternalKind)
+	var i BehaviorVersion
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.BehaviorID,
+		&i.Version,
+		&i.Document,
+		&i.Vars,
+		&i.Source,
+		&i.PublishedAt,
+	)
+	return i, err
+}
+
 const getThreadSummary = `-- name: GetThreadSummary :one
 SELECT rolling_summary, summary_through_message_id FROM public.hub_threads WHERE workspace_id = $1 AND id = $2
 `
@@ -214,6 +464,123 @@ func (q *Queries) GetThreadSummary(ctx context.Context, arg GetThreadSummaryPara
 	row := q.db.QueryRow(ctx, getThreadSummary, arg.WorkspaceID, arg.ID)
 	var i GetThreadSummaryRow
 	err := row.Scan(&i.RollingSummary, &i.SummaryThroughMessageID)
+	return i, err
+}
+
+const insertAgentBatchResult = `-- name: InsertAgentBatchResult :one
+INSERT INTO public.agent_batch_results(
+  workspace_id, agent_job_id, execution_id, stage, outcome, through_message_id, last_triaged_id, max_message_id,
+  category, urgency, confidence, summary, goal, router_note, tools_available, unseen_count,
+  report_text, tools_line, total_input_tokens, total_output_tokens)
+VALUES ($1, $2, $3, $4, $5,
+  $6, $7, $8,
+  $9, $10, $11, $12, $13, $14,
+  $15, $16, $17, $18,
+  $19, $20)
+ON CONFLICT (workspace_id, agent_job_id, stage) DO NOTHING
+RETURNING id
+`
+
+type InsertAgentBatchResultParams struct {
+	WorkspaceID       pgtype.UUID
+	AgentJobID        int64
+	ExecutionID       int64
+	Stage             string
+	Outcome           string
+	ThroughMessageID  int64
+	LastTriagedID     int64
+	MaxMessageID      int64
+	Category          string
+	Urgency           string
+	Confidence        float64
+	Summary           string
+	Goal              string
+	RouterNote        string
+	ToolsAvailable    bool
+	UnseenCount       int32
+	ReportText        string
+	ToolsLine         string
+	TotalInputTokens  int64
+	TotalOutputTokens int64
+}
+
+func (q *Queries) InsertAgentBatchResult(ctx context.Context, arg InsertAgentBatchResultParams) (int64, error) {
+	row := q.db.QueryRow(ctx, insertAgentBatchResult,
+		arg.WorkspaceID,
+		arg.AgentJobID,
+		arg.ExecutionID,
+		arg.Stage,
+		arg.Outcome,
+		arg.ThroughMessageID,
+		arg.LastTriagedID,
+		arg.MaxMessageID,
+		arg.Category,
+		arg.Urgency,
+		arg.Confidence,
+		arg.Summary,
+		arg.Goal,
+		arg.RouterNote,
+		arg.ToolsAvailable,
+		arg.UnseenCount,
+		arg.ReportText,
+		arg.ToolsLine,
+		arg.TotalInputTokens,
+		arg.TotalOutputTokens,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const insertInternalBehavior = `-- name: InsertInternalBehavior :exec
+INSERT INTO public.behaviors(workspace_id, name, status, draft, internal_kind)
+VALUES ($1, 'internal:' || $2::text, 'enabled', '{}'::jsonb, $2::text)
+ON CONFLICT DO NOTHING
+`
+
+type InsertInternalBehaviorParams struct {
+	WorkspaceID  pgtype.UUID
+	InternalKind string
+}
+
+// Creates the workspace's internal definition once; it is enabled so its
+// versions can start executions, and immutable afterwards.
+func (q *Queries) InsertInternalBehavior(ctx context.Context, arg InsertInternalBehaviorParams) error {
+	_, err := q.db.Exec(ctx, insertInternalBehavior, arg.WorkspaceID, arg.InternalKind)
+	return err
+}
+
+const insertInternalBehaviorVersion = `-- name: InsertInternalBehaviorVersion :one
+INSERT INTO public.behavior_versions(workspace_id, behavior_id, version, document, vars, source)
+VALUES ($1, $2, $3, $4, '{}'::jsonb, '')
+RETURNING id, workspace_id, behavior_id, version, document, vars, source, published_at
+`
+
+type InsertInternalBehaviorVersionParams struct {
+	WorkspaceID pgtype.UUID
+	BehaviorID  int64
+	Version     int32
+	Document    []byte
+}
+
+func (q *Queries) InsertInternalBehaviorVersion(ctx context.Context, arg InsertInternalBehaviorVersionParams) (BehaviorVersion, error) {
+	row := q.db.QueryRow(ctx, insertInternalBehaviorVersion,
+		arg.WorkspaceID,
+		arg.BehaviorID,
+		arg.Version,
+		arg.Document,
+	)
+	var i BehaviorVersion
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.BehaviorID,
+		&i.Version,
+		&i.Document,
+		&i.Vars,
+		&i.Source,
+		&i.PublishedAt,
+	)
 	return i, err
 }
 
@@ -252,6 +619,87 @@ func (q *Queries) LastTriagedMessage(ctx context.Context, threadID pgtype.UUID) 
 	return column_1, err
 }
 
+const latestInternalBehaviorVersion = `-- name: LatestInternalBehaviorVersion :one
+SELECT v.id, v.workspace_id, v.behavior_id, v.version, v.document, v.vars, v.source, v.published_at FROM public.behavior_versions v
+WHERE v.workspace_id = $1 AND v.behavior_id = $2
+ORDER BY v.version DESC LIMIT 1
+`
+
+type LatestInternalBehaviorVersionParams struct {
+	WorkspaceID pgtype.UUID
+	BehaviorID  int64
+}
+
+func (q *Queries) LatestInternalBehaviorVersion(ctx context.Context, arg LatestInternalBehaviorVersionParams) (BehaviorVersion, error) {
+	row := q.db.QueryRow(ctx, latestInternalBehaviorVersion, arg.WorkspaceID, arg.BehaviorID)
+	var i BehaviorVersion
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.BehaviorID,
+		&i.Version,
+		&i.Document,
+		&i.Vars,
+		&i.Source,
+		&i.PublishedAt,
+	)
+	return i, err
+}
+
+const listAgentBatchResults = `-- name: ListAgentBatchResults :many
+SELECT id, workspace_id, agent_job_id, execution_id, stage, outcome, through_message_id, last_triaged_id, max_message_id, category, urgency, confidence, summary, goal, router_note, tools_available, unseen_count, report_text, tools_line, total_input_tokens, total_output_tokens, created_at FROM public.agent_batch_results
+WHERE workspace_id = $1 AND agent_job_id = $2
+ORDER BY id
+`
+
+type ListAgentBatchResultsParams struct {
+	WorkspaceID pgtype.UUID
+	AgentJobID  int64
+}
+
+func (q *Queries) ListAgentBatchResults(ctx context.Context, arg ListAgentBatchResultsParams) ([]AgentBatchResult, error) {
+	rows, err := q.db.Query(ctx, listAgentBatchResults, arg.WorkspaceID, arg.AgentJobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AgentBatchResult
+	for rows.Next() {
+		var i AgentBatchResult
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.AgentJobID,
+			&i.ExecutionID,
+			&i.Stage,
+			&i.Outcome,
+			&i.ThroughMessageID,
+			&i.LastTriagedID,
+			&i.MaxMessageID,
+			&i.Category,
+			&i.Urgency,
+			&i.Confidence,
+			&i.Summary,
+			&i.Goal,
+			&i.RouterNote,
+			&i.ToolsAvailable,
+			&i.UnseenCount,
+			&i.ReportText,
+			&i.ToolsLine,
+			&i.TotalInputTokens,
+			&i.TotalOutputTokens,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockAgentClaim = `-- name: LockAgentClaim :one
 SELECT id FROM public.agent_jobs
 WHERE id = $1 AND claim_token = $2::uuid AND status = 'processing'
@@ -268,6 +716,80 @@ func (q *Queries) LockAgentClaim(ctx context.Context, arg LockAgentClaimParams) 
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const lockDurableAgentBatch = `-- name: LockDurableAgentBatch :one
+SELECT j.id, j.workspace_id, j.source_integration_id, j.thread_id, j.status, j.attempts, j.run_at, j.first_enqueued_at, j.locked_until, j.claim_token, j.through_message_id, j.last_error_code, j.input_tokens, j.output_tokens, j.cache_read_tokens, j.cache_write_tokens, j.created_at, j.updated_at, j.workflow_execution_id, j.workflow_attempt_deadline FROM public.agent_jobs j
+JOIN public.workflow_executions e ON e.workspace_id = j.workspace_id AND e.legacy_job_id = j.id
+WHERE j.workspace_id = $1 AND j.id = $2 AND e.id = $3
+  AND e.source_kind = 'agent_job' AND j.workflow_execution_id IS NOT NULL
+FOR UPDATE OF j
+`
+
+type LockDurableAgentBatchParams struct {
+	WorkspaceID pgtype.UUID
+	ID          int64
+	ExecutionID int64
+}
+
+// The batch of a workflow execution (or of its retry child, which keeps
+// the legacy job reference), locked for a fenced write.
+func (q *Queries) LockDurableAgentBatch(ctx context.Context, arg LockDurableAgentBatchParams) (AgentJob, error) {
+	row := q.db.QueryRow(ctx, lockDurableAgentBatch, arg.WorkspaceID, arg.ID, arg.ExecutionID)
+	var i AgentJob
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.SourceIntegrationID,
+		&i.ThreadID,
+		&i.Status,
+		&i.Attempts,
+		&i.RunAt,
+		&i.FirstEnqueuedAt,
+		&i.LockedUntil,
+		&i.ClaimToken,
+		&i.ThroughMessageID,
+		&i.LastErrorCode,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheReadTokens,
+		&i.CacheWriteTokens,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.WorkflowExecutionID,
+		&i.WorkflowAttemptDeadline,
+	)
+	return i, err
+}
+
+const lockInternalBehavior = `-- name: LockInternalBehavior :one
+SELECT id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at, internal_kind FROM public.behaviors
+WHERE workspace_id = $1 AND internal_kind = $2::text
+FOR UPDATE
+`
+
+type LockInternalBehaviorParams struct {
+	WorkspaceID  pgtype.UUID
+	InternalKind string
+}
+
+// Serializes new internal versions of one workspace.
+func (q *Queries) LockInternalBehavior(ctx context.Context, arg LockInternalBehaviorParams) (Behavior, error) {
+	row := q.db.QueryRow(ctx, lockInternalBehavior, arg.WorkspaceID, arg.InternalKind)
+	var i Behavior
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.Status,
+		&i.Draft,
+		&i.DraftVars,
+		&i.DraftSource,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.InternalKind,
+	)
+	return i, err
 }
 
 const recentAgentMessages = `-- name: RecentAgentMessages :many
@@ -333,6 +855,28 @@ func (q *Queries) RetryAgentJob(ctx context.Context, arg RetryAgentJobParams) (i
 		arg.ID,
 		arg.Token,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const retryDurableAgentBatch = `-- name: RetryDurableAgentBatch :execrows
+UPDATE public.agent_jobs SET last_error_code = $1::text, workflow_attempt_deadline = NULL, updated_at = now()
+WHERE workspace_id = $2 AND id = $3 AND status = 'processing'
+  AND workflow_execution_id IS NOT NULL
+`
+
+type RetryDurableAgentBatchParams struct {
+	Code        string
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+// Records why the attempt is tried again and ends its deadline; the
+// workflow job owns the schedule.
+func (q *Queries) RetryDurableAgentBatch(ctx context.Context, arg RetryDurableAgentBatchParams) (int64, error) {
+	result, err := q.db.Exec(ctx, retryDurableAgentBatch, arg.Code, arg.WorkspaceID, arg.ID)
 	if err != nil {
 		return 0, err
 	}
@@ -426,6 +970,42 @@ func (q *Queries) SelectAgentClaimCandidate(ctx context.Context, atTime pgtype.T
 	row := q.db.QueryRow(ctx, selectAgentClaimCandidate, atTime)
 	var i SelectAgentClaimCandidateRow
 	err := row.Scan(&i.ID, &i.ThreadID)
+	return i, err
+}
+
+const selectDueAgentBatch = `-- name: SelectDueAgentBatch :one
+
+SELECT j.id, j.thread_id, j.source_integration_id FROM public.agent_jobs j
+WHERE j.workspace_id = $1::uuid AND j.status = 'pending'
+  AND j.run_at <= $2::timestamptz
+  AND NOT EXISTS (SELECT 1 FROM public.agent_jobs p
+                  WHERE p.workspace_id = j.workspace_id AND p.thread_id = j.thread_id
+                    AND p.id <> j.id AND p.status = 'processing')
+ORDER BY j.run_at, j.id
+FOR UPDATE SKIP LOCKED LIMIT 1
+`
+
+type SelectDueAgentBatchParams struct {
+	WorkspaceID pgtype.UUID
+	AtTime      pgtype.Timestamptz
+}
+
+type SelectDueAgentBatchRow struct {
+	ID                  int64
+	ThreadID            pgtype.UUID
+	SourceIntegrationID pgtype.UUID
+}
+
+// Durable comment pipeline (workflow-owned agent batches). Every query is
+// workspace scoped. A workflow-owned batch is processing with no legacy
+// claim token and a lease that never ends, so the legacy claimer neither
+// takes it nor claims another job of its thread.
+// The oldest due pending batch of the workspace whose thread has no
+// processing job at all (legacy or workflow-owned).
+func (q *Queries) SelectDueAgentBatch(ctx context.Context, arg SelectDueAgentBatchParams) (SelectDueAgentBatchRow, error) {
+	row := q.db.QueryRow(ctx, selectDueAgentBatch, arg.WorkspaceID, arg.AtTime)
+	var i SelectDueAgentBatchRow
+	err := row.Scan(&i.ID, &i.ThreadID, &i.SourceIntegrationID)
 	return i, err
 }
 

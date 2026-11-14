@@ -34,6 +34,15 @@ const (
 
 	StepKindBehaviorRunActions = "behavior.run_actions"
 
+	// Built-in agent comment pipeline step kinds. They are internal: only
+	// internal built-in definitions may use them (ValidateExecutionDefinition),
+	// never a user behavior (ValidateDefinition).
+	StepKindAgentTriage = "agent.triage"
+
+	StepKindAgentInvestigate = "agent.investigate"
+
+	StepKindAgentReport = "agent.report"
+
 	CapabilityInProcess = "in_process"
 
 	NotificationHandlerTelegram = "telegram.message"
@@ -44,6 +53,24 @@ const (
 var registeredStepKinds = map[string]bool{
 	StepKindCollectContext: true, StepKindModel: true, StepKindActions: true, StepKindNotify: true, StepKindApproval: true,
 	StepKindBehaviorContext: true, StepKindBehaviorModel: true, StepKindBehaviorDispatch: true, StepKindBehaviorRunActions: true,
+}
+
+var internalStepKinds = map[string]bool{
+	StepKindAgentTriage: true, StepKindAgentInvestigate: true, StepKindAgentReport: true,
+}
+
+// IsInternalStepKind reports whether kind is reserved for internal built-in
+// definitions.
+func IsInternalStepKind(kind string) bool { return internalStepKinds[kind] }
+
+// IsInternalDefinition reports whether d uses any internal step kind.
+func IsInternalDefinition(d Definition) bool {
+	for _, step := range d.Steps {
+		if internalStepKinds[step.Kind] {
+			return true
+		}
+	}
+	return false
 }
 
 // Definition is the immutable orchestration configuration pinned to a
@@ -113,6 +140,18 @@ func (e ValidationErrors) Error() string {
 // and worker constraints. A nil supportedCapabilities list skips only the
 // environment-dependent capability check.
 func ValidateDefinition(d Definition, supportedCapabilities []string) error {
+	return validateDefinition(d, supportedCapabilities, false)
+}
+
+// ValidateExecutionDefinition validates the definition an execution is
+// started with: a user definition as ValidateDefinition, or an internal
+// built-in definition made only of internal step kinds. Mixing internal and
+// user step kinds is rejected.
+func ValidateExecutionDefinition(d Definition) error {
+	return validateDefinition(d, nil, IsInternalDefinition(d))
+}
+
+func validateDefinition(d Definition, supportedCapabilities []string, internal bool) error {
 	var errs ValidationErrors
 	add := func(path, msg string, args ...any) {
 		errs = append(errs, ValidationError{Path: path, Msg: fmt.Sprintf(msg, args...)})
@@ -134,7 +173,12 @@ func ValidateDefinition(d Definition, supportedCapabilities []string) error {
 		} else {
 			keys[step.Key] = i
 		}
-		if !registeredStepKinds[step.Kind] {
+		switch {
+		case internal && !internalStepKinds[step.Kind]:
+			add(path+".kind", "must be an internal step kind in an internal definition")
+		case !internal && internalStepKinds[step.Kind]:
+			add(path+".kind", "is reserved for internal built-in definitions")
+		case !internal && !registeredStepKinds[step.Kind]:
 			add(path+".kind", "is not a registered step kind")
 		}
 	}

@@ -10,6 +10,7 @@ SELECT sqlc.arg(workspace_id), v.id, sqlc.arg(trigger_key), sqlc.arg(correlation
 FROM public.behavior_versions v
 JOIN public.behaviors b ON b.workspace_id = v.workspace_id AND b.id = v.behavior_id
 WHERE v.workspace_id = sqlc.arg(workspace_id) AND v.id = sqlc.arg(behavior_version_id) AND b.status = 'enabled'
+  AND (b.internal_kind IS NOT NULL) = sqlc.arg(internal)::bool
 ON CONFLICT (workspace_id, trigger_key) DO NOTHING
 RETURNING *;
 

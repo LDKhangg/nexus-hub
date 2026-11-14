@@ -123,3 +123,124 @@ ORDER BY m.id LIMIT 40;
 UPDATE public.hub_threads SET rolling_summary = sqlc.arg(summary), summary_through_message_id = sqlc.arg(through)::bigint, updated_at = now()
 WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id)
   AND COALESCE(summary_through_message_id, 0) = sqlc.arg(expected)::bigint;
+
+-- Durable comment pipeline (workflow-owned agent batches). Every query is
+-- workspace scoped. A workflow-owned batch is processing with no legacy
+-- claim token and a lease that never ends, so the legacy claimer neither
+-- takes it nor claims another job of its thread.
+
+-- name: SelectDueAgentBatch :one
+-- The oldest due pending batch of the workspace whose thread has no
+-- processing job at all (legacy or workflow-owned).
+SELECT j.id, j.thread_id, j.source_integration_id FROM public.agent_jobs j
+WHERE j.workspace_id = sqlc.arg(workspace_id)::uuid AND j.status = 'pending'
+  AND j.run_at <= sqlc.arg(at_time)::timestamptz
+  AND NOT EXISTS (SELECT 1 FROM public.agent_jobs p
+                  WHERE p.workspace_id = j.workspace_id AND p.thread_id = j.thread_id
+                    AND p.id <> j.id AND p.status = 'processing')
+ORDER BY j.run_at, j.id
+FOR UPDATE SKIP LOCKED LIMIT 1;
+
+-- name: AgentThreadBusy :one
+-- Whether another job of the thread is processing, seen after the thread's
+-- advisory lock was taken.
+SELECT EXISTS (SELECT 1 FROM public.agent_jobs p
+               WHERE p.workspace_id = sqlc.arg(workspace_id)::uuid AND p.thread_id = sqlc.arg(thread_id)::uuid
+                 AND p.id <> sqlc.arg(id) AND p.status = 'processing')::bool AS busy;
+
+-- name: AdoptAgentBatch :one
+-- Hands a due pending batch to its workflow execution.
+UPDATE public.agent_jobs SET status = 'processing', workflow_execution_id = sqlc.arg(execution_id),
+  claim_token = NULL, locked_until = 'infinity'::timestamptz, workflow_attempt_deadline = NULL, updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'pending'
+  AND workflow_execution_id IS NULL
+RETURNING *;
+
+-- name: GetAgentBatch :one
+SELECT * FROM public.agent_jobs WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id);
+
+-- name: LockDurableAgentBatch :one
+-- The batch of a workflow execution (or of its retry child, which keeps
+-- the legacy job reference), locked for a fenced write.
+SELECT j.* FROM public.agent_jobs j
+JOIN public.workflow_executions e ON e.workspace_id = j.workspace_id AND e.legacy_job_id = j.id
+WHERE j.workspace_id = sqlc.arg(workspace_id) AND j.id = sqlc.arg(id) AND e.id = sqlc.arg(execution_id)
+  AND e.source_kind = 'agent_job' AND j.workflow_execution_id IS NOT NULL
+FOR UPDATE OF j;
+
+-- name: BeginDurableAgentAttempt :one
+UPDATE public.agent_jobs SET attempts = attempts + 1, workflow_attempt_deadline = sqlc.arg(deadline)::timestamptz, updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'processing'
+  AND workflow_execution_id IS NOT NULL
+RETURNING *;
+
+-- name: AddDurableAgentUsage :execrows
+UPDATE public.agent_jobs SET input_tokens = input_tokens + sqlc.arg(input)::int,
+  output_tokens = output_tokens + sqlc.arg(output)::int,
+  cache_read_tokens = cache_read_tokens + sqlc.arg(cache_read)::int,
+  cache_write_tokens = cache_write_tokens + sqlc.arg(cache_write)::int, updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'processing'
+  AND workflow_execution_id IS NOT NULL;
+
+-- name: RetryDurableAgentBatch :execrows
+-- Records why the attempt is tried again and ends its deadline; the
+-- workflow job owns the schedule.
+UPDATE public.agent_jobs SET last_error_code = sqlc.arg(code)::text, workflow_attempt_deadline = NULL, updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'processing'
+  AND workflow_execution_id IS NOT NULL;
+
+-- name: FinishDurableAgentBatch :execrows
+UPDATE public.agent_jobs SET status = sqlc.arg(status)::text, through_message_id = sqlc.narg(through),
+  last_error_code = sqlc.narg(code), locked_until = NULL, workflow_attempt_deadline = NULL, updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'processing'
+  AND workflow_execution_id IS NOT NULL;
+
+-- name: InsertAgentBatchResult :one
+INSERT INTO public.agent_batch_results(
+  workspace_id, agent_job_id, execution_id, stage, outcome, through_message_id, last_triaged_id, max_message_id,
+  category, urgency, confidence, summary, goal, router_note, tools_available, unseen_count,
+  report_text, tools_line, total_input_tokens, total_output_tokens)
+VALUES (sqlc.arg(workspace_id), sqlc.arg(agent_job_id), sqlc.arg(execution_id), sqlc.arg(stage), sqlc.arg(outcome),
+  sqlc.arg(through_message_id), sqlc.arg(last_triaged_id), sqlc.arg(max_message_id),
+  sqlc.arg(category), sqlc.arg(urgency), sqlc.arg(confidence), sqlc.arg(summary), sqlc.arg(goal), sqlc.arg(router_note),
+  sqlc.arg(tools_available), sqlc.arg(unseen_count), sqlc.arg(report_text), sqlc.arg(tools_line),
+  sqlc.arg(total_input_tokens), sqlc.arg(total_output_tokens))
+ON CONFLICT (workspace_id, agent_job_id, stage) DO NOTHING
+RETURNING id;
+
+-- name: GetAgentBatchResultID :one
+SELECT id FROM public.agent_batch_results
+WHERE workspace_id = sqlc.arg(workspace_id) AND agent_job_id = sqlc.arg(agent_job_id) AND stage = sqlc.arg(stage);
+
+-- name: ListAgentBatchResults :many
+SELECT * FROM public.agent_batch_results
+WHERE workspace_id = sqlc.arg(workspace_id) AND agent_job_id = sqlc.arg(agent_job_id)
+ORDER BY id;
+
+-- name: InsertInternalBehavior :exec
+-- Creates the workspace's internal definition once; it is enabled so its
+-- versions can start executions, and immutable afterwards.
+INSERT INTO public.behaviors(workspace_id, name, status, draft, internal_kind)
+VALUES (sqlc.arg(workspace_id), 'internal:' || sqlc.arg(internal_kind)::text, 'enabled', '{}'::jsonb, sqlc.arg(internal_kind)::text)
+ON CONFLICT DO NOTHING;
+
+-- name: LockInternalBehavior :one
+-- Serializes new internal versions of one workspace.
+SELECT * FROM public.behaviors
+WHERE workspace_id = sqlc.arg(workspace_id) AND internal_kind = sqlc.arg(internal_kind)::text
+FOR UPDATE;
+
+-- name: LatestInternalBehaviorVersion :one
+SELECT v.* FROM public.behavior_versions v
+WHERE v.workspace_id = sqlc.arg(workspace_id) AND v.behavior_id = sqlc.arg(behavior_id)
+ORDER BY v.version DESC LIMIT 1;
+
+-- name: InsertInternalBehaviorVersion :one
+INSERT INTO public.behavior_versions(workspace_id, behavior_id, version, document, vars, source)
+VALUES (sqlc.arg(workspace_id), sqlc.arg(behavior_id), sqlc.arg(version), sqlc.arg(document), '{}'::jsonb, '')
+RETURNING *;
+
+-- name: GetInternalBehaviorVersion :one
+SELECT v.* FROM public.behavior_versions v
+JOIN public.behaviors b ON b.workspace_id = v.workspace_id AND b.id = v.behavior_id
+WHERE v.workspace_id = sqlc.arg(workspace_id) AND v.id = sqlc.arg(id) AND b.internal_kind = sqlc.arg(internal_kind)::text;

@@ -824,7 +824,7 @@ func (q *Queries) GetApprovalByNonce(ctx context.Context, arg GetApprovalByNonce
 }
 
 const getBehaviorByID = `-- name: GetBehaviorByID :one
-SELECT id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at FROM public.behaviors WHERE workspace_id = $1 AND id = $2
+SELECT id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at, internal_kind FROM public.behaviors WHERE workspace_id = $1 AND id = $2 AND internal_kind IS NULL
 `
 
 type GetBehaviorByIDParams struct {
@@ -845,12 +845,14 @@ func (q *Queries) GetBehaviorByID(ctx context.Context, arg GetBehaviorByIDParams
 		&i.DraftSource,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.InternalKind,
 	)
 	return i, err
 }
 
 const getBehaviorByName = `-- name: GetBehaviorByName :one
-SELECT id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at FROM public.behaviors WHERE workspace_id = $1 AND name = $2
+
+SELECT id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at, internal_kind FROM public.behaviors WHERE workspace_id = $1 AND name = $2 AND internal_kind IS NULL
 `
 
 type GetBehaviorByNameParams struct {
@@ -858,6 +860,8 @@ type GetBehaviorByNameParams struct {
 	Name        string
 }
 
+// Internal built-in definitions (internal_kind set) are never visible to
+// the public behavior paths below.
 func (q *Queries) GetBehaviorByName(ctx context.Context, arg GetBehaviorByNameParams) (Behavior, error) {
 	row := q.db.QueryRow(ctx, getBehaviorByName, arg.WorkspaceID, arg.Name)
 	var i Behavior
@@ -871,6 +875,7 @@ func (q *Queries) GetBehaviorByName(ctx context.Context, arg GetBehaviorByNamePa
 		&i.DraftSource,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.InternalKind,
 	)
 	return i, err
 }
@@ -1632,7 +1637,7 @@ const listBehaviors = `-- name: ListBehaviors :many
 SELECT b.id, b.workspace_id, b.name, b.status, b.created_at, b.updated_at,
   COALESCE((SELECT MAX(v.version) FROM public.behavior_versions v WHERE v.behavior_id = b.id), 0)::int AS latest_version
 FROM public.behaviors b
-WHERE b.workspace_id = $1
+WHERE b.workspace_id = $1 AND b.internal_kind IS NULL
 ORDER BY b.name
 `
 
@@ -1733,7 +1738,7 @@ const listEnabledBehaviorVersions = `-- name: ListEnabledBehaviorVersions :many
 SELECT DISTINCT ON (b.id) b.name, v.id, v.workspace_id, v.behavior_id, v.version, v.document, v.vars, v.published_at
 FROM public.behaviors b
 JOIN public.behavior_versions v ON v.workspace_id = b.workspace_id AND v.behavior_id = b.id
-WHERE b.workspace_id = $1 AND b.status = 'enabled'
+WHERE b.workspace_id = $1 AND b.status = 'enabled' AND b.internal_kind IS NULL
 ORDER BY b.id, v.version DESC
 `
 
@@ -1907,7 +1912,7 @@ func (q *Queries) ListRunItems(ctx context.Context, arg ListRunItemsParams) ([]R
 }
 
 const lockBehaviorByName = `-- name: LockBehaviorByName :one
-SELECT id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at FROM public.behaviors WHERE workspace_id = $1 AND name = $2 FOR UPDATE
+SELECT id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at, internal_kind FROM public.behaviors WHERE workspace_id = $1 AND name = $2 AND internal_kind IS NULL FOR UPDATE
 `
 
 type LockBehaviorByNameParams struct {
@@ -1929,6 +1934,7 @@ func (q *Queries) LockBehaviorByName(ctx context.Context, arg LockBehaviorByName
 		&i.DraftSource,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.InternalKind,
 	)
 	return i, err
 }
@@ -2568,7 +2574,7 @@ INSERT INTO public.behaviors(workspace_id, name, draft, draft_vars, draft_source
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (workspace_id, name) DO UPDATE
 SET draft = EXCLUDED.draft, draft_vars = EXCLUDED.draft_vars, draft_source = EXCLUDED.draft_source, updated_at = now()
-RETURNING id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at
+RETURNING id, workspace_id, name, status, draft, draft_vars, draft_source, created_at, updated_at, internal_kind
 `
 
 type UpsertBehaviorDraftParams struct {
@@ -2599,6 +2605,7 @@ func (q *Queries) UpsertBehaviorDraft(ctx context.Context, arg UpsertBehaviorDra
 		&i.DraftSource,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.InternalKind,
 	)
 	return i, err
 }

@@ -63,7 +63,7 @@ func validateStartRequest(req workflow.StartRequest) (pgtype.UUID, pgtype.UUID, 
 		len(refs.Subject) > 512 || len(refs.Revision) > 512 {
 		return pgtype.UUID{}, pgtype.UUID{}, nil, workflowInvalid("references")
 	}
-	if err := workflow.ValidateDefinition(req.Definition, nil); err != nil {
+	if err := workflow.ValidateExecutionDefinition(req.Definition); err != nil {
 		return pgtype.UUID{}, pgtype.UUID{}, nil, errors.Join(workflow.ErrInvalidInput, err)
 	}
 	definition, err := json.Marshal(req.Definition)
@@ -159,6 +159,7 @@ func (s *WorkflowStore) StartExecutionTx(ctx context.Context, tx pgx.Tx, req wor
 		Definition: definition, SourceKind: req.References.SourceKind, SourceID: req.References.SourceID,
 		Subject: req.References.Subject, Revision: req.References.Revision, OperationKey: req.References.OperationKey,
 		LegacyRunID: workflowInt8(req.References.LegacyRunID), LegacyJobID: workflowInt8(req.References.LegacyJobID),
+		Internal:   workflow.IsInternalDefinition(req.Definition),
 		DeadlineAt: deadline,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {

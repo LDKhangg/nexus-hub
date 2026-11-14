@@ -8,6 +8,32 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+// Validated triage/investigation results of one agent batch, referenced by workflow checkpoints; written once per stage.
+type AgentBatchResult struct {
+	ID                int64
+	WorkspaceID       pgtype.UUID
+	AgentJobID        int64
+	ExecutionID       int64
+	Stage             string
+	Outcome           string
+	ThroughMessageID  int64
+	LastTriagedID     int64
+	MaxMessageID      int64
+	Category          string
+	Urgency           string
+	Confidence        float64
+	Summary           string
+	Goal              string
+	RouterNote        string
+	ToolsAvailable    bool
+	UnseenCount       int32
+	ReportText        string
+	ToolsLine         string
+	TotalInputTokens  int64
+	TotalOutputTokens int64
+	CreatedAt         pgtype.Timestamptz
+}
+
 type AgentJob struct {
 	ID                  int64
 	WorkspaceID         pgtype.UUID
@@ -27,6 +53,10 @@ type AgentJob struct {
 	CacheWriteTokens    int32
 	CreatedAt           pgtype.Timestamptz
 	UpdatedAt           pgtype.Timestamptz
+	// The workflow execution that owns this batch; NULL for a legacy-claimed job.
+	WorkflowExecutionID pgtype.Int8
+	// Deadline of the current attempt of a workflow-owned batch; NULL otherwise.
+	WorkflowAttemptDeadline pgtype.Timestamptz
 }
 
 type AppSetting struct {
@@ -72,6 +102,8 @@ type Behavior struct {
 	DraftSource string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
+	// Non-NULL for an internal built-in definition; such rows are immutable and hidden from the public behavior paths.
+	InternalKind pgtype.Text
 }
 
 // One batched engine Telegram message; identifiers only, never message text.

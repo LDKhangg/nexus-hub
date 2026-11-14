@@ -710,6 +710,7 @@ SELECT $1, v.id, $2, $3, 'RECEIVED', $4,
 FROM public.behavior_versions v
 JOIN public.behaviors b ON b.workspace_id = v.workspace_id AND b.id = v.behavior_id
 WHERE v.workspace_id = $1 AND v.id = $13 AND b.status = 'enabled'
+  AND (b.internal_kind IS NOT NULL) = $14::bool
 ON CONFLICT (workspace_id, trigger_key) DO NOTHING
 RETURNING id, workspace_id, behavior_version_id, trigger_key, correlation_id, state, reason_code, definition, source_kind, source_id, subject, revision, operation_key, legacy_run_id, legacy_job_id, parent_execution_id, deadline_at, cancelled_at, started_at, finished_at, created_at, updated_at
 `
@@ -728,6 +729,7 @@ type InsertWorkflowExecutionParams struct {
 	LegacyJobID       pgtype.Int8
 	DeadlineAt        pgtype.Timestamptz
 	BehaviorVersionID int64
+	Internal          bool
 }
 
 // Durable workflow execution lifecycle.
@@ -746,6 +748,7 @@ func (q *Queries) InsertWorkflowExecution(ctx context.Context, arg InsertWorkflo
 		arg.LegacyJobID,
 		arg.DeadlineAt,
 		arg.BehaviorVersionID,
+		arg.Internal,
 	)
 	var i WorkflowExecution
 	err := row.Scan(

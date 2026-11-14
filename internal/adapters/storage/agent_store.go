@@ -256,6 +256,22 @@ func (s *AgentStore) commit(ctx context.Context, job agent.AgentJob, status, cod
 		}
 		return err
 	}
+	finish := func(code string) error {
+		n, err := q.FinishAgentJob(ctx, sqlc.FinishAgentJobParams{ID: job.ID, Token: token, Status: status, Through: pgtype.Int8{Int64: through, Valid: through > 0}, Code: optText(code)})
+		return staleIfZero(n, err)
+	}
+	if err := s.writeBatchOutcome(ctx, q, job, ws, thread, code, routerNote, actorNote, text, through, finish); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// writeBatchOutcome writes a finished batch inside the caller's fenced
+// transaction: the AI notes, the Telegram report in the outbox (dedupe key
+// "agent_job:<id>"), the job's end via finish (with the error code, which
+// becomes invalid_target when the report has no valid target), the thread
+// refresh and the follow-up job.
+func (s *AgentStore) writeBatchOutcome(ctx context.Context, q *sqlc.Queries, job agent.AgentJob, ws, thread pgtype.UUID, code, routerNote, actorNote, text string, through int64, finish func(code string) error) error {
 	for _, note := range []struct{ role, content string }{{"ai_router", routerNote}, {"ai_actor", actorNote}} {
 		if note.content == "" {
 			continue
@@ -271,21 +287,21 @@ func (s *AgentStore) commit(ctx context.Context, job agent.AgentJob, status, cod
 			code = "invalid_target"
 		} else {
 			payload, _ := json.Marshal(map[string]string{"text": text})
-			if err := q.InsertOutboundAction(ctx, sqlc.InsertOutboundActionParams{WorkspaceID: ws, IntegrationID: target, Payload: payload, DedupeKey: fmt.Sprintf("agent_job:%d", job.ID)}); err != nil {
+			if err := q.InsertOutboundAction(ctx, sqlc.InsertOutboundActionParams{WorkspaceID: ws, IntegrationID: target, Payload: payload, DedupeKey: agent.AgentOperationKey(job.ID)}); err != nil {
 				return err
 			}
 		}
 	}
-	n, err := q.FinishAgentJob(ctx, sqlc.FinishAgentJobParams{ID: job.ID, Token: token, Status: status, Through: pgtype.Int8{Int64: through, Valid: through > 0}, Code: optText(code)})
-	if err := staleIfZero(n, err); err != nil {
+	if err := finish(code); err != nil {
 		return err
 	}
 	if err := q.RefreshMessageThread(ctx, thread); err != nil {
 		return err
 	}
 	// External messages past this batch (a batch capped by the untriaged
-	// limit) get a due follow-up job in the same transaction, so none is
-	// left untriaged. An existing pending job is kept.
+	// limit, or comments that arrived while it was processed) get a due
+	// follow-up job in the same transaction, so none is left untriaged. An
+	// existing pending job is kept.
 	source, err := parseDBID(job.SourceIntegrationID)
 	if err != nil {
 		return err
@@ -293,7 +309,14 @@ func (s *AgentStore) commit(ctx context.Context, job agent.AgentJob, status, cod
 	if _, err := q.EnqueueAgentFollowUp(ctx, sqlc.EnqueueAgentFollowUpParams{WorkspaceID: ws, SourceIntegrationID: source, ThreadID: thread, Through: through}); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return nil
+}
+
+// knownTools returns the registered tool tiers used to parse agent configs.
+func (s *AgentStore) knownTools() map[string]tenant.Tier {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.known
 }
 
 // targetOf is the Telegram control integration named by the source config.

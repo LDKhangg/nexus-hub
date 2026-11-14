@@ -7,21 +7,24 @@ ON CONFLICT (workspace_id, name) DO UPDATE
 SET draft = EXCLUDED.draft, draft_vars = EXCLUDED.draft_vars, draft_source = EXCLUDED.draft_source, updated_at = now()
 RETURNING *;
 
+-- Internal built-in definitions (internal_kind set) are never visible to
+-- the public behavior paths below.
+
 -- name: GetBehaviorByName :one
-SELECT * FROM public.behaviors WHERE workspace_id = sqlc.arg(workspace_id) AND name = sqlc.arg(name);
+SELECT * FROM public.behaviors WHERE workspace_id = sqlc.arg(workspace_id) AND name = sqlc.arg(name) AND internal_kind IS NULL;
 
 -- name: GetBehaviorByID :one
-SELECT * FROM public.behaviors WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id);
+SELECT * FROM public.behaviors WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND internal_kind IS NULL;
 
 -- name: LockBehaviorByName :one
 -- Serializes publish and status changes of one behavior.
-SELECT * FROM public.behaviors WHERE workspace_id = sqlc.arg(workspace_id) AND name = sqlc.arg(name) FOR UPDATE;
+SELECT * FROM public.behaviors WHERE workspace_id = sqlc.arg(workspace_id) AND name = sqlc.arg(name) AND internal_kind IS NULL FOR UPDATE;
 
 -- name: ListBehaviors :many
 SELECT b.id, b.workspace_id, b.name, b.status, b.created_at, b.updated_at,
   COALESCE((SELECT MAX(v.version) FROM public.behavior_versions v WHERE v.behavior_id = b.id), 0)::int AS latest_version
 FROM public.behaviors b
-WHERE b.workspace_id = sqlc.arg(workspace_id)
+WHERE b.workspace_id = sqlc.arg(workspace_id) AND b.internal_kind IS NULL
 ORDER BY b.name;
 
 -- name: NextBehaviorVersion :one
@@ -58,7 +61,7 @@ ORDER BY version;
 SELECT DISTINCT ON (b.id) b.name, v.id, v.workspace_id, v.behavior_id, v.version, v.document, v.vars, v.published_at
 FROM public.behaviors b
 JOIN public.behavior_versions v ON v.workspace_id = b.workspace_id AND v.behavior_id = b.id
-WHERE b.workspace_id = sqlc.arg(workspace_id) AND b.status = 'enabled'
+WHERE b.workspace_id = sqlc.arg(workspace_id) AND b.status = 'enabled' AND b.internal_kind IS NULL
 ORDER BY b.id, v.version DESC;
 
 -- Runs.
