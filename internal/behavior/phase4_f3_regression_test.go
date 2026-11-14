@@ -231,7 +231,7 @@ func TestPhase4F3AssistantQueue(t *testing.T) {
 		}
 		key, _ := e.inbox.StageAssistantText(p4WS, "tin nhắn thứ chín", e.clock)
 		out := e.w.dispatch(context.Background(), e.update(200, UpdateText, "", AssistantTextPrefix+key), "corr")
-		if out.code != "assistant_queue_full" || e.msg.last(t).Text != msgAssistantOverloaded || msgAssistantOverloaded != "Mình đang bận, thử lại sau nhé." {
+		if out.code != "assistant_queue_full" || e.msg.last(t).Text != msgAssistantOverloaded {
 			t.Fatalf("ninth: %+v text=%q", out, e.msg.last(t).Text)
 		}
 		if model.calls() != 0 || len(e.w.assistantJobs) != assistantQueueSize {
@@ -276,18 +276,27 @@ func TestPhase4F3AssistantQueue(t *testing.T) {
 			}
 		}
 
-		// The call context expires while the model is still working; the
-		// provider's own error text does not matter.
+		// The assistant's child call context expires while the non-cancelled
+		// parent remains live; the provider's own error text does not matter.
 		e := newP4Env()
+		e.assistant.Timeout = 20 * time.Millisecond
 		e.llm.release = make(chan struct{})
-		defer close(e.llm.release)
 		e.llm.ctxErr = errors.New("transport closed")
 		job := e.queueJob(t, 77, "chào")
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-		defer cancel()
-		out := e.w.assistantJob(ctx, job)
+		out := e.w.assistantJob(context.Background(), job)
 		if out.code != "assistant_busy" || e.msg.last(t).Text != msgAssistantOverloaded || e.llm.calls() != 1 {
-			t.Fatalf("expired call: out=%+v text=%q calls=%d", out, e.msg.last(t).Text, e.llm.calls())
+			t.Fatalf("model timeout: out=%+v text=%q calls=%d", out, e.msg.last(t).Text, e.llm.calls())
+		}
+
+		// Expiring the parent is cancellation, so it stays silent and does not
+		// enter the model at all.
+		e = newP4Env()
+		job = e.queueJob(t, 77, "chào")
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		out = e.w.assistantJob(ctx, job)
+		if out.code != "assistant_cancelled" || e.msg.count() != 0 || e.llm.calls() != 0 {
+			t.Fatalf("parent cancel: out=%+v sent=%v calls=%d", out, e.msg.texts(), e.llm.calls())
 		}
 	})
 
