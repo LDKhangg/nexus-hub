@@ -698,6 +698,162 @@ unsure, unavailable, or answers badly, the bot says so and points to `/help`;
 nothing runs. Your message is never stored or logged, and at most 6 messages a
 minute go to the model. Turn it off with `nh settings set telegram_assistant false`.
 
+## 12. Durable workflows (Phase 5)
+
+From Phase 5 every behavior run and every comment-pipeline batch is a durable
+**execution**: a row pinned to one immutable published version, with ordered
+steps, an append-only history and one job in a persistent queue. A restart
+picks up where it stopped. The `nh workflow` commands below inspect and recover
+executions. They print only IDs, states, reason codes, counters and references.
+Message text, prompts, tool input and output, approval payloads and tokens are
+never printed.
+
+What is proven so far: the engine, cutover and these commands are tested
+against PostgreSQL with fake providers only (see the Phase 5 completion report, written to
+`docs/product/reports/`). Live ClickUp, Telegram and Claude behaviour after a
+crash is still open evidence. Write down what you see (execution ID, state,
+reason).
+
+### States and reasons
+
+An execution moves through `RECEIVED` → `QUEUED` → `RUNNING` (or `TRIAGING`,
+`PLANNING`, `EVALUATING`) and ends `COMPLETED`, `FAILED` or `CANCELLED`. While
+it waits for you it is `WAITING_FOR_APPROVAL` or `WAITING_FOR_USER`. An ended
+execution never runs again. The `reason` field explains the last change:
+
+| Reason | Meaning | What to do |
+|---|---|---|
+| `step_retry` | a step failed and is queued again after a backoff (5s, 15s, 30s, 60s) | nothing; it retries by itself, at most 5 attempts in all |
+| `attempts_exhausted`, `non_retryable` | the step gave up; the job is a dead letter | read `workflow dead-letter`, fix the cause, then `workflow retry` |
+| `deadline_exceeded` | the execution's own deadline passed | `workflow retry` starts a child with a fresh deadline |
+| `lease_expired` | a worker stopped mid-step (crash, restart); the step is queued again | nothing |
+| `side_effect_uncertain` | an action started but its outcome is unknown | check ClickUp/GitHub/Telegram by hand; this execution is never retried or resent |
+| `cancelled` | you or the system cancelled it | nothing |
+
+### Waits, deadlines and leases
+
+- **Waits.** A step that asks you (a "Đăng" draft, an approval) records a
+  durable wait and holds no job lease. Your button press is stored with the
+  decision and wakes the step, even across a restart. An alias, report-style
+  or feedback prompt never blocks an execution. If an execution stays
+  waiting after you decided, `nh workflow resume` queues it again. It never
+  decides for you.
+- **Deadlines.** A step attempt has a 10-minute timeout by default. An
+  execution may also have its own deadline (`workflow.execution_deadline_seconds` in a
+  schema 2 behavior). It is fixed when the execution starts. When it passes,
+  the execution fails with `deadline_exceeded`, even while waiting.
+- **Leases.** A worker that claims a job holds a lease (15 minutes by
+  default, always longer than the step timeout). Every write checks the claim.
+  A worker that comes back after its lease expired, or after a cancel, writes
+  nothing. The reconciler runs at startup and every 30 seconds. It requeues
+  expired leases and lost wakeups and never steals a live lease.
+- **Uncertainty.** If the hub crashes between sending a request and saving
+  its receipt, it does not resend. The execution fails with
+  `side_effect_uncertain`, and `workflow retry` refuses it. Decide by hand
+  what happened.
+
+### Restore and publish
+
+Editing or restoring a behavior never changes a running execution: each one
+keeps the version it started with.
+
+```sh
+nh behavior restore  --workspace-id $WS spec-review --version 3   # old version → draft
+nh behavior validate --workspace-id $WS spec-review
+nh behavior publish  --workspace-id $WS spec-review               # new version N+1
+```
+
+New triggers use the new version. Existing executions and their retries stay
+on their pinned version.
+
+### Inspect
+
+```sh
+nh workflow list    --workspace-id $WS                      # newest first, 50 per page
+nh workflow list    --workspace-id $WS --state FAILED --limit 20
+nh workflow list    --workspace-id $WS --cursor <next_cursor>
+nh workflow show    --workspace-id $WS 42                   # state, reason, version, deadline, waits, live job, lineage
+nh workflow steps   --workspace-id $WS 42                   # steps, attempts, usage, checkpoint references
+nh workflow history --workspace-id $WS 42                   # ordered timeline
+nh workflow jobs    --workspace-id $WS --status processing  # leases in flight
+nh workflow dead-letter --workspace-id $WS                  # failed jobs with their reason
+```
+
+Lists print one JSON object with the rows and `next_cursor`. Pass it back with
+`--cursor` for the next page; `""` means the end. Every command needs
+`--workspace-id`. An execution of another workspace is `not_found`.
+
+`nh trace` shows the run's executions at the end ("Executions"), and
+`trace --json` has them as `executions`. `nh inspect` adds `workflow_executions`
+and `jobs` rows with their `legacy_run_id` / `legacy_job_id`. The old run and
+job IDs are unchanged.
+
+### Recover
+
+```sh
+nh workflow cancel --workspace-id $WS 42   # {"outcome":"cancelled","state":"CANCELLED",...}
+nh workflow resume --workspace-id $WS 42   # {"outcome":"resumed","state":"QUEUED",...}
+nh workflow retry  --workspace-id $WS 42   # {"retry_execution_id":57,"outcome":"created",...}
+```
+
+- **cancel** stops future work at once, even for a worker still running.
+  A request already sent is not rolled back. Errors: `already_cancelled`,
+  `not_cancellable` (it already ended).
+- **resume** works only for a waiting execution whose decision is already
+  recorded. Errors: `not_resumable` (not waiting, already ended, or no decision
+  yet).
+- **retry** works only for a `FAILED` execution. It creates one linked child
+  execution on the same version. Finished steps with a reusable checkpoint are
+  kept, and action identities stay the same, so a finished action is not done
+  twice. The failed parent is not changed. Running retry again returns the
+  same child (`"outcome":"existing"`). If the child also fails, retry the
+  child. Errors: `not_retryable` (not FAILED), `side_effect_uncertain`,
+  `unsafe_retry` (a finished step has no reusable checkpoint). There is no
+  force-resend.
+
+A failed command exits nonzero and prints the reason code on stderr.
+
+### Cutover (one time, per workspace)
+
+A new binary keeps a workspace on the legacy queues until you cut it over.
+After the cutover the durable queue is the only scheduler for its behavior
+runs and agent batches. Plan a maintenance window:
+
+1. Back up the database:
+   `docker exec nexus-home-pg pg_dump -U postgres -Fc nexus_hub > ~/nexus-hub-$(date +%F).dump`.
+   Also keep the master key backup.
+2. Stop the service: `systemctl --user stop nexus-hub`. Wait for running
+   steps to finish, or for their leases to expire (`workflow jobs --status
+   processing`).
+3. Install the new binaries and run `goose … up`.
+4. Preflight. It is read-only, so nothing changes:
+   `nh workflow cutover --workspace-id $WS`. Check `ready: true`. Each
+   `blocked` entry has a record ID and a code (`behavior_version_invalid`,
+   `approval_step_unmappable`). Fix those, then run the preflight again.
+   `in_flight_tool_runs` count actions with an unknown outcome. They are kept
+   as uncertain and never resent.
+5. Apply: `nh workflow cutover --workspace-id $WS --apply`. It locks the
+   workspace and imports or fences everything in one transaction, or writes
+   nothing and exits with `cutover_blocked`. A second apply is a no-op
+   (`already_cut_over: true`).
+6. Start the new binary: `systemctl --user start nexus-hub`.
+
+Never start an old binary from before Phase 5 against a cut-over database. It
+does not know the fence and would schedule work a second time. Disabling the
+new worker is not a rollback either. The only way back is to restore the
+step 1 backup, which loses everything since then. Get a separately approved
+recovery plan first. No historical rows are deleted: old runs, agent jobs,
+approvals and tool receipts stay readable with `trace`, `runs` and `inspect`.
+
+### Restart and shutdown
+
+`systemctl --user restart nexus-hub` is safe at any time after the cutover.
+On shutdown the worker stops claiming. A step cut off mid-attempt writes
+nothing more, and its lease expires. At startup the reconciler requeues it.
+It continues from its last checkpoint, never from the beginning. Waiting
+executions stay waiting. A button pressed while the hub was down arrives when
+it starts (Telegram keeps updates for 24 hours) and wakes the step.
+
 ## Upkeep
 
 - Updates: `git pull`, rebuild both binaries, run `goose … up`, then
