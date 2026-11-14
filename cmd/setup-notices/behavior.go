@@ -19,6 +19,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
+	"github.com/LDKhangg/nexus-hub/internal/workflow"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -27,6 +28,7 @@ const behaviorUsage = `usage: behavior <command> --workspace-id <uuid> [args]
                                   without --vars the stored values are kept
   validate <name>                 report every error of the draft, one per line
   publish <name>                  freeze the valid draft as a new immutable version
+  restore <name> --version N      copy an immutable version into the draft
   enable <name> | disable <name>
   list
   export <name> [--version N]     print the stored source (the draft when N is omitted)
@@ -171,7 +173,7 @@ func behaviorCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 	}
 	set := map[string]bool{}
 	f.Visit(func(fl *flag.Flag) { set[fl.Name] = true })
-	if (set["vars"] && sub != "import") || (set["version"] && sub != "export" && sub != "stats") {
+	if (set["vars"] && sub != "import") || (set["version"] && sub != "export" && sub != "stats" && sub != "restore") {
 		return errors.New(behaviorUsage)
 	}
 	wantArgs := 1
@@ -197,6 +199,7 @@ func behaviorCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 			return err
 		}
 		opts = append(opts, behavior.WithGitHubAccounts(accounts))
+		opts = append(opts, behavior.WithWorkflowCapabilities([]string{workflow.CapabilityInProcess}))
 	}
 
 	switch sub {
@@ -239,6 +242,15 @@ func behaviorCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 			return behaviorError(err)
 		}
 		return enc.Encode(map[string]any{"name": v.Name, "version": v.Version, "published_at": v.PublishedAt.UTC().Format(time.RFC3339)})
+	case "restore":
+		if !set["version"] || *version <= 0 {
+			return errors.New("--version must be a positive number")
+		}
+		b, err := behavior.RestoreDraft(ctx, store, *ws, pos[0], *version)
+		if err != nil {
+			return behaviorError(err)
+		}
+		return enc.Encode(map[string]any{"name": b.Name, "restored_version": *version, "draft": "saved", "latest_version": b.LatestVersion})
 	case "enable", "disable":
 		status := behavior.StatusEnabled
 		if sub == "disable" {
