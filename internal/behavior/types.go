@@ -104,6 +104,9 @@ const (
 	// ApprovalAssistantAction is a write the Telegram assistant proposed;
 	// "Làm" runs it through the same handler as the slash command.
 	ApprovalAssistantAction ApprovalKind = "assistant_action"
+	// ApprovalWorkflowTarget lets the owner choose the execution for one
+	// otherwise ambiguous instruction or control command.
+	ApprovalWorkflowTarget ApprovalKind = "workflow_target"
 )
 
 // Decision is an approval's outcome.

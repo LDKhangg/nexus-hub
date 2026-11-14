@@ -43,6 +43,11 @@ SELECT execution_id FROM public.resource_bindings
 WHERE workspace_id = sqlc.arg(workspace_id) AND kind = sqlc.arg(kind) AND external_id = sqlc.arg(external_id)
 ORDER BY created_at, execution_id;
 
+-- name: ListExecutionResources :many
+SELECT workspace_id, execution_id, kind, external_id FROM public.resource_bindings
+WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id)
+ORDER BY kind, created_at, external_id;
+
 -- name: GetInstructionByTelegramUpdate :one
 SELECT * FROM public.workflow_instructions
 WHERE workspace_id = sqlc.arg(workspace_id) AND telegram_update_id = sqlc.arg(telegram_update_id);

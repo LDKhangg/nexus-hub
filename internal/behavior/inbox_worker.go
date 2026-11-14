@@ -62,6 +62,10 @@ type InboxDeps struct {
 	Conversations workflow.ConversationStore
 	// Assistant, when set, answers the owner's plain free text.
 	Assistant *Assistant
+	// Workflows and WorkflowCommands provide deterministic workflow control
+	// even when the conversational assistant is disabled.
+	Workflows        workflow.Reader
+	WorkflowCommands workflow.Engine
 }
 
 // InboxWorker processes stored Telegram updates: built-in commands,
@@ -354,6 +358,8 @@ func (w *InboxWorker) command(ctx context.Context, u InboundUpdate, to ChatRef, 
 		}
 	case "/prefs", "/template":
 		return w.reportCommand(hctx, u, to)
+	case "/status", "/list", "/cancel", "/resume", "/note":
+		return w.workflowControlCommand(hctx, u, to, actor, corr)
 	default:
 		reply, err = w.d.Commands.TriggerCommand(hctx, CommandRequest{
 			WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, UpdateID: u.UpdateID,
@@ -374,6 +380,8 @@ func (w *InboxWorker) helpText(ctx context.Context, workspaceID string) string {
 	b.WriteString("/template <kind> [reset]: mẫu báo cáo\n")
 	b.WriteString("/undo <run id>: hoàn tác một lần chạy")
 	b.WriteString("\n/contacts [tìm kiếm]: danh bạ\n/alias <platform:id> <tên>: đặt tên")
+	b.WriteString("\n/status [WF-id]: trạng thái workflow\n/list: workflow đang hoạt động")
+	b.WriteString("\n/note [WF-id] <nội dung>: bổ sung yêu cầu\n/cancel [WF-id]: đề nghị huỷ\n/resume [WF-id]: đề nghị tiếp tục")
 	if w.d.Defs == nil {
 		return b.String()
 	}
@@ -472,6 +480,12 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 		}
 		return msgStale, "stale", true
 	}
+	if a.Kind == ApprovalWorkflowTarget {
+		if a.Decision != "" || !w.now().Before(a.ExpiresAt) {
+			return msgStale, "stale", true
+		}
+		return w.workflowTargetCallback(ctx, u, to, data, a, actor, corr)
+	}
 	if data.Kind.Decides() && (a.Decision != "" || !w.now().Before(a.ExpiresAt)) {
 		return msgStale, "stale", true
 	}
@@ -500,7 +514,7 @@ func (w *InboxWorker) freeText(ctx context.Context, u InboundUpdate, to ChatRef,
 		return w.reportTemplateReply(ctx, u, to)
 	}
 	if strings.HasPrefix(nonce, AssistantTextPrefix) {
-		return w.assistant(ctx, u, to, actor, corr)
+		return w.workflowOrAssistant(ctx, u, to, actor, corr)
 	}
 	if nonce == "" {
 		return w.reply(ctx, to, msgHint, "")

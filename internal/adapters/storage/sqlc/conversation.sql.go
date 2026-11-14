@@ -251,6 +251,49 @@ func (q *Queries) ListConversationWorkflowIDs(ctx context.Context, arg ListConve
 	return items, nil
 }
 
+const listExecutionResources = `-- name: ListExecutionResources :many
+SELECT workspace_id, execution_id, kind, external_id FROM public.resource_bindings
+WHERE workspace_id = $1 AND execution_id = $2
+ORDER BY kind, created_at, external_id
+`
+
+type ListExecutionResourcesParams struct {
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+}
+
+type ListExecutionResourcesRow struct {
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+	Kind        string
+	ExternalID  string
+}
+
+func (q *Queries) ListExecutionResources(ctx context.Context, arg ListExecutionResourcesParams) ([]ListExecutionResourcesRow, error) {
+	rows, err := q.db.Query(ctx, listExecutionResources, arg.WorkspaceID, arg.ExecutionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListExecutionResourcesRow
+	for rows.Next() {
+		var i ListExecutionResourcesRow
+		if err := rows.Scan(
+			&i.WorkspaceID,
+			&i.ExecutionID,
+			&i.Kind,
+			&i.ExternalID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listResourceExecutionIDs = `-- name: ListResourceExecutionIDs :many
 SELECT execution_id FROM public.resource_bindings
 WHERE workspace_id = $1 AND kind = $2 AND external_id = $3

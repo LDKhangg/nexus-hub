@@ -144,11 +144,13 @@ func run() error {
 	inbox := behavior.NewInboxWorker(behavior.InboxDeps{
 		Inbox: behaviors, Approvals: behaviors, Defs: behaviors, Messenger: messenger,
 		Commands: commands, Undoer: engine, Callbacks: engine,
-		Tracer:        &behavior.TraceService{Store: behaviors, Profiles: behaviors, People: ag.people},
-		People:        ag.people,
-		Reports:       reportSettings,
-		Assistant:     assistant,
-		Conversations: ag.conversations,
+		Tracer:           &behavior.TraceService{Store: behaviors, Profiles: behaviors, People: ag.people},
+		People:           ag.people,
+		Reports:          reportSettings,
+		Assistant:        assistant,
+		Conversations:    ag.conversations,
+		Workflows:        workflows.store,
+		WorkflowCommands: workflows.commands,
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
 	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows}
 	// Telegram updates arrive by webhook, or by long polling when the hub

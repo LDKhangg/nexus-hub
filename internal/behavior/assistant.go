@@ -469,6 +469,14 @@ func (w *InboxWorker) assistant(ctx context.Context, u InboundUpdate, to ChatRef
 	if !ok {
 		return w.reply(ctx, to, msgAssistantGone, "assistant_text_gone")
 	}
+	return w.queueAssistantText(ctx, u, to, actor, corr, text)
+}
+
+func (w *InboxWorker) queueAssistantText(ctx context.Context, u InboundUpdate, to ChatRef, actor, corr, text string) outcome {
+	a := w.d.Assistant
+	if a == nil || a.Models == nil {
+		return w.reply(ctx, to, msgHint, "")
+	}
 	if !a.allow(u.ChatID, w.now()) {
 		return w.reply(ctx, to, msgAssistantBusy, "assistant_rate_limited")
 	}

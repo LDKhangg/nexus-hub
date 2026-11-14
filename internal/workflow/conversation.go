@@ -72,3 +72,10 @@ type ConversationStore interface {
 	AppendInstruction(context.Context, InstructionRequest) (Instruction, error)
 	ListInstructions(context.Context, string, int64) ([]Instruction, error)
 }
+
+// ResourceLister is the optional read side used by operator status views.
+// It is separate from ConversationStore so lightweight callers need not
+// implement a query they do not use.
+type ResourceLister interface {
+	ListResources(context.Context, string, int64) ([]ResourceBinding, error)
+}

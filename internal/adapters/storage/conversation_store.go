@@ -230,6 +230,25 @@ func (s *ConversationStore) ExecutionsByResource(ctx context.Context, workspaceI
 	return rows, conversationError(err)
 }
 
+func (s *ConversationStore) ListResources(ctx context.Context, workspaceID string, executionID int64) ([]workflow.ResourceBinding, error) {
+	ws, err := readWorkspace(workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	if executionID <= 0 {
+		return nil, workflowInvalid("execution_id")
+	}
+	rows, err := s.q.ListExecutionResources(ctx, sqlc.ListExecutionResourcesParams{WorkspaceID: ws, ExecutionID: executionID})
+	if err != nil {
+		return nil, conversationError(err)
+	}
+	result := make([]workflow.ResourceBinding, len(rows))
+	for i, row := range rows {
+		result[i] = workflow.ResourceBinding{WorkspaceID: uuidString(row.WorkspaceID), ExecutionID: row.ExecutionID, Kind: row.Kind, ExternalID: row.ExternalID}
+	}
+	return result, nil
+}
+
 func (s *ConversationStore) AppendInstruction(ctx context.Context, request workflow.InstructionRequest) (workflow.Instruction, error) {
 	ws, err := readWorkspace(request.WorkspaceID)
 	if err != nil {
