@@ -783,6 +783,13 @@ Lists print one JSON object with the rows and `next_cursor`. Pass it back with
 `--cursor` for the next page; `""` means the end. Every command needs
 `--workspace-id`. An execution of another workspace is `not_found`.
 
+Caller-, provider- and configuration-supplied references are never printed.
+Fields such as triggers, source IDs, behavior names, step keys and checkpoint
+references appear as stable `sha256:...` digests instead. Use matching digests
+across `show`, `steps`, `history`, `jobs` and `dead-letter` to correlate rows;
+legacy run/job IDs and validated lifecycle states, kinds and reason codes stay
+readable. An empty optional reference has an empty digest value.
+
 `nh trace` shows the run's executions at the end ("Executions"), and
 `trace --json` has them as `executions`. `nh inspect` adds `workflow_executions`
 and `jobs` rows with their `legacy_run_id` / `legacy_job_id`. The old run and

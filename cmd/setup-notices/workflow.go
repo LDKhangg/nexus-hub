@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"regexp"
 	"strconv"
 	"time"
 
@@ -30,16 +30,95 @@ const workflowUsage = `usage: workflow <command> --workspace-id <uuid> [args]
   retry <id>                                   retry a FAILED execution as a linked child
   cutover [--apply]                            read-only preflight; --apply cuts over
 Lists take --limit 1-200 (default 50) and print next_cursor ("" at the end).
-Output holds IDs, states, reason codes, counters and references only.`
+Output holds IDs, validated lifecycle codes, counters and opaque reference digests only.`
 
-// workflowRefRe is the shape of a checkpoint reference that may be printed.
-var workflowRefRe = regexp.MustCompile(`^[A-Za-z0-9_.:#/-]{1,128}$`)
+// workflowDigest gives operators a stable correlation handle without
+// serializing caller-, provider- or configuration-supplied text.
+func workflowDigest(s string) string {
+	if s == "" {
+		return ""
+	}
+	return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(s)))
+}
 
-func workflowRef(s string) string {
-	if workflowRefRe.MatchString(s) {
+func workflowState(s workflow.State) string {
+	if s.Valid() {
+		return string(s)
+	}
+	return "UNKNOWN"
+}
+
+func workflowStepState(s workflow.StepState) string {
+	switch s {
+	case workflow.StepPending, workflow.StepRunning, workflow.StepWaiting,
+		workflow.StepSucceeded, workflow.StepFailed, workflow.StepCancelled:
+		return string(s)
+	default:
+		return "UNKNOWN"
+	}
+}
+
+func workflowReason(r workflow.ReasonCode) string {
+	switch r {
+	case workflow.ReasonAccepted, workflow.ReasonCancelled, workflow.ReasonDeadlineExceeded,
+		workflow.ReasonAttemptsExhausted, workflow.ReasonNonRetryable, workflow.ReasonSideEffectUncertain,
+		workflow.ReasonManualRetry, workflow.ReasonCheckpoint, workflow.ReasonStepSucceeded,
+		workflow.ReasonStepRetry, workflow.ReasonStepWaiting, workflow.ReasonLeaseExpired,
+		workflow.ReasonInconsistentState:
+		return string(r)
+	case "":
+		return ""
+	default:
+		return "unknown"
+	}
+}
+
+func workflowEventKind(k workflow.EventKind) string {
+	switch k {
+	case workflow.EventStarted, workflow.EventTransition, workflow.EventCheckpoint, workflow.EventRetryChild:
+		return string(k)
+	default:
+		return "unknown"
+	}
+}
+
+func workflowStepKind(k string) string {
+	switch k {
+	case workflow.StepKindCollectContext, workflow.StepKindModel, workflow.StepKindActions,
+		workflow.StepKindNotify, workflow.StepKindApproval, workflow.StepKindBehaviorContext,
+		workflow.StepKindBehaviorModel, workflow.StepKindBehaviorDispatch, workflow.StepKindBehaviorRunActions,
+		workflow.StepKindAgentTriage, workflow.StepKindAgentInvestigate, workflow.StepKindAgentReport:
+		return k
+	default:
+		return "unknown"
+	}
+}
+
+func workflowJobStatus(s string) string {
+	if workflow.ValidJobStatus(s) {
 		return s
 	}
-	return "invalid"
+	return "unknown"
+}
+
+func workflowWaitKind(k string) string {
+	switch k {
+	case "item_answer", "post_draft", "confirm_action":
+		return k
+	default:
+		return "unknown"
+	}
+}
+
+func workflowDecision(d string) string {
+	switch d {
+	case "approved", "rejected", "answered", "expired":
+		return d
+	case "":
+		return ""
+	default:
+		return "unknown"
+	}
 }
 
 func workflowTime(t *time.Time) any {
@@ -138,7 +217,7 @@ func workflowCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 	}
 	store, err := storage.NewWorkflowStore(pool)
 	if err != nil {
-		return err
+		return errors.New("database operation failed")
 	}
 	c := workflowCLI{store: store, ws: *ws, out: out}
 	if err := store.CheckWorkspace(ctx, *ws); err != nil {
@@ -177,9 +256,9 @@ func workflowCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 
 func executionSummary(v workflow.ExecutionView) map[string]any {
 	m := map[string]any{
-		"id": v.ID, "state": v.State, "reason": string(v.Reason),
-		"behavior": v.BehaviorName, "behavior_version": v.BehaviorVersion, "version_id": v.VersionID,
-		"source_kind": v.References.SourceKind, "created_at": workflowTimeV(v.CreatedAt), "updated_at": workflowTimeV(v.UpdatedAt),
+		"id": v.ID, "state": workflowState(v.State), "reason": workflowReason(v.Reason),
+		"behavior_digest": workflowDigest(v.BehaviorName), "behavior_version": v.BehaviorVersion, "version_id": v.VersionID,
+		"source_kind_digest": workflowDigest(v.References.SourceKind), "created_at": workflowTimeV(v.CreatedAt), "updated_at": workflowTimeV(v.UpdatedAt),
 	}
 	if v.ParentExecutionID != 0 {
 		m["parent_execution_id"] = v.ParentExecutionID
@@ -198,7 +277,7 @@ func executionSummary(v workflow.ExecutionView) map[string]any {
 
 func jobSummary(j workflow.JobView) map[string]any {
 	m := map[string]any{
-		"job_id": j.ID, "execution_id": j.ExecutionID, "step": j.StepKey, "status": j.Status,
+		"job_id": j.ID, "execution_id": j.ExecutionID, "step_digest": workflowDigest(j.StepKey), "status": workflowJobStatus(j.Status),
 		"attempts": j.Attempts, "max_attempts": j.MaxAttempts, "due_at": workflowTimeV(j.DueAt),
 		"updated_at": workflowTimeV(j.UpdatedAt),
 	}
@@ -206,10 +285,10 @@ func jobSummary(j workflow.JobView) map[string]any {
 		m["lease_expires_at"] = workflowTime(j.LeaseExpiresAt)
 	}
 	if j.LastErrorCode != "" {
-		m["error_code"] = j.LastErrorCode
+		m["error_code"] = workflowReason(workflow.ReasonCode(j.LastErrorCode))
 	}
 	if j.DeadLetterReason != "" {
-		m["dead_letter_reason"] = j.DeadLetterReason
+		m["dead_letter_reason"] = workflowReason(workflow.ReasonCode(j.DeadLetterReason))
 	}
 	return m
 }
@@ -239,12 +318,14 @@ func (c workflowCLI) show(ctx context.Context, id int64) error {
 		return workflowStoreErr(err)
 	}
 	m := executionSummary(d.ExecutionView)
-	m["trigger_key"] = d.TriggerKey
+	m["trigger_digest"] = workflowDigest(d.TriggerKey)
 	m["correlation_id"] = d.CorrelationID
-	m["source_id"] = d.References.SourceID
-	m["subject"] = d.References.Subject
-	m["revision"] = d.References.Revision
-	m["operation_key"] = d.References.OperationKey
+	m["references"] = map[string]string{
+		"source_id_digest":     workflowDigest(d.References.SourceID),
+		"subject_digest":       workflowDigest(d.References.Subject),
+		"revision_digest":      workflowDigest(d.References.Revision),
+		"operation_key_digest": workflowDigest(d.References.OperationKey),
+	}
 	m["started_at"] = workflowTime(d.StartedAt)
 	m["finished_at"] = workflowTime(d.FinishedAt)
 	m["cancelled_at"] = workflowTime(d.CancelledAt)
@@ -262,8 +343,8 @@ func (c workflowCLI) show(ctx context.Context, id int64) error {
 	waits := make([]map[string]any, 0, len(d.Waits))
 	for _, w := range d.Waits {
 		wm := map[string]any{
-			"wait_id": w.ID, "step": w.StepKey, "approval_id": w.ApprovalID, "kind": w.Kind,
-			"decision": w.Decision, "decided_at": workflowTime(w.DecidedAt), "expires_at": workflowTime(w.ExpiresAt),
+			"wait_id": w.ID, "step_digest": workflowDigest(w.StepKey), "approval_id": w.ApprovalID, "kind": workflowWaitKind(w.Kind),
+			"decision": workflowDecision(w.Decision), "decided_at": workflowTime(w.DecidedAt), "expires_at": workflowTime(w.ExpiresAt),
 			"closed_at": workflowTime(w.ClosedAt), "signalled": w.Signalled, "signal_consumed_at": workflowTime(w.SignalConsumedAt),
 		}
 		waits = append(waits, wm)
@@ -285,12 +366,12 @@ func (c workflowCLI) steps(ctx context.Context, id int64) error {
 	}
 	items := make([]map[string]any, 0, len(steps))
 	for _, s := range steps {
-		deps := s.DependsOn
-		if deps == nil {
-			deps = []string{}
+		deps := make([]string, 0, len(s.DependsOn))
+		for _, dependency := range s.DependsOn {
+			deps = append(deps, workflowDigest(dependency))
 		}
 		m := map[string]any{
-			"step": s.Key, "position": s.Position, "kind": s.Kind, "depends_on": deps, "state": s.State,
+			"step_digest": workflowDigest(s.Key), "position": s.Position, "kind": workflowStepKind(s.Kind), "depends_on_digests": deps, "state": workflowStepState(s.State),
 			"attempts": s.Attempts, "updated_at": workflowTimeV(s.UpdatedAt),
 			"usage": map[string]int64{"input_tokens": s.Usage.InputTokens, "output_tokens": s.Usage.OutputTokens,
 				"cache_read_tokens": s.Usage.CacheReadTokens, "cache_write_tokens": s.Usage.CacheWriteTokens},
@@ -298,7 +379,7 @@ func (c workflowCLI) steps(ctx context.Context, id int64) error {
 		if s.Checkpoint != nil {
 			refs := make([]map[string]string, 0, len(s.Checkpoint.References))
 			for _, r := range s.Checkpoint.References {
-				refs = append(refs, map[string]string{"kind": workflowRef(r.Kind), "reference_id": workflowRef(r.ReferenceID)})
+				refs = append(refs, map[string]string{"kind_digest": workflowDigest(r.Kind), "reference_digest": workflowDigest(r.ReferenceID)})
 			}
 			m["checkpoint"] = map[string]any{"reusable": s.Checkpoint.Reusable, "references": refs}
 		}
@@ -319,21 +400,21 @@ func (c workflowCLI) history(ctx context.Context, id int64, limit int, cursor st
 	}
 	items := make([]map[string]any, 0, len(events))
 	for _, e := range events {
-		m := map[string]any{"sequence": e.Sequence, "kind": e.Kind, "at": workflowTimeV(e.CreatedAt)}
+		m := map[string]any{"sequence": e.Sequence, "kind": workflowEventKind(e.Kind), "at": workflowTimeV(e.CreatedAt)}
 		if e.FromState != "" {
-			m["from"] = e.FromState
+			m["from"] = workflowState(e.FromState)
 		}
 		if e.ToState != "" {
-			m["to"] = e.ToState
+			m["to"] = workflowState(e.ToState)
 		}
 		if e.StepKey != "" {
-			m["step"] = e.StepKey
+			m["step_digest"] = workflowDigest(e.StepKey)
 		}
 		if e.Attempt != 0 {
 			m["attempt"] = e.Attempt
 		}
 		if e.Reason != "" {
-			m["reason"] = e.Reason
+			m["reason"] = workflowReason(e.Reason)
 		}
 		if e.Usage != (workflow.Usage{}) {
 			m["usage"] = map[string]int64{"input_tokens": e.Usage.InputTokens, "output_tokens": e.Usage.OutputTokens,
@@ -387,7 +468,7 @@ func (c workflowCLI) cancel(ctx context.Context, id int64) error {
 		return fmt.Errorf("already_cancelled: execution %d is CANCELLED", id)
 	}
 	if d.State.IsTerminal() {
-		return fmt.Errorf("not_cancellable: execution %d already ended (%s)", id, d.State)
+		return fmt.Errorf("not_cancellable: execution %d already ended (%s)", id, workflowState(d.State))
 	}
 	e, err := workflow.NewEngine(c.store).Cancel(ctx, workflow.Command{WorkspaceID: c.ws, ExecutionID: id, IdempotencyKey: cancelKey(c.ws, id)})
 	switch {
@@ -399,7 +480,7 @@ func (c workflowCLI) cancel(ctx context.Context, id int64) error {
 	case err != nil:
 		return workflowStoreErr(err)
 	}
-	return c.emit(map[string]any{"execution_id": e.ID, "outcome": "cancelled", "state": e.State, "reason": string(e.Reason),
+	return c.emit(map[string]any{"execution_id": e.ID, "outcome": "cancelled", "state": workflowState(e.State), "reason": workflowReason(e.Reason),
 		"note": "an external request already in flight is not rolled back"})
 }
 
@@ -417,9 +498,9 @@ func (c workflowCLI) resume(ctx context.Context, id int64) error {
 		}
 		switch {
 		case now.State.IsTerminal():
-			return fmt.Errorf("not_resumable: execution %d already ended (%s)", id, now.State)
+			return fmt.Errorf("not_resumable: execution %d already ended (%s)", id, workflowState(now.State))
 		case !now.State.IsWaiting():
-			return fmt.Errorf("not_resumable: execution %d is not waiting (%s)", id, now.State)
+			return fmt.Errorf("not_resumable: execution %d is not waiting (%s)", id, workflowState(now.State))
 		default:
 			return fmt.Errorf("not_resumable: execution %d has no recorded decision for its wait; decide the approval first", id)
 		}
@@ -430,7 +511,7 @@ func (c workflowCLI) resume(ctx context.Context, id int64) error {
 	if !d.State.IsWaiting() {
 		outcome = "already_resumed"
 	}
-	return c.emit(map[string]any{"execution_id": e.ID, "outcome": outcome, "state": e.State, "reason": string(e.Reason)})
+	return c.emit(map[string]any{"execution_id": e.ID, "outcome": outcome, "state": workflowState(e.State), "reason": workflowReason(e.Reason)})
 }
 
 func (c workflowCLI) retry(ctx context.Context, id int64) error {
@@ -445,11 +526,11 @@ func (c workflowCLI) retry(ctx context.Context, id int64) error {
 	case errors.Is(err, workflow.ErrUnsafeRetry):
 		return fmt.Errorf("unsafe_retry: execution %d has a completed step without a reusable checkpoint; retry refused", id)
 	case errors.Is(err, workflow.ErrNotEligible):
-		return fmt.Errorf("not_retryable: only a FAILED execution can be retried; execution %d is %s", id, d.State)
+		return fmt.Errorf("not_retryable: only a FAILED execution can be retried; execution %d is %s", id, workflowState(d.State))
 	case err != nil:
 		return workflowStoreErr(err)
 	}
-	m := map[string]any{"execution_id": id, "retry_execution_id": child.ID, "state": child.State, "outcome": "created"}
+	m := map[string]any{"execution_id": id, "retry_execution_id": child.ID, "state": workflowState(child.State), "outcome": "created"}
 	if d.RetryChildID != 0 {
 		m["outcome"] = "existing"
 		if child.State == workflow.StateFailed {
@@ -470,10 +551,22 @@ func (c workflowCLI) cutover(ctx context.Context, apply bool) error {
 	}
 	issues := make([]map[string]any, 0, len(r.Blocked))
 	for _, b := range r.Blocked {
-		issues = append(issues, map[string]any{"kind": b.Kind, "id": b.ID, "code": b.Code})
+		kind, code := "unknown", "unknown"
+		if b.Kind == storage.CutoverKindBehaviorRun {
+			kind = b.Kind
+		}
+		switch b.Code {
+		case storage.CutoverCodeVersionInvalid, storage.CutoverCodeApprovalUnmappable:
+			code = b.Code
+		}
+		issues = append(issues, map[string]any{"kind": kind, "id": b.ID, "code": code})
+	}
+	mode := "unknown"
+	if r.Mode == storage.RuntimeModeLegacy || r.Mode == storage.RuntimeModeWorkflow {
+		mode = r.Mode
 	}
 	report := map[string]any{
-		"workspace_id": c.ws, "preflight": !apply, "mode": r.Mode, "applied": r.Applied,
+		"workspace_id": c.ws, "preflight": !apply, "mode": mode, "applied": r.Applied,
 		"already_cut_over": r.AlreadyCutOver, "ready": r.Ready(),
 		"behavior_runs": map[string]int{"pending": r.BehaviorRunsPending, "running": r.BehaviorRunsRunning,
 			"lease_live": r.BehaviorRunsLeaseLive, "waiting": r.BehaviorRunsWaiting},
