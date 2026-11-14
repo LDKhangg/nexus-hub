@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"time"
 
@@ -22,7 +23,8 @@ import (
 const workflowUsage = `usage: workflow <command> --workspace-id <uuid> [args]
   list [--state S] [--limit N] [--cursor C]    executions, newest first
   show <ref|id>                                state, reason, version, deadline,
-                                               waits, live job, lineage, legacy links
+                                               waits, live job, lineage, resources,
+                                               instruction metadata, legacy links
   steps <ref|id>                               steps, attempts, usage, checkpoint refs
   history <ref|id> [--limit N] [--cursor C]    ordered timeline
   jobs [--status S] [--execution-id ID] [--limit N] [--cursor C]
@@ -155,9 +157,10 @@ func workflowStoreErr(err error) error {
 }
 
 type workflowCLI struct {
-	store *storage.WorkflowStore
-	ws    string
-	out   io.Writer
+	store         *storage.WorkflowStore
+	conversations *storage.ConversationStore
+	ws            string
+	out           io.Writer
 }
 
 func (c workflowCLI) emit(v any) error { return json.NewEncoder(c.out).Encode(v) }
@@ -235,7 +238,11 @@ func workflowCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 	if err != nil {
 		return errors.New("database operation failed")
 	}
-	c := workflowCLI{store: store, ws: *ws, out: out}
+	conversations, err := storage.NewConversationStore(pool)
+	if err != nil {
+		return errors.New("database operation failed")
+	}
+	c := workflowCLI{store: store, conversations: conversations, ws: *ws, out: out}
 	if err := store.CheckWorkspace(ctx, *ws); err != nil {
 		if errors.Is(err, workflow.ErrNotFound) {
 			return errors.New("workspace not found")
@@ -333,6 +340,18 @@ func (c workflowCLI) show(ctx context.Context, id int64) error {
 	if err != nil {
 		return workflowStoreErr(err)
 	}
+	resources, err := c.conversations.ListResources(ctx, c.ws, id)
+	if err != nil {
+		return workflowStoreErr(err)
+	}
+	instructions, err := c.conversations.ListInstructions(ctx, c.ws, id)
+	if err != nil {
+		return workflowStoreErr(err)
+	}
+	steps, err := c.store.ListSteps(ctx, c.ws, id)
+	if err != nil {
+		return workflowStoreErr(err)
+	}
 	m := executionSummary(d.ExecutionView)
 	m["trigger_digest"] = workflowDigest(d.TriggerKey)
 	m["correlation_id"] = d.CorrelationID
@@ -350,6 +369,8 @@ func (c workflowCLI) show(ctx context.Context, id int64) error {
 		"step_timeout_s": int64(d.Definition.StepTimeout / time.Second), "lease_s": int64(d.Definition.LeaseDuration / time.Second),
 		"execution_deadline_s": int64(d.Definition.ExecutionDeadline / time.Second),
 	}
+	m["resources"] = workflowResourceMetadata(resources)
+	m["instructions"] = workflowInstructionMetadata(instructions, steps)
 	if d.RetryChildID != 0 {
 		m["retry_execution_id"] = d.RetryChildID
 	}
@@ -373,6 +394,60 @@ func (c workflowCLI) show(ctx context.Context, id int64) error {
 		m["attention"] = "waiting: decide the open approval, then the execution resumes (or run workflow resume)"
 	}
 	return c.emit(m)
+}
+
+func workflowResourceMetadata(resources []workflow.ResourceBinding) []map[string]any {
+	byKind := make(map[string][]string)
+	for _, resource := range resources {
+		byKind[resource.Kind] = append(byKind[resource.Kind], resource.ExternalID)
+	}
+	kinds := make([]string, 0, len(byKind))
+	for kind := range byKind {
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	items := make([]map[string]any, 0, len(kinds))
+	for _, kind := range kinds {
+		externalIDs := byKind[kind]
+		item := map[string]any{"kind": kind, "count": len(externalIDs)}
+		switch kind {
+		case "clickup.task", "github.pr", "telegram.message":
+			sort.Strings(externalIDs)
+			item["external_ids"] = externalIDs
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+func workflowInstructionMetadata(instructions []workflow.Instruction, steps []workflow.Step) map[string]any {
+	var latest workflow.Instruction
+	for _, instruction := range instructions {
+		if instruction.Version > latest.Version {
+			latest = instruction
+		}
+	}
+	var usedVersion int64
+	for _, step := range steps {
+		if step.Checkpoint == nil {
+			continue
+		}
+		for _, reference := range step.Checkpoint.References {
+			if reference.Kind != workflow.CheckpointOwnerInstructions {
+				continue
+			}
+			version, err := strconv.ParseInt(reference.ReferenceID, 10, 64)
+			if err == nil && version > usedVersion {
+				usedVersion = version
+			}
+		}
+	}
+	return map[string]any{
+		"count":          len(instructions),
+		"latest_version": latest.Version,
+		"latest_at":      workflowTimeV(latest.CreatedAt),
+		"used_version":   usedVersion,
+	}
 }
 
 func (c workflowCLI) steps(ctx context.Context, id int64) error {

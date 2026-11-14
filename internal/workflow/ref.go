@@ -18,7 +18,10 @@ func ParseRef(s string) (int64, bool) {
 		return 0, false
 	}
 	id, err := strconv.ParseInt(s[3:], 10, 64)
-	return id, err == nil && id > 0
+	if err != nil || id <= 0 {
+		return 0, false
+	}
+	return id, true
 }
 
 // FindRefs extracts at most ten distinct, positive, word-bounded workflow
