@@ -222,6 +222,48 @@ func TestResumeCannotBypassApproval(t *testing.T) {
 	}
 }
 
+// TC-D20 (REQ-17): an assistant-approved resume is pinned to the exact wait
+// generation it showed, while generic operators retain zero-value compatibility.
+func TestResumePinsOptionalWaitGeneration(t *testing.T) {
+	t.Run("pinned wait rejects a later generation", func(t *testing.T) {
+		e := newWFEnv(t)
+		br, _, aps := e.waitingRun(workspaceA, "task:pinned", nil, behavior.ApprovalPostDraft)
+		detail, err := e.store.GetExecutionDetail(e.ctx, workspaceA, br.ex.ID)
+		if err != nil || len(detail.Waits) != 1 {
+			t.Fatalf("detail=%#v err=%v", detail, err)
+		}
+		oldWait := detail.Waits[0].ID
+		mustExec(t, e.ctx, e.pool, `UPDATE approvals SET decision='approved', decided_by='owner', decided_at=now() WHERE id=$1`, aps[0].ID)
+		cmd := workflow.Command{WorkspaceID: workspaceA, ExecutionID: br.ex.ID, WaitID: oldWait + 1, IdempotencyKey: "assistant-wrong-generation"}
+		if _, err := e.store.ResumeExecution(e.ctx, cmd); !errors.Is(err, workflow.ErrNotEligible) {
+			t.Fatalf("resume with foreign wait generation: %v", err)
+		}
+		if got := e.execution(workspaceA, br.ex.ID); !got.State.IsWaiting() {
+			t.Fatalf("rejected pinned resume changed state to %s", got.State)
+		}
+	})
+
+	t.Run("matching and zero wait IDs remain accepted", func(t *testing.T) {
+		for _, pinned := range []bool{true, false} {
+			e := newWFEnv(t)
+			br, _, aps := e.waitingRun(workspaceA, fmt.Sprintf("task:compatible:%t", pinned), nil, behavior.ApprovalPostDraft)
+			detail, err := e.store.GetExecutionDetail(e.ctx, workspaceA, br.ex.ID)
+			if err != nil || len(detail.Waits) != 1 {
+				t.Fatalf("detail=%#v err=%v", detail, err)
+			}
+			mustExec(t, e.ctx, e.pool, `UPDATE approvals SET decision='approved', decided_by='owner', decided_at=now() WHERE id=$1`, aps[0].ID)
+			waitID := int64(0)
+			if pinned {
+				waitID = detail.Waits[0].ID
+			}
+			cmd := workflow.Command{WorkspaceID: workspaceA, ExecutionID: br.ex.ID, WaitID: waitID, IdempotencyKey: fmt.Sprintf("resume-compatible-%t", pinned)}
+			if _, err := e.store.ResumeExecution(e.ctx, cmd); err != nil {
+				t.Fatalf("pinned=%t resume: %v", pinned, err)
+			}
+		}
+	})
+}
+
 // TC-B24/TC-C11/TC-C12 (REQ-8, REQ-10): reject, expiry and cancel racing each
 // other and a restart: exactly one decision is kept, one signal at most, and
 // a cancelled execution records the decision through the legacy route without
