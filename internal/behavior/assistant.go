@@ -420,6 +420,7 @@ type assistantPayload struct {
 	ExecutionID    int64  `json:"execution_id,omitempty"`
 	WaitID         int64  `json:"wait_id,omitempty"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	ChatID         int64  `json:"chat_id,omitempty"`
 }
 
 // assistantJob is one queued assistant request. text is the owner's
@@ -486,6 +487,9 @@ func (w *InboxWorker) runAssistant(ctx context.Context) {
 // answer takes longer than assistantNoticeAfter (counted from queueing), a
 // short "working" message is sent first.
 func (w *InboxWorker) assistantJob(ctx context.Context, job assistantJob) outcome {
+	if ctx.Err() != nil {
+		return outcome{code: "assistant_cancelled"}
+	}
 	a := w.d.Assistant
 	to := job.to
 	if a == nil || a.Models == nil {
@@ -506,10 +510,15 @@ func (w *InboxWorker) assistantJob(ctx context.Context, job assistantJob) outcom
 	select {
 	case <-done:
 	case <-notice.C:
-		_ = w.reply(ctx, to, msgAssistantWorking, "")
+		if ctx.Err() == nil {
+			_ = w.reply(ctx, to, msgAssistantWorking, "")
+		}
 		<-done
 	}
 	notice.Stop()
+	if ctx.Err() != nil {
+		return outcome{code: "assistant_cancelled"}
+	}
 	switch {
 	case errors.Is(err, errAssistantBusy):
 		return w.reply(ctx, to, msgAssistantOverloaded, "assistant_busy")
@@ -536,7 +545,14 @@ func (w *InboxWorker) assistantJob(ctx context.Context, job assistantJob) outcom
 // messages under the Telegram limit. It stops at the first failed send.
 func (w *InboxWorker) sendAssistantReply(ctx context.Context, to ChatRef, text string) outcome {
 	for _, part := range splitAssistantReply(text) {
-		if out := w.reply(ctx, to, part, ""); out.code != "" {
+		if ctx.Err() != nil {
+			return outcome{code: "assistant_cancelled"}
+		}
+		out := w.reply(ctx, to, part, "")
+		if ctx.Err() != nil {
+			return outcome{code: "assistant_cancelled"}
+		}
+		if out.code != "" {
 			// The failed send may have reached Telegram. Never resend that
 			// part; a separate bounded notice truthfully marks the answer as
 			// incomplete when shutdown has not cancelled the worker.
@@ -569,6 +585,7 @@ func (w *InboxWorker) proposeAssistantAction(ctx context.Context, u InboundUpdat
 	if w.d.Approvals == nil {
 		return w.reply(ctx, to, msgNotAvailable, "not_available")
 	}
+	p.ChatID = u.ChatID
 	payload, err := json.Marshal(p)
 	if err != nil {
 		return w.reply(ctx, to, msgFailed, "handler_failed")
@@ -637,6 +654,9 @@ func (w *InboxWorker) assistantCallback(ctx context.Context, u InboundUpdate, to
 	var p assistantPayload
 	if json.Unmarshal(a.Payload, &p) != nil {
 		return msgBadButton, NoteBadCallback, true
+	}
+	if p.ChatID == 0 || p.ChatID != u.ChatID {
+		return msgStale, "stale", true
 	}
 	command, args := "", ""
 	switch a.Action {
