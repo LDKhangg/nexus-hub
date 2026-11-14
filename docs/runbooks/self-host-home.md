@@ -680,23 +680,33 @@ skipped-approval reports always retain a non-empty reason.
 
 ### Talk to the bot
 
-You can also write to the bot in plain words. Nexus sends the message to the
-`triage_model` of your LLM provider, which picks one known action:
+You can also write to the bot in plain words. Nexus sends the conversation to
+the `assistant_model` through your configured LLM provider. The assistant can
+answer general questions and use bounded read tools for contacts, behavior
+runs and traces, report preferences and templates, and workflow executions,
+history and jobs.
 
 ```text
-lần chạy gần nhất ra sao?          → the trace of the latest run
-5 run gần đây                      → a short list of recent runs
-tìm liên hệ Lan                    → /contacts Lan
+lần chạy gần nhất ra sao?          → reads the latest run and trace
+workflow 42 đang ở đâu?            → reads its steps and history
+giải thích đoạn Go này             → answers as an open conversation
 đặt tên clickup:12345 là chị Lan   → asks first: "Làm" / "Huỷ"
-chuyển báo cáo sang detailed       → asks first: "Làm" / "Huỷ"
+resume workflow 42                 → asks first: "Làm" / "Huỷ"
 ```
 
-Reads (help, contacts, a trace, recent runs, report preferences, a template)
-answer at once. Writes (a contact name, the report style) run only after you
-press **Làm**, through the same code as `/alias` and `/prefs`. If the model is
-unsure, unavailable, or answers badly, the bot says so and points to `/help`;
-nothing runs. Your message is never stored or logged, and at most 6 messages a
-minute go to the model. Turn it off with `nh settings set telegram_assistant false`.
+Reads answer at once. Changes (a contact name, report style, or workflow
+cancel/resume/retry) only run after you press **Làm**; **Huỷ** leaves them
+unchanged. Long answers are sent as ordered messages below Telegram's size
+limit. Recent conversation (up to 20 exchanges with a bounded text budget) is
+kept only in memory and is forgotten when Nexus restarts. Messages, prompts,
+tool inputs/results and answers are never logged.
+
+The defaults are model `claude-opus-5-5`, a 180-second turn timeout and 30
+owner messages per chat per minute. Configure them with
+`nh settings set assistant_model <claude-model-id>`,
+`nh settings set assistant_timeout <duration>` and
+`nh settings set assistant_rate_per_minute <number>`. Turn the assistant off
+with `nh settings set telegram_assistant false`.
 
 ## 12. Durable workflows (Phase 5)
 
