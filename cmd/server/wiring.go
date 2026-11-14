@@ -455,6 +455,7 @@ const (
 // the legacy claimers keep taking.
 type workflowRuntime struct {
 	store      *storage.WorkflowStore
+	commands   workflow.Engine
 	agents     *storage.AgentWorkflowStore
 	worker     *workflow.Worker
 	reconciler *workflow.Reconciler
@@ -498,7 +499,7 @@ func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServi
 		Workers: int(s.BehaviorWorkers) + 1, PollInterval: s.BehaviorPollInterval,
 	})
 	return &workflowRuntime{
-		store: store, agents: agents, worker: worker, reconciler: workflow.NewReconciler(store), orch: ag.orchestrator,
+		store: store, commands: workflow.NewEngine(store), agents: agents, worker: worker, reconciler: workflow.NewReconciler(store), orch: ag.orchestrator,
 		pipeline: agent.PipelineSettings{
 			Limits: ag.limits, AllowDangerous: s.AllowDangerous,
 			MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
