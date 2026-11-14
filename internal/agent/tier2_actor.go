@@ -87,7 +87,11 @@ func (a *Tier2Actor) Investigate(ctx context.Context, packet memory.ContextPacke
 	for _, s := range specs {
 		defs = append(defs, domain.ToolDef{Name: s.Name, Description: s.Description, InputSchema: s.InputSchema})
 	}
-	turns := []domain.Turn{{Role: domain.UserRole, Text: exec.CleanText(packet.Render() + "\nGoal: " + d.Goal)}}
+	input := packet.Render() + "\nGoal: " + d.Goal
+	if ownerInstructions := ownerInstructionsFromContext(ctx); ownerInstructions != "" {
+		input += "\n\n" + ownerInstructions
+	}
+	turns := []domain.Turn{{Role: domain.UserRole, Text: exec.CleanText(input)}}
 	var metas []resultMeta
 	lastText := ""
 

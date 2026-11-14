@@ -16,6 +16,9 @@ type RunContext struct {
 	Trigger TriggerData
 	// Context is what the run read (empty when it failed before reading).
 	Context ContextSnapshot
+	// ownerInstructions is populated only by a durable model step at its safe
+	// checkpoint. Legacy runs leave it empty.
+	ownerInstructions string
 
 	// writes is the fenced write side of a run executed as durable
 	// workflow steps; nil writes under the legacy run claim.

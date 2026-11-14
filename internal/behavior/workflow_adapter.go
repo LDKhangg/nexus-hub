@@ -217,10 +217,11 @@ func authorizeAction(ctx context.Context) error {
 
 // WorkflowSteps executes behavior runs as workflow steps.
 type WorkflowSteps struct {
-	w    *RunWorker
-	runs DurableRunStore
-	auth ActionAuthorizer
-	now  func() time.Time
+	w            *RunWorker
+	runs         DurableRunStore
+	auth         ActionAuthorizer
+	instructions workflow.InstructionReader
+	now          func() time.Time
 	// waits and applier make blocking approvals durable waits; nil keeps
 	// unbound approvals (see EnableApprovalWaits).
 	waits   ApprovalWaitStore
@@ -229,11 +230,15 @@ type WorkflowSteps struct {
 
 // NewWorkflowSteps builds the behavior step executors over the run
 // executor's collaborators and settings. It starts no worker.
-func NewWorkflowSteps(w *RunWorker, runs DurableRunStore, auth ActionAuthorizer) (*WorkflowSteps, error) {
+func NewWorkflowSteps(w *RunWorker, runs DurableRunStore, auth ActionAuthorizer, readers ...workflow.InstructionReader) (*WorkflowSteps, error) {
 	if w == nil || runs == nil || auth == nil {
 		return nil, errors.New("behavior workflow steps: missing dependency")
 	}
-	return &WorkflowSteps{w: w, runs: runs, auth: auth, now: time.Now}, nil
+	var instructions workflow.InstructionReader
+	if len(readers) > 0 {
+		instructions = readers[0]
+	}
+	return &WorkflowSteps{w: w, runs: runs, auth: auth, instructions: instructions, now: time.Now}, nil
 }
 
 type stepPhase int
@@ -760,6 +765,17 @@ func (s *WorkflowSteps) modelPhase(ctx context.Context, rc *RunContext, sc workf
 		}
 		if modelStepEnded(rc) {
 			return nil, nil
+		}
+	}
+	if s.instructions != nil {
+		instructions, err := s.instructions.ListInstructions(ctx, sc.Execution.WorkspaceID, sc.Execution.ID)
+		if err != nil {
+			return nil, err
+		}
+		block, version := workflow.FormatOwnerInstructions(instructions, workflow.OwnerInstructionsMaxBytes)
+		rc.ownerInstructions = block
+		if version > 0 {
+			st.add(workflow.CheckpointOwnerInstructions, strconv.FormatInt(version, 10), "")
 		}
 	}
 	stored, out, err := s.w.modelPhase(ctx, rc)

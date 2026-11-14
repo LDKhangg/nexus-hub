@@ -408,18 +408,34 @@ func WorkflowStartRequest(b AgentBatch, versionID int64, correlationID string) w
 // Orchestrator's collaborators (models, tool registry, tool-run audit,
 // redactor, compressor) and settings. It starts no worker.
 type WorkflowSteps struct {
-	o     *Orchestrator
-	store DurableAgentStore
-	auth  ActionAuthorizer
-	now   func() time.Time
+	o            *Orchestrator
+	store        DurableAgentStore
+	auth         ActionAuthorizer
+	instructions workflow.InstructionReader
+	now          func() time.Time
 }
 
 // NewWorkflowSteps builds the pipeline step executors.
-func NewWorkflowSteps(o *Orchestrator, store DurableAgentStore, auth ActionAuthorizer) (*WorkflowSteps, error) {
+func NewWorkflowSteps(o *Orchestrator, store DurableAgentStore, auth ActionAuthorizer, readers ...workflow.InstructionReader) (*WorkflowSteps, error) {
 	if o == nil || store == nil || auth == nil {
 		return nil, errors.New("agent workflow steps: missing dependency")
 	}
-	return &WorkflowSteps{o: o, store: store, auth: auth, now: time.Now}, nil
+	var instructions workflow.InstructionReader
+	if len(readers) > 0 {
+		instructions = readers[0]
+	}
+	return &WorkflowSteps{o: o, store: store, auth: auth, instructions: instructions, now: time.Now}, nil
+}
+
+type ownerInstructionsKey struct{}
+
+func withOwnerInstructions(ctx context.Context, instructions string) context.Context {
+	return context.WithValue(ctx, ownerInstructionsKey{}, instructions)
+}
+
+func ownerInstructionsFromContext(ctx context.Context) string {
+	instructions, _ := ctx.Value(ownerInstructionsKey{}).(string)
+	return instructions
 }
 
 // Register adds agent.triage, agent.investigate and agent.report to reg.
@@ -810,6 +826,17 @@ func (r *batchRun) investigate(ctx context.Context) (workflow.StepResult, error)
 	budget := r.budget()
 	if budget.exhausted() {
 		return r.handle(ctx, jc, &TriageError{Code: CodeTokenBudget}, through)
+	}
+	if r.s.instructions != nil {
+		instructions, err := r.s.instructions.ListInstructions(ctx, r.fence.WorkspaceID, r.fence.ExecutionID)
+		if err != nil {
+			return workflow.StepResult{}, storageErr(r.stepCtx, err)
+		}
+		block, version := workflow.FormatOwnerInstructions(instructions, workflow.OwnerInstructionsMaxBytes)
+		ctx = withOwnerInstructions(ctx, block)
+		if version > 0 {
+			r.st.add(workflow.CheckpointOwnerInstructions, strconv.FormatInt(version, 10), "")
+		}
 	}
 	report, err := investigator.Investigate(ctx, r.packet(jc), r.tri.Decision, o.cleanInput(jc.Config.Persona), specs, exec, budget)
 	if uerr := r.addUsage(ctx, report.Usage); uerr != nil {

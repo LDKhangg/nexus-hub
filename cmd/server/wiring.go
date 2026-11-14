@@ -484,7 +484,7 @@ func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServi
 		return nil, errors.New("agent workflow store startup failed")
 	}
 	reg := workflow.NewRegistry()
-	behaviorSteps, err := behavior.NewWorkflowSteps(runs, behaviors, store)
+	behaviorSteps, err := behavior.NewWorkflowSteps(runs, behaviors, store, ag.conversations)
 	if err != nil {
 		return nil, errors.New("behavior workflow steps startup failed")
 	}
@@ -494,7 +494,7 @@ func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServi
 	if err := behaviorSteps.Register(reg); err != nil {
 		return nil, errors.New("behavior workflow steps registration failed")
 	}
-	agentSteps, err := agent.NewWorkflowSteps(ag.orchestrator, agents, store)
+	agentSteps, err := agent.NewWorkflowSteps(ag.orchestrator, agents, store, ag.conversations)
 	if err != nil {
 		return nil, errors.New("agent workflow steps startup failed")
 	}

@@ -951,7 +951,7 @@ func (w *RunWorker) askModel(ctx context.Context, rc *RunContext) ([]ModelItem, 
 		return nil, nil, runFail(CodeLLMUnconfigured), nil
 	}
 	system := systemPrompt(doc) + verdictPrompt(doc, verdictSource(rc))
-	msgs := []domain.Message{{Role: domain.UserRole, Text: userPrompt(doc.Instructions, rc.Context)}}
+	msgs := []domain.Message{{Role: domain.UserRole, Text: userPromptWithOwnerInstructions(doc.Instructions, rc.ownerInstructions, rc.Context)}}
 	used := run.Usage
 	for try := 0; try < 2; try++ {
 		if used.Steps >= doc.Budgets.MaxSteps {
