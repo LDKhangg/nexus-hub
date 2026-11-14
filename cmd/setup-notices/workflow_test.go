@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -250,11 +251,14 @@ func TestWorkflowCLICutoverDefaultsReadOnly(t *testing.T) {
 // transcript, tool payload or secret text, including hostile reference values.
 func TestWorkflowCLINoPayloadLeak(t *testing.T) {
 	f := newWorkflowCLIFixture(t)
-	secret := "PROMPT-secret\nAuthorization: Bearer planted-token"
+	secret := "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(secret)))
 	ex := f.start(t, "payload-leak", workflow.References{
 		SourceKind: "clickup.comment", SourceID: secret, Subject: secret, Revision: secret, OperationKey: secret,
 	}, "model")
+	var correlations []string
 	for _, args := range [][]string{
+		{"workflow", "show", fmt.Sprint(ex.ID), "--workspace-id", f.ws},
 		{"workflow", "show", fmt.Sprint(ex.ID), "--workspace-id", f.ws},
 		{"workflow", "list", "--workspace-id", f.ws},
 		{"workflow", "steps", fmt.Sprint(ex.ID), "--workspace-id", f.ws},
@@ -265,9 +269,15 @@ func TestWorkflowCLINoPayloadLeak(t *testing.T) {
 		if err != nil {
 			combined += err.Error()
 		}
-		if strings.Contains(combined, "PROMPT-secret") || strings.Contains(combined, "planted-token") || strings.Contains(combined, "Authorization") {
+		if strings.Contains(combined, secret) || strings.Contains(combined, "ghp_") {
 			t.Fatalf("%v leaked planted payload: %q", args, combined)
 		}
+		if strings.Contains(combined, digest) {
+			correlations = append(correlations, digest)
+		}
+	}
+	if len(correlations) < 2 {
+		t.Fatalf("stable reference correlation missing: digest %q appeared in %d command outputs", digest, len(correlations))
 	}
 }
 
