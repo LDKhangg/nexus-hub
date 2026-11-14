@@ -81,19 +81,32 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND behavior_version_id = sqlc.arg(b
   AND subject = sqlc.arg(subject) AND revision = sqlc.arg(revision);
 
 -- name: FailExhaustedBehaviorRuns :execrows
--- Runs whose lease ended after the last allowed attempt.
-UPDATE public.behavior_runs SET status = 'failed', error_code = 'attempts_exhausted', claim_token = NULL,
+-- Runs whose lease ended after the last allowed attempt. A cut-over
+-- workspace's runs and a run owned by a workflow execution belong to the
+-- durable queue, never to the legacy claimer.
+UPDATE public.behavior_runs r SET status = 'failed', error_code = 'attempts_exhausted', claim_token = NULL,
   locked_until = NULL, finished_at = now(), updated_at = now()
-WHERE status = 'running' AND locked_until <= sqlc.arg(at_time)::timestamptz AND attempts >= sqlc.arg(max_attempts)::int;
+WHERE r.status = 'running' AND r.locked_until <= sqlc.arg(at_time)::timestamptz AND r.attempts >= sqlc.arg(max_attempts)::int
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_runtime_modes m
+                  WHERE m.workspace_id = r.workspace_id AND m.mode = 'workflow')
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_executions e
+                  WHERE e.workspace_id = r.workspace_id AND e.legacy_run_id = r.id);
 
 -- name: SelectBehaviorRunClaimCandidate :one
--- A due pending run, or a running run whose lease ended.
-SELECT id FROM public.behavior_runs
-WHERE ((status = 'pending' AND run_at <= sqlc.arg(at_time)::timestamptz)
-    OR (status = 'running' AND locked_until <= sqlc.arg(at_time)::timestamptz))
-  AND attempts < sqlc.arg(max_attempts)::int
-ORDER BY (status = 'running') DESC, run_at, id
-FOR UPDATE SKIP LOCKED LIMIT 1;
+-- A due pending run, or a running run whose lease ended. Runs of a
+-- cut-over workspace and runs owned by a workflow execution are never
+-- candidates; the claim re-checks the workspace's runtime mode under its
+-- KEY SHARE lock (this filter only skips them cheaply).
+SELECT r.id, r.workspace_id FROM public.behavior_runs r
+WHERE ((r.status = 'pending' AND r.run_at <= sqlc.arg(at_time)::timestamptz)
+    OR (r.status = 'running' AND r.locked_until <= sqlc.arg(at_time)::timestamptz))
+  AND r.attempts < sqlc.arg(max_attempts)::int
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_runtime_modes m
+                  WHERE m.workspace_id = r.workspace_id AND m.mode = 'workflow')
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_executions e
+                  WHERE e.workspace_id = r.workspace_id AND e.legacy_run_id = r.id)
+ORDER BY (r.status = 'running') DESC, r.run_at, r.id
+FOR UPDATE OF r SKIP LOCKED LIMIT 1;
 
 -- name: ClaimBehaviorRunByID :one
 UPDATE public.behavior_runs AS r SET status = 'running', attempts = r.attempts + 1,
@@ -437,11 +450,16 @@ WHERE r.workspace_id = sqlc.arg(workspace_id) AND r.id = sqlc.arg(id) AND e.id =
 FOR UPDATE OF r;
 
 -- name: BeginDurableBehaviorRunAttempt :one
+-- A run imported by the cutover may still hold the legacy claim it had;
+-- once that lease has ended the durable attempt takes the run over (like a
+-- legacy reclaim) and clears the claim, so the old claimant's writes fail.
 UPDATE public.behavior_runs SET status = 'running', attempts = attempts + 1,
   workflow_attempt_deadline = sqlc.arg(deadline)::timestamptz,
+  claim_token = NULL, locked_until = NULL,
   started_at = COALESCE(started_at, now()), updated_at = now()
 WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id)
-  AND claim_token IS NULL AND status IN ('pending','running')
+  AND (claim_token IS NULL OR locked_until <= sqlc.arg(at_time)::timestamptz)
+  AND status IN ('pending','running')
 RETURNING *;
 
 -- name: SetDurableBehaviorRunContext :execrows

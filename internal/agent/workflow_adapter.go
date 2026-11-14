@@ -951,3 +951,76 @@ func (g gatedRunStore) FindPrior(ctx context.Context, key string) (*tools.PriorR
 	}
 	return nil, nil
 }
+
+// --- orphan batches ---
+
+// OrphanBatch is a workflow-owned batch still processing although its
+// execution ended FAILED or CANCELLED before the batch was committed (a
+// deadline, a timeout, exhausted attempts, an uncertain side effect or an
+// operator cancel) and no live execution owns it. Reason is the
+// execution's reason code.
+type OrphanBatch struct {
+	Batch       AgentBatch
+	ExecutionID int64
+	Reason      string
+}
+
+// BatchReleaseStore releases orphan batches (storage.AgentWorkflowStore).
+type BatchReleaseStore interface {
+	ListOrphanBatches(ctx context.Context, workspaceID string, limit int) ([]OrphanBatch, error)
+	LoadBatch(ctx context.Context, b AgentBatch) (JobContext, error)
+	// ReleaseOrphanBatch ends the batch like CommitFallback (failed, the
+	// notice in the outbox, the cursor moved and the follow-up enqueued) in
+	// one transaction, after re-checking that the execution ended and no
+	// live execution owns the batch. A batch already ended is left alone.
+	ReleaseOrphanBatch(ctx context.Context, o OrphanBatch, code, text string, through int64) error
+}
+
+// CodeExecutionEnded is the fallback code of an orphan batch whose
+// execution reason is not a usable code.
+const CodeExecutionEnded = "execution_ended"
+
+// orphanCode is the execution's reason when it is a plain code.
+func orphanCode(reason string) string {
+	if reason == "" || len(reason) > 64 {
+		return CodeExecutionEnded
+	}
+	for i, r := range reason {
+		if !(r >= 'a' && r <= 'z' || i > 0 && (r >= '0' && r <= '9' || r == '_')) {
+			return CodeExecutionEnded
+		}
+	}
+	return reason
+}
+
+// ReleaseOrphanBatches releases up to limit orphan batches of the
+// workspace with the legacy failure semantics of a batch whose attempts ran
+// out: the plain fallback notice of the unhandled comments, the cursor moved
+// past them and the follow-up job, so the thread is never blocked forever
+// and nothing is triaged twice. It returns how many it released.
+func (o *Orchestrator) ReleaseOrphanBatches(ctx context.Context, store BatchReleaseStore, workspaceID string, limit int) (int, error) {
+	if o == nil || store == nil || limit < 1 {
+		return 0, errors.New("agent orphan release: missing dependency")
+	}
+	orphans, err := store.ListOrphanBatches(ctx, workspaceID, limit)
+	if err != nil {
+		return 0, err
+	}
+	released := 0
+	for _, ob := range orphans {
+		jc, err := store.LoadBatch(ctx, ob.Batch)
+		if err != nil {
+			return released, err
+		}
+		code := orphanCode(ob.Reason)
+		if err := store.ReleaseOrphanBatch(ctx, ob, code, o.fallbackText(jc, code), batchThrough(jc)); err != nil {
+			if errors.Is(err, ErrBatchConflict) || errors.Is(err, ErrBatchNotFound) {
+				continue
+			}
+			return released, err
+		}
+		log.Printf("agent batch %d released after execution %d ended (%s)", ob.Batch.ID, ob.ExecutionID, code)
+		released++
+	}
+	return released, nil
+}

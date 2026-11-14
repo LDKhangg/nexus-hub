@@ -20,14 +20,20 @@ RETURNING id;
 -- never while another job of the same thread holds a live lease. The row
 -- lock alone does not serialize a thread: Claim also takes the thread's
 -- advisory lock and re-checks with CheckAgentThreadLease.
-SELECT j.id, j.thread_id FROM public.agent_jobs j
+-- Jobs of a cut-over workspace and workflow-owned jobs are never
+-- candidates; the claim re-checks the workspace's runtime mode under its
+-- KEY SHARE lock (this filter only skips them cheaply).
+SELECT j.id, j.thread_id, j.workspace_id FROM public.agent_jobs j
 WHERE ((j.status = 'pending' AND j.run_at <= sqlc.arg(at_time)::timestamptz)
     OR (j.status = 'processing' AND j.locked_until <= sqlc.arg(at_time)::timestamptz))
+  AND j.workflow_execution_id IS NULL
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_runtime_modes m
+                  WHERE m.workspace_id = j.workspace_id AND m.mode = 'workflow')
   AND NOT EXISTS (SELECT 1 FROM public.agent_jobs p
                   WHERE p.thread_id = j.thread_id AND p.id <> j.id AND p.status = 'processing'
                     AND p.locked_until > sqlc.arg(at_time)::timestamptz)
 ORDER BY (j.status = 'processing') DESC, j.run_at, j.id
-FOR UPDATE SKIP LOCKED LIMIT 1;
+FOR UPDATE OF j SKIP LOCKED LIMIT 1;
 
 -- name: TryLockAgentThread :one
 -- Serializes claims of one thread within the transaction.
@@ -131,14 +137,17 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id)
 
 -- name: SelectDueAgentBatch :one
 -- The oldest due pending batch of the workspace whose thread has no
--- processing job at all (legacy or workflow-owned).
-SELECT j.id, j.thread_id, j.source_integration_id FROM public.agent_jobs j
-WHERE j.workspace_id = sqlc.arg(workspace_id)::uuid AND j.status = 'pending'
-  AND j.run_at <= sqlc.arg(at_time)::timestamptz
+-- processing job at all (legacy or workflow-owned), or, first, a job a
+-- legacy claimer left processing (imported by the cutover) whose lease or
+-- retry wait has ended: an unexpired legacy lease stays unavailable.
+SELECT j.id, j.thread_id, j.source_integration_id, j.status FROM public.agent_jobs j
+WHERE j.workspace_id = sqlc.arg(workspace_id)::uuid AND j.workflow_execution_id IS NULL
+  AND ((j.status = 'pending' AND j.run_at <= sqlc.arg(at_time)::timestamptz)
+    OR (j.status = 'processing' AND j.locked_until <= sqlc.arg(at_time)::timestamptz))
   AND NOT EXISTS (SELECT 1 FROM public.agent_jobs p
                   WHERE p.workspace_id = j.workspace_id AND p.thread_id = j.thread_id
                     AND p.id <> j.id AND p.status = 'processing')
-ORDER BY j.run_at, j.id
+ORDER BY (j.status = 'processing') DESC, j.run_at, j.id
 FOR UPDATE SKIP LOCKED LIMIT 1;
 
 -- name: AgentThreadBusy :one
@@ -149,11 +158,13 @@ SELECT EXISTS (SELECT 1 FROM public.agent_jobs p
                  AND p.id <> sqlc.arg(id) AND p.status = 'processing')::bool AS busy;
 
 -- name: AdoptAgentBatch :one
--- Hands a due pending batch to its workflow execution.
+-- Hands a due pending batch, or a legacy-processing job whose lease ended,
+-- to its workflow execution. The legacy claim token is cleared, so a late
+-- legacy claimant's writes fail.
 UPDATE public.agent_jobs SET status = 'processing', workflow_execution_id = sqlc.arg(execution_id),
   claim_token = NULL, locked_until = 'infinity'::timestamptz, workflow_attempt_deadline = NULL, updated_at = now()
-WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND status = 'pending'
-  AND workflow_execution_id IS NULL
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND workflow_execution_id IS NULL
+  AND (status = 'pending' OR (status = 'processing' AND locked_until <= sqlc.arg(at_time)::timestamptz))
 RETURNING *;
 
 -- name: GetAgentBatch :one

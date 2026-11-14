@@ -227,9 +227,13 @@ func startDeadline(req workflow.StartRequest, at time.Time) *time.Time {
 }
 
 // terminateExecutionWork ends the execution's unfinished steps and active job
-// when it becomes terminal outside the job-result path, so no live queue row
-// remains and a stale worker's claim token no longer matches.
-func terminateExecutionWork(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, executionID int64, reason workflow.ReasonCode, at time.Time) error {
+// when it becomes terminal (to) outside the job-result path, so no live queue
+// row remains and a stale worker's claim token no longer matches. The legacy
+// behavior run projection is ended in the same transaction.
+func terminateExecutionWork(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, executionID int64, to workflow.State, reason workflow.ReasonCode, at time.Time) error {
+	if err := repairLegacyProjectionTx(ctx, q, ws, executionID, to, reason); err != nil {
+		return err
+	}
 	if _, err := q.CancelExecutionSteps(ctx, sqlc.CancelExecutionStepsParams{WorkspaceID: ws, ExecutionID: executionID}); err != nil {
 		return err
 	}
@@ -281,7 +285,7 @@ func (s *WorkflowStore) TransitionExecution(ctx context.Context, req workflow.Tr
 		if reason == "" {
 			reason = workflow.ReasonCode(strings.ToLower(string(req.To)))
 		}
-		if err := terminateExecutionWork(ctx, q, ws, row.ID, reason, time.Now()); err != nil {
+		if err := terminateExecutionWork(ctx, q, ws, row.ID, req.To, reason, time.Now()); err != nil {
 			return workflow.Execution{}, err
 		}
 	}
@@ -328,7 +332,7 @@ func (s *WorkflowStore) CancelExecution(ctx context.Context, command workflow.Co
 	if err != nil {
 		return workflow.Execution{}, workflow.ErrConflict
 	}
-	if err := terminateExecutionWork(ctx, q, ws, command.ExecutionID, workflow.ReasonCancelled, time.Now()); err != nil {
+	if err := terminateExecutionWork(ctx, q, ws, command.ExecutionID, workflow.StateCancelled, workflow.ReasonCancelled, time.Now()); err != nil {
 		return workflow.Execution{}, err
 	}
 	if err := insertWorkflowEvent(ctx, q, ws, row.ID, workflow.EventTransition, state, workflow.StateCancelled, "", 0,
@@ -403,6 +407,12 @@ func (s *WorkflowStore) RetryExecution(ctx context.Context, command workflow.Com
 		return workflow.Execution{}, err
 	}
 	if err := q.CopyRetryExecutionSteps(ctx, sqlc.CopyRetryExecutionStepsParams{WorkspaceID: ws, ParentExecutionID: parent.ID, ChildExecutionID: child.ID}); err != nil {
+		return workflow.Execution{}, err
+	}
+	// A behavior run's failed projection reopens for the child (pending,
+	// fresh run-attempt budget; usage, items and receipts kept), so the
+	// child continues the run instead of failing on its ended projection.
+	if _, err := q.ReopenBehaviorRunForRetry(ctx, sqlc.ReopenBehaviorRunForRetryParams{WorkspaceID: ws, ExecutionID: child.ID}); err != nil {
 		return workflow.Execution{}, err
 	}
 	if err := insertWorkflowEvent(ctx, q, ws, child.ID, workflow.EventRetryChild, "", workflow.StateReceived, "", 0,

@@ -84,9 +84,11 @@ func (q *Queries) AddDurableBehaviorRunUsage(ctx context.Context, arg AddDurable
 const beginDurableBehaviorRunAttempt = `-- name: BeginDurableBehaviorRunAttempt :one
 UPDATE public.behavior_runs SET status = 'running', attempts = attempts + 1,
   workflow_attempt_deadline = $1::timestamptz,
+  claim_token = NULL, locked_until = NULL,
   started_at = COALESCE(started_at, now()), updated_at = now()
 WHERE workspace_id = $2 AND id = $3
-  AND claim_token IS NULL AND status IN ('pending','running')
+  AND (claim_token IS NULL OR locked_until <= $4::timestamptz)
+  AND status IN ('pending','running')
 RETURNING id, workspace_id, behavior_id, behavior_version_id, version, trigger_kind, trigger, subject, revision, status, correlation_id, attempts, run_at, locked_until, claim_token, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, steps, error_code, snapshot, undone_at, started_at, finished_at, created_at, updated_at, context_snapshot, run_actions, workflow_attempt_deadline
 `
 
@@ -94,10 +96,19 @@ type BeginDurableBehaviorRunAttemptParams struct {
 	Deadline    pgtype.Timestamptz
 	WorkspaceID pgtype.UUID
 	ID          int64
+	AtTime      pgtype.Timestamptz
 }
 
+// A run imported by the cutover may still hold the legacy claim it had;
+// once that lease has ended the durable attempt takes the run over (like a
+// legacy reclaim) and clears the claim, so the old claimant's writes fail.
 func (q *Queries) BeginDurableBehaviorRunAttempt(ctx context.Context, arg BeginDurableBehaviorRunAttemptParams) (BehaviorRun, error) {
-	row := q.db.QueryRow(ctx, beginDurableBehaviorRunAttempt, arg.Deadline, arg.WorkspaceID, arg.ID)
+	row := q.db.QueryRow(ctx, beginDurableBehaviorRunAttempt,
+		arg.Deadline,
+		arg.WorkspaceID,
+		arg.ID,
+		arg.AtTime,
+	)
 	var i BehaviorRun
 	err := row.Scan(
 		&i.ID,
@@ -641,9 +652,13 @@ func (q *Queries) ExpireApprovals(ctx context.Context, arg ExpireApprovalsParams
 }
 
 const failExhaustedBehaviorRuns = `-- name: FailExhaustedBehaviorRuns :execrows
-UPDATE public.behavior_runs SET status = 'failed', error_code = 'attempts_exhausted', claim_token = NULL,
+UPDATE public.behavior_runs r SET status = 'failed', error_code = 'attempts_exhausted', claim_token = NULL,
   locked_until = NULL, finished_at = now(), updated_at = now()
-WHERE status = 'running' AND locked_until <= $1::timestamptz AND attempts >= $2::int
+WHERE r.status = 'running' AND r.locked_until <= $1::timestamptz AND r.attempts >= $2::int
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_runtime_modes m
+                  WHERE m.workspace_id = r.workspace_id AND m.mode = 'workflow')
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_executions e
+                  WHERE e.workspace_id = r.workspace_id AND e.legacy_run_id = r.id)
 `
 
 type FailExhaustedBehaviorRunsParams struct {
@@ -651,7 +666,9 @@ type FailExhaustedBehaviorRunsParams struct {
 	MaxAttempts int32
 }
 
-// Runs whose lease ended after the last allowed attempt.
+// Runs whose lease ended after the last allowed attempt. A cut-over
+// workspace's runs and a run owned by a workflow execution belong to the
+// durable queue, never to the legacy claimer.
 func (q *Queries) FailExhaustedBehaviorRuns(ctx context.Context, arg FailExhaustedBehaviorRunsParams) (int64, error) {
 	result, err := q.db.Exec(ctx, failExhaustedBehaviorRuns, arg.AtTime, arg.MaxAttempts)
 	if err != nil {
@@ -2282,12 +2299,16 @@ func (q *Queries) SearchReusableDecisions(ctx context.Context, arg SearchReusabl
 }
 
 const selectBehaviorRunClaimCandidate = `-- name: SelectBehaviorRunClaimCandidate :one
-SELECT id FROM public.behavior_runs
-WHERE ((status = 'pending' AND run_at <= $1::timestamptz)
-    OR (status = 'running' AND locked_until <= $1::timestamptz))
-  AND attempts < $2::int
-ORDER BY (status = 'running') DESC, run_at, id
-FOR UPDATE SKIP LOCKED LIMIT 1
+SELECT r.id, r.workspace_id FROM public.behavior_runs r
+WHERE ((r.status = 'pending' AND r.run_at <= $1::timestamptz)
+    OR (r.status = 'running' AND r.locked_until <= $1::timestamptz))
+  AND r.attempts < $2::int
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_runtime_modes m
+                  WHERE m.workspace_id = r.workspace_id AND m.mode = 'workflow')
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_executions e
+                  WHERE e.workspace_id = r.workspace_id AND e.legacy_run_id = r.id)
+ORDER BY (r.status = 'running') DESC, r.run_at, r.id
+FOR UPDATE OF r SKIP LOCKED LIMIT 1
 `
 
 type SelectBehaviorRunClaimCandidateParams struct {
@@ -2295,12 +2316,20 @@ type SelectBehaviorRunClaimCandidateParams struct {
 	MaxAttempts int32
 }
 
-// A due pending run, or a running run whose lease ended.
-func (q *Queries) SelectBehaviorRunClaimCandidate(ctx context.Context, arg SelectBehaviorRunClaimCandidateParams) (int64, error) {
+type SelectBehaviorRunClaimCandidateRow struct {
+	ID          int64
+	WorkspaceID pgtype.UUID
+}
+
+// A due pending run, or a running run whose lease ended. Runs of a
+// cut-over workspace and runs owned by a workflow execution are never
+// candidates; the claim re-checks the workspace's runtime mode under its
+// KEY SHARE lock (this filter only skips them cheaply).
+func (q *Queries) SelectBehaviorRunClaimCandidate(ctx context.Context, arg SelectBehaviorRunClaimCandidateParams) (SelectBehaviorRunClaimCandidateRow, error) {
 	row := q.db.QueryRow(ctx, selectBehaviorRunClaimCandidate, arg.AtTime, arg.MaxAttempts)
-	var id int64
-	err := row.Scan(&id)
-	return id, err
+	var i SelectBehaviorRunClaimCandidateRow
+	err := row.Scan(&i.ID, &i.WorkspaceID)
+	return i, err
 }
 
 const setApprovalMessage = `-- name: SetApprovalMessage :execrows

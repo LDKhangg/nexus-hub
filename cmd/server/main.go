@@ -130,7 +130,16 @@ func run() error {
 		return errors.New("workspace repository startup failed")
 	}
 	chatPoller := buildChatPoller(s, behaviors, workspaces, integrations, ag.known, resolver, messenger)
-	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller}
+	// The durable workflow runtime schedules cut-over workspaces; the legacy
+	// behavior run and agent job claimers keep running for workspaces still
+	// in legacy runtime mode (the runtime-mode fence keeps them apart). The
+	// outbound, digest, chat-poll and Telegram assistant workers are
+	// unchanged.
+	workflows, err := buildWorkflowRuntime(pool, s, ag, behaviors, runs, engine)
+	if err != nil {
+		return err
+	}
+	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows}
 	// Telegram updates arrive by webhook, or by long polling when the hub
 	// has no public URL (telegram_mode, see settings.TelegramPolling). Both
 	// paths end in the same handler.

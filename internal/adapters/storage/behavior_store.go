@@ -523,14 +523,21 @@ func (s *BehaviorStore) ClaimRun(ctx context.Context, now time.Time, lease time.
 	if _, err := q.FailExhaustedBehaviorRuns(ctx, sqlc.FailExhaustedBehaviorRunsParams{AtTime: at, MaxAttempts: int32(maxAttempts)}); err != nil {
 		return nil, err
 	}
-	id, err := q.SelectBehaviorRunClaimCandidate(ctx, sqlc.SelectBehaviorRunClaimCandidateParams{AtTime: at, MaxAttempts: int32(maxAttempts)})
+	cand, err := q.SelectBehaviorRunClaimCandidate(ctx, sqlc.SelectBehaviorRunClaimCandidateParams{AtTime: at, MaxAttempts: int32(maxAttempts)})
 	if isNoRows(err) {
 		return nil, tx.Commit(ctx)
 	}
 	if err != nil {
 		return nil, err
 	}
-	row, err := q.ClaimBehaviorRunByID(ctx, sqlc.ClaimBehaviorRunByIDParams{Token: token, AtTime: at, LeaseSecs: lease.Seconds(), ID: id})
+	// The runtime-mode fence: a cut-over workspace (or one whose cutover is
+	// running) belongs to the durable workflow queue.
+	if allowed, err := legacyClaimAllowed(ctx, q, cand.WorkspaceID); err != nil {
+		return nil, err
+	} else if !allowed {
+		return nil, tx.Commit(ctx)
+	}
+	row, err := q.ClaimBehaviorRunByID(ctx, sqlc.ClaimBehaviorRunByIDParams{Token: token, AtTime: at, LeaseSecs: lease.Seconds(), ID: cand.ID})
 	if err != nil {
 		return nil, err
 	}

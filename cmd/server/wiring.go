@@ -32,6 +32,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/secrets"
 	"github.com/LDKhangg/nexus-hub/internal/settings"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
+	"github.com/LDKhangg/nexus-hub/internal/workflow"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -42,6 +43,7 @@ type agentServices struct {
 	reg          *tools.Registry
 	limits       tools.Limits
 	people       *storage.PeopleRepository
+	store        *storage.AgentStore
 	// provider returns the workspace's default LLM provider.
 	provider func(ctx context.Context, ws string) (domain.LLMProvider, error)
 }
@@ -170,7 +172,7 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
 	})
 	worker := relay.NewActionWorker(actions, sender, relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
-	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, people: directory}, nil
+	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, people: directory, store: store}, nil
 }
 
 // buildBehaviorEngine wires the behavior run executor and the action
@@ -430,6 +432,140 @@ func (c telegramPollTargets) TelegramPollTargets(ctx context.Context) ([]telegra
 		}
 		if len(wss) < chatPollPage {
 			return out, nil
+		}
+	}
+}
+
+// --- durable workflow runtime ---
+
+// Durable workflow runtime tuning: how often the reconciler runs, and how
+// many runs, batches and orphan batches one starter pass handles per
+// cut-over workspace.
+const (
+	workflowReconcileInterval = 30 * time.Second
+	workflowStartBatch        = 20
+)
+
+// workflowRuntime is the durable workflow runtime of the server: the
+// generic job worker, the startup and periodic reconciler, and the starter
+// of cut-over workspaces (behavior runs created by the existing trigger
+// paths, due agent batches through StartDueBatches, and the release of
+// agent batches whose execution failed or was cancelled). The starters
+// create nothing for a workspace still in legacy runtime mode, whose work
+// the legacy claimers keep taking.
+type workflowRuntime struct {
+	store      *storage.WorkflowStore
+	agents     *storage.AgentWorkflowStore
+	worker     *workflow.Worker
+	reconciler *workflow.Reconciler
+	orch       *agent.Orchestrator
+	pipeline   agent.PipelineSettings
+	interval   time.Duration
+}
+
+// buildWorkflowRuntime registers the behavior and agent step executors
+// (behavior approvals become durable waits) and builds the runtime.
+func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServices, behaviors *storage.BehaviorStore, runs *behavior.RunWorker, engine *behavior.Engine) (*workflowRuntime, error) {
+	store, err := storage.NewWorkflowStore(pool)
+	if err != nil {
+		return nil, errors.New("workflow store startup failed")
+	}
+	agents, err := storage.NewAgentWorkflowStore(ag.store, store)
+	if err != nil {
+		return nil, errors.New("agent workflow store startup failed")
+	}
+	reg := workflow.NewRegistry()
+	behaviorSteps, err := behavior.NewWorkflowSteps(runs, behaviors, store)
+	if err != nil {
+		return nil, errors.New("behavior workflow steps startup failed")
+	}
+	if err := behaviorSteps.EnableApprovalWaits(behaviors, engine); err != nil {
+		return nil, errors.New("behavior approval waits startup failed")
+	}
+	if err := behaviorSteps.Register(reg); err != nil {
+		return nil, errors.New("behavior workflow steps registration failed")
+	}
+	agentSteps, err := agent.NewWorkflowSteps(ag.orchestrator, agents, store)
+	if err != nil {
+		return nil, errors.New("agent workflow steps startup failed")
+	}
+	if err := agentSteps.Register(reg); err != nil {
+		return nil, errors.New("agent workflow steps registration failed")
+	}
+	// The behavior run executors plus one for the comment pipeline, which
+	// the legacy agent worker ran on its own.
+	worker := workflow.NewWorker(store, reg, nil, workflow.WorkerSettings{
+		Workers: int(s.BehaviorWorkers) + 1, PollInterval: s.BehaviorPollInterval,
+	})
+	return &workflowRuntime{
+		store: store, agents: agents, worker: worker, reconciler: workflow.NewReconciler(store), orch: ag.orchestrator,
+		pipeline: agent.PipelineSettings{
+			Limits: ag.limits, AllowDangerous: s.AllowDangerous,
+			MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
+			DebounceWindow: s.DebounceWindow, DebounceMaxWait: s.DebounceMaxWait,
+		},
+		interval: s.BehaviorPollInterval,
+	}, nil
+}
+
+// Run reconciles once, then runs the worker, the starter and the periodic
+// reconciler until ctx ends. On shutdown it stops claiming and starting;
+// a step cut off mid-attempt writes nothing more, and its lease simply
+// expires for the next reconciliation (no lease is released early).
+func (r *workflowRuntime) Run(ctx context.Context) error {
+	r.reconcile(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = r.worker.Run(ctx)
+	}()
+	start := time.NewTicker(r.interval)
+	defer start.Stop()
+	reconcile := time.NewTicker(workflowReconcileInterval)
+	defer reconcile.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			<-done
+			return nil
+		case <-start.C:
+			r.startCutOver(ctx)
+		case <-reconcile.C:
+			r.reconcile(ctx)
+		}
+	}
+}
+
+// reconcile repairs expired leases, missing wakeups and lost signals. Only
+// a category is logged, never record contents.
+func (r *workflowRuntime) reconcile(ctx context.Context) {
+	if err := r.reconciler.Reconcile(ctx, time.Now()); err != nil && ctx.Err() == nil {
+		log.Print("workflow reconciler: some records were not repaired; retried on the next pass")
+	}
+}
+
+// startCutOver runs one starter pass over the cut-over workspaces.
+func (r *workflowRuntime) startCutOver(ctx context.Context) {
+	workspaces, err := r.store.WorkflowWorkspaces(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Print("workflow starter: cut-over workspaces not listed")
+		}
+		return
+	}
+	for _, ws := range workspaces {
+		if ctx.Err() != nil {
+			return
+		}
+		now := time.Now()
+		if _, err := r.store.StartPendingBehaviorRuns(ctx, ws, now, workflowStartBatch); err != nil && ctx.Err() == nil {
+			log.Printf("workflow starter: workspace %s behavior runs not started", ws)
+		}
+		if _, err := r.agents.StartDueBatches(ctx, ws, now, r.pipeline, workflowStartBatch); err != nil && ctx.Err() == nil {
+			log.Printf("workflow starter: workspace %s agent batches not started", ws)
+		}
+		if _, err := r.orch.ReleaseOrphanBatches(ctx, r.agents, ws, workflowStartBatch); err != nil && ctx.Err() == nil {
+			log.Printf("workflow starter: workspace %s orphan agent batches not released", ws)
 		}
 	}
 }

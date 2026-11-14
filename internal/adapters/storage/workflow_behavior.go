@@ -79,7 +79,11 @@ func (s *BehaviorStore) withDurableRun(ctx context.Context, f behavior.RunFence,
 	if err != nil {
 		return err
 	}
-	if run.ClaimToken.Valid || !(run.Status == string(behavior.RunRunning) || !running && run.Status == string(behavior.RunPending)) {
+	// A legacy claim refuses durable writes, except that a new attempt
+	// (running=false) takes over a run imported by the cutover once its
+	// legacy lease has ended, like a legacy reclaim.
+	legacyClaimLive := run.ClaimToken.Valid && (running || !run.LockedUntil.Valid || run.LockedUntil.Time.After(f.At))
+	if legacyClaimLive || !(run.Status == string(behavior.RunRunning) || !running && run.Status == string(behavior.RunPending)) {
 		return behavior.ErrConflict
 	}
 	if err := fn(&durableRunTx{q: q, ws: ws, job: job, run: run, req: req}); err != nil {
@@ -99,7 +103,8 @@ func durableRows(n int64, err error) error {
 }
 
 // BeginDurableRunAttempt starts a new attempt of the run: running, one more
-// attempt, and the attempt's deadline.
+// attempt, and the attempt's deadline. An ended legacy claim (a run the
+// cutover imported while a legacy claimer held it) is cleared.
 func (s *BehaviorStore) BeginDurableRunAttempt(ctx context.Context, f behavior.RunFence, runID int64, deadline time.Time) (behavior.Run, error) {
 	if deadline.IsZero() {
 		return behavior.Run{}, invalid("deadline")
@@ -107,7 +112,7 @@ func (s *BehaviorStore) BeginDurableRunAttempt(ctx context.Context, f behavior.R
 	var out behavior.Run
 	err := s.withDurableRun(ctx, f, runID, false, func(t *durableRunTx) error {
 		row, err := t.q.BeginDurableBehaviorRunAttempt(ctx, sqlc.BeginDurableBehaviorRunAttemptParams{
-			Deadline: ts(deadline), WorkspaceID: t.ws, ID: runID,
+			Deadline: ts(deadline), WorkspaceID: t.ws, ID: runID, AtTime: ts(f.At),
 		})
 		if isNoRows(err) {
 			return behavior.ErrConflict

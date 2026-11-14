@@ -565,6 +565,15 @@ type WorkflowExecution struct {
 	UpdatedAt         pgtype.Timestamptz
 }
 
+// Runtime-mode fence per workspace: legacy claimers or the durable workflow queue schedule its agent and behavior work, never both.
+type WorkflowRuntimeMode struct {
+	WorkspaceID pgtype.UUID
+	Mode        string
+	CutoverAt   pgtype.Timestamptz
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
 // One authorized decision per wait; consumed_at is set when the fenced continuation applied it.
 type WorkflowSignal struct {
 	ID            int64

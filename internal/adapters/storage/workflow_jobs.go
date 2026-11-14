@@ -458,6 +458,11 @@ func (s *WorkflowStore) FailJob(ctx context.Context, req workflow.JobResultReque
 	if err := closeExecutionWaits(ctx, j.q, j.ws, j.job.ExecutionID, req.At); err != nil {
 		return err
 	}
+	// A behavior run the step left running (timeout, deadline, exhausted
+	// retries or uncertainty) ends with the execution's reason.
+	if err := repairLegacyProjectionTx(ctx, j.q, j.ws, j.job.ExecutionID, workflow.StateFailed, req.Reason); err != nil {
+		return err
+	}
 	if _, err := transitionWorkflowJobExecution(ctx, j, workflow.StateFailed, req.Reason); err != nil {
 		return err
 	}
@@ -528,7 +533,7 @@ func failReconcileExecution(ctx context.Context, q *sqlc.Queries, execution sqlc
 			return err
 		}
 	}
-	if err := terminateExecutionWork(ctx, q, ws, execution.ID, reason, at); err != nil {
+	if err := terminateExecutionWork(ctx, q, ws, execution.ID, workflow.StateFailed, reason, at); err != nil {
 		return err
 	}
 	_, err := reconcileTransition(ctx, q, ws, execution, workflow.StateFailed, stepKey, attempt, reason)

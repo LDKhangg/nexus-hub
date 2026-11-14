@@ -56,7 +56,8 @@ func (s *AgentStore) SetKnownTools(known map[string]tenant.Tier) {
 // row lock alone cannot stop two workers from claiming two jobs of one
 // thread, so Claim also takes the thread's advisory lock and re-checks for a
 // live lease in a fresh snapshot. If the thread is busy, it returns nil and
-// the job is picked up on a later poll.
+// the job is picked up on a later poll. A workspace cut over to the durable
+// workflow queue is never claimed (runtime-mode fence).
 func (s *AgentStore) Claim(ctx context.Context, now time.Time) (*agent.AgentJob, error) {
 	tok, err := uuid.NewRandom()
 	if err != nil {
@@ -83,6 +84,11 @@ func (s *AgentStore) Claim(ctx context.Context, now time.Time) (*agent.AgentJob,
 	}
 	if !locked {
 		return nil, nil
+	}
+	// The runtime-mode fence: a cut-over workspace (or one whose cutover is
+	// running) belongs to the durable workflow queue.
+	if allowed, err := legacyClaimAllowed(ctx, q, cand.WorkspaceID); err != nil || !allowed {
+		return nil, err
 	}
 	busy, err := q.CheckAgentThreadLease(ctx, sqlc.CheckAgentThreadLeaseParams{ThreadID: cand.ThreadID, ID: cand.ID, AtTime: at})
 	if err != nil {

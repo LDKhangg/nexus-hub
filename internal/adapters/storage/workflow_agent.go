@@ -28,8 +28,8 @@ import (
 // workspace, workflow-owned and processing. A refused fence is
 // agent.ErrWorkflowFence; nothing is written.
 //
-// Nothing here is started by the server yet: StartDueBatches is the
-// enqueue path the cutover (P7) switches on behind its runtime fence.
+// StartDueBatches is the enqueue path of a cut-over workspace: it adopts
+// nothing while the workspace's runtime-mode fence is legacy.
 
 // AgentWorkflowStore stores workflow-owned agent batches.
 type AgentWorkflowStore struct {
@@ -69,8 +69,11 @@ func agentBatchJob(b agent.AgentBatch) agent.AgentJob {
 
 // --- adoption ---
 
-// StartDueBatches hands up to limit due pending batches of the workspace to
-// new executions of the internal pipeline and returns how many it started.
+// StartDueBatches hands up to limit due pending batches of a cut-over
+// workspace (and jobs a legacy claimer left processing, once their lease or
+// retry wait ended) to new executions of the internal pipeline and returns
+// how many it started. In a workspace whose runtime mode is legacy, or
+// while its cutover runs, it starts nothing.
 // Debounce and max-wait stay those of the pending job (run_at, set at
 // ingest); the oldest due batch goes first; a thread with any processing
 // job (legacy or workflow-owned) is skipped, under the same advisory
@@ -103,6 +106,11 @@ func (s *AgentWorkflowStore) startOne(ctx context.Context, ws pgtype.UUID, now t
 	}
 	defer tx.Rollback(ctx)
 	q := sqlc.New(tx)
+	// The runtime-mode fence: only a cut-over workspace's batches are
+	// adopted, never while its cutover runs.
+	if allowed, err := workflowStartAllowed(ctx, q, ws); err != nil || !allowed {
+		return false, err
+	}
 	cand, err := q.SelectDueAgentBatch(ctx, sqlc.SelectDueAgentBatchParams{WorkspaceID: ws, AtTime: ts(now)})
 	if isNoRows(err) {
 		return false, nil
@@ -144,7 +152,7 @@ func (s *AgentWorkflowStore) startOne(ctx context.Context, ws pgtype.UUID, now t
 	if execution.References.LegacyJobID != cand.ID || execution.State != workflow.StateQueued {
 		return false, workflow.ErrConflict
 	}
-	if _, err := q.AdoptAgentBatch(ctx, sqlc.AdoptAgentBatchParams{ExecutionID: workflowInt8(execution.ID), WorkspaceID: ws, ID: cand.ID}); err != nil {
+	if _, err := q.AdoptAgentBatch(ctx, sqlc.AdoptAgentBatchParams{ExecutionID: workflowInt8(execution.ID), WorkspaceID: ws, ID: cand.ID, AtTime: ts(now)}); err != nil {
 		if isNoRows(err) {
 			return false, workflow.ErrConflict
 		}

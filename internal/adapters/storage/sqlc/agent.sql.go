@@ -79,8 +79,8 @@ func (q *Queries) AddDurableAgentUsage(ctx context.Context, arg AddDurableAgentU
 const adoptAgentBatch = `-- name: AdoptAgentBatch :one
 UPDATE public.agent_jobs SET status = 'processing', workflow_execution_id = $1,
   claim_token = NULL, locked_until = 'infinity'::timestamptz, workflow_attempt_deadline = NULL, updated_at = now()
-WHERE workspace_id = $2 AND id = $3 AND status = 'pending'
-  AND workflow_execution_id IS NULL
+WHERE workspace_id = $2 AND id = $3 AND workflow_execution_id IS NULL
+  AND (status = 'pending' OR (status = 'processing' AND locked_until <= $4::timestamptz))
 RETURNING id, workspace_id, source_integration_id, thread_id, status, attempts, run_at, first_enqueued_at, locked_until, claim_token, through_message_id, last_error_code, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at, updated_at, workflow_execution_id, workflow_attempt_deadline
 `
 
@@ -88,11 +88,19 @@ type AdoptAgentBatchParams struct {
 	ExecutionID pgtype.Int8
 	WorkspaceID pgtype.UUID
 	ID          int64
+	AtTime      pgtype.Timestamptz
 }
 
-// Hands a due pending batch to its workflow execution.
+// Hands a due pending batch, or a legacy-processing job whose lease ended,
+// to its workflow execution. The legacy claim token is cleared, so a late
+// legacy claimant's writes fail.
 func (q *Queries) AdoptAgentBatch(ctx context.Context, arg AdoptAgentBatchParams) (AgentJob, error) {
-	row := q.db.QueryRow(ctx, adoptAgentBatch, arg.ExecutionID, arg.WorkspaceID, arg.ID)
+	row := q.db.QueryRow(ctx, adoptAgentBatch,
+		arg.ExecutionID,
+		arg.WorkspaceID,
+		arg.ID,
+		arg.AtTime,
+	)
 	var i AgentJob
 	err := row.Scan(
 		&i.ID,
@@ -947,41 +955,49 @@ func (q *Queries) SaveThreadSummary(ctx context.Context, arg SaveThreadSummaryPa
 }
 
 const selectAgentClaimCandidate = `-- name: SelectAgentClaimCandidate :one
-SELECT j.id, j.thread_id FROM public.agent_jobs j
+SELECT j.id, j.thread_id, j.workspace_id FROM public.agent_jobs j
 WHERE ((j.status = 'pending' AND j.run_at <= $1::timestamptz)
     OR (j.status = 'processing' AND j.locked_until <= $1::timestamptz))
+  AND j.workflow_execution_id IS NULL
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_runtime_modes m
+                  WHERE m.workspace_id = j.workspace_id AND m.mode = 'workflow')
   AND NOT EXISTS (SELECT 1 FROM public.agent_jobs p
                   WHERE p.thread_id = j.thread_id AND p.id <> j.id AND p.status = 'processing'
                     AND p.locked_until > $1::timestamptz)
 ORDER BY (j.status = 'processing') DESC, j.run_at, j.id
-FOR UPDATE SKIP LOCKED LIMIT 1
+FOR UPDATE OF j SKIP LOCKED LIMIT 1
 `
 
 type SelectAgentClaimCandidateRow struct {
-	ID       int64
-	ThreadID pgtype.UUID
+	ID          int64
+	ThreadID    pgtype.UUID
+	WorkspaceID pgtype.UUID
 }
 
 // A due pending job, or a processing job whose lease (or retry wait) ended;
 // never while another job of the same thread holds a live lease. The row
 // lock alone does not serialize a thread: Claim also takes the thread's
 // advisory lock and re-checks with CheckAgentThreadLease.
+// Jobs of a cut-over workspace and workflow-owned jobs are never
+// candidates; the claim re-checks the workspace's runtime mode under its
+// KEY SHARE lock (this filter only skips them cheaply).
 func (q *Queries) SelectAgentClaimCandidate(ctx context.Context, atTime pgtype.Timestamptz) (SelectAgentClaimCandidateRow, error) {
 	row := q.db.QueryRow(ctx, selectAgentClaimCandidate, atTime)
 	var i SelectAgentClaimCandidateRow
-	err := row.Scan(&i.ID, &i.ThreadID)
+	err := row.Scan(&i.ID, &i.ThreadID, &i.WorkspaceID)
 	return i, err
 }
 
 const selectDueAgentBatch = `-- name: SelectDueAgentBatch :one
 
-SELECT j.id, j.thread_id, j.source_integration_id FROM public.agent_jobs j
-WHERE j.workspace_id = $1::uuid AND j.status = 'pending'
-  AND j.run_at <= $2::timestamptz
+SELECT j.id, j.thread_id, j.source_integration_id, j.status FROM public.agent_jobs j
+WHERE j.workspace_id = $1::uuid AND j.workflow_execution_id IS NULL
+  AND ((j.status = 'pending' AND j.run_at <= $2::timestamptz)
+    OR (j.status = 'processing' AND j.locked_until <= $2::timestamptz))
   AND NOT EXISTS (SELECT 1 FROM public.agent_jobs p
                   WHERE p.workspace_id = j.workspace_id AND p.thread_id = j.thread_id
                     AND p.id <> j.id AND p.status = 'processing')
-ORDER BY j.run_at, j.id
+ORDER BY (j.status = 'processing') DESC, j.run_at, j.id
 FOR UPDATE SKIP LOCKED LIMIT 1
 `
 
@@ -994,6 +1010,7 @@ type SelectDueAgentBatchRow struct {
 	ID                  int64
 	ThreadID            pgtype.UUID
 	SourceIntegrationID pgtype.UUID
+	Status              string
 }
 
 // Durable comment pipeline (workflow-owned agent batches). Every query is
@@ -1001,11 +1018,18 @@ type SelectDueAgentBatchRow struct {
 // claim token and a lease that never ends, so the legacy claimer neither
 // takes it nor claims another job of its thread.
 // The oldest due pending batch of the workspace whose thread has no
-// processing job at all (legacy or workflow-owned).
+// processing job at all (legacy or workflow-owned), or, first, a job a
+// legacy claimer left processing (imported by the cutover) whose lease or
+// retry wait has ended: an unexpired legacy lease stays unavailable.
 func (q *Queries) SelectDueAgentBatch(ctx context.Context, arg SelectDueAgentBatchParams) (SelectDueAgentBatchRow, error) {
 	row := q.db.QueryRow(ctx, selectDueAgentBatch, arg.WorkspaceID, arg.AtTime)
 	var i SelectDueAgentBatchRow
-	err := row.Scan(&i.ID, &i.ThreadID, &i.SourceIntegrationID)
+	err := row.Scan(
+		&i.ID,
+		&i.ThreadID,
+		&i.SourceIntegrationID,
+		&i.Status,
+	)
 	return i, err
 }
 
