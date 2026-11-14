@@ -619,8 +619,12 @@ func jsonLen(cp workflow.Checkpoint) (int, error) {
 func checkpointOfSize(t *testing.T, n int) workflow.Checkpoint {
 	t.Helper()
 	cp := workflow.Checkpoint{References: []workflow.CheckpointReference{{Kind: "tool_run", ReferenceID: ""}}, Reusable: true}
-	raw, _ := workflow.MarshalCheckpoint(cp)
-	pad := n - len(raw)
+	// Measure with plain JSON: the empty placeholder id is itself invalid.
+	baseLen, err := jsonLen(cp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pad := n - baseLen
 	var b strings.Builder
 	for i := 0; b.Len() < pad; i++ {
 		fmt.Fprintf(&b, "%08x", uint32(i)*2654435761)
@@ -652,8 +656,17 @@ func TestExecutionCheckpointBounds(t *testing.T) {
 	}
 
 	exact := checkpointOfSize(t, 64*1024)
+	// At exactly 64 KiB of JSON the jsonb column size may exceed the DB
+	// CHECK: either it is stored, or it is ErrInvalidInput with nothing
+	// written. A raw DB error or a partial write is a defect.
+	exactFP := e.fingerprint(ex.ID)
 	if _, err := e.store.CheckpointJob(e.ctx, checkpointReq(job, at, &exact, workflow.Usage{}, "cp-exact")); err != nil {
-		t.Errorf("TC-16: checkpoint of exactly 64 KiB rejected: %v", err)
+		if !errors.Is(err, workflow.ErrInvalidInput) {
+			t.Errorf("TC-16: exact 64 KiB checkpoint: want stored or ErrInvalidInput, got %v", err)
+		}
+		if e.fingerprint(ex.ID) != exactFP {
+			t.Error("TC-16: rejected exact 64 KiB checkpoint left a partial write")
+		}
 	}
 
 	rejected := func(name string, req workflow.JobCheckpointRequest, want error) {
