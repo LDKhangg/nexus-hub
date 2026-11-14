@@ -276,6 +276,12 @@ func executorLegacyRun(t *testing.T, e *wfEnv, v behavior.Version, doc behavior.
 	return run
 }
 
+func normalizeExecutorReportRun(text string, runID int64) string {
+	id := fmt.Sprint(runID)
+	text = strings.ReplaceAll(text, " · run "+id, " · run #RUN")
+	return strings.ReplaceAll(text, "/trace "+id, "/trace #RUN")
+}
+
 // TC-C04/C05: the registered behavior model/actions executors use the real
 // durable stores and workflow worker, and a second worker pass repeats neither
 // the model request nor the Telegram provider effect.
@@ -438,7 +444,7 @@ func TestBehaviorWorkflowReportsAndUndoUseActualEngine(t *testing.T) {
 			}
 		}},
 		{name: "detailed", prefs: reporting.Prefs{Style: reporting.StyleDetailed, ShowReaction: true, ShowAISummary: true, ShowLinks: true, ShowPRTitles: true, ShowTraceHint: true, Language: "en"}, check: func(t *testing.T, text string) {
-			for _, want := range []string{"Model approved trusted target", "reacted", "Behavior:"} {
+			for _, want := range []string{"Model approved trusted target", "Reaction white_check_mark added", "Behavior:"} {
 				if !strings.Contains(text, want) {
 					t.Fatalf("detailed report %q lacks %q", text, want)
 				}
@@ -453,6 +459,7 @@ func TestBehaviorWorkflowReportsAndUndoUseActualEngine(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newWFEnv(t)
 			doc := executorRunDoc("executor-report-"+tc.name, false)
+			doc.Profile = &behavior.ProfileDoc{Language: "en"}
 			min := .8
 			doc.Verdict = &behavior.VerdictDoc{Labels: []string{"approve_request", "reject"}, MinConfidence: &min}
 			br := executorRun(t, e, doc, executorTrigger())
@@ -489,10 +496,10 @@ func TestBehaviorWorkflowReportsAndUndoUseActualEngine(t *testing.T) {
 				t.Fatalf("legacy worker worked=%v err=%v", worked, err)
 			}
 			legacyTexts := legacyMessenger.texts()
-			workflowText := strings.ReplaceAll(texts[0], fmt.Sprintf("#%d", br.run.ID), "#RUN")
+			workflowText := normalizeExecutorReportRun(texts[0], br.run.ID)
 			legacyText := ""
 			if len(legacyTexts) == 1 {
-				legacyText = strings.ReplaceAll(legacyTexts[0], fmt.Sprintf("#%d", legacyRun.ID), "#RUN")
+				legacyText = normalizeExecutorReportRun(legacyTexts[0], legacyRun.ID)
 			}
 			legacyCalls := legacyCaller.snapshot()
 			if workflowText != legacyText || len(legacyCalls) != len(calls) {
@@ -543,7 +550,9 @@ func TestBehaviorWorkflowCrashReclaimPreservesReceiptsAndUsage(t *testing.T) {
 	}
 	later := e.base.Add(16 * time.Minute)
 	e.reconcile(later)
-	fresh := newBehaviorExecutorFixtureAt(t, e, model, messenger, caller, false, later.Add(time.Second), nil)
+	// Reconciliation applies the definition's first retry delay (five seconds)
+	// to the reclaimed action job, so the replacement worker must be past it.
+	fresh := newBehaviorExecutorFixtureAt(t, e, model, messenger, caller, false, later.Add(6*time.Second), nil)
 	fresh.drain(t)
 	if got := e.execution(workspaceA, br.ex.ID).State; got != workflow.StateCompleted {
 		t.Fatalf("execution state=%s", got)
@@ -594,31 +603,37 @@ func TestBehaviorWorkflowCancellationBetweenActionsBlocksNextWrite(t *testing.T)
 func TestBehaviorWorkflowUnknownSendDryRunAndTrustedTargets(t *testing.T) {
 	t.Run("unknown Telegram and positive control", func(t *testing.T) {
 		for _, unknown := range []bool{true, false} {
-			e := newWFEnv(t)
-			doc := executorRunDoc(fmt.Sprintf("executor-send-%v", unknown), true)
-			br := executorRun(t, e, doc, executorTrigger())
+			name := "positive"
 			if unknown {
-				claimed, id, err := e.behaviors.ClaimMessage(e.ctx, workspaceA, br.run.ID, "run_action:2")
-				if err != nil || !claimed || id != 0 {
-					t.Fatalf("preclaim claimed=%v id=%d err=%v", claimed, id, err)
+				name = "unknown"
+			}
+			t.Run(name, func(t *testing.T) {
+				e := newWFEnv(t)
+				doc := executorRunDoc(fmt.Sprintf("executor-send-%v", unknown), true)
+				br := executorRun(t, e, doc, executorTrigger())
+				if unknown {
+					claimed, id, err := e.behaviors.ClaimMessage(e.ctx, workspaceA, br.run.ID, "run_action:2")
+					if err != nil || !claimed || id != 0 {
+						t.Fatalf("preclaim claimed=%v id=%d err=%v", claimed, id, err)
+					}
 				}
-			}
-			f := newBehaviorExecutorFixture(t, e, `{"items":[]}`, true)
-			f.drain(t)
-			f.drain(t)
-			wantSends := 1
-			wantStatus := behavior.OutcomeOK
-			if unknown {
-				wantSends, wantStatus = 0, behavior.OutcomeUnknown
-			}
-			if f.messenger.count() != wantSends || len(f.caller.snapshot()) != 0 {
-				t.Fatalf("unknown=%v sends=%d writes=%#v", unknown, f.messenger.count(), f.caller.snapshot())
-			}
-			run, err := e.behaviors.GetRun(e.ctx, workspaceA, br.run.ID)
-			out, ok := behavior.DecodeRunActions(run.RunActions).Get(2)
-			if err != nil || !ok || out.Status != wantStatus || (unknown && out.Code != behavior.OutcomeUnknown) {
-				t.Fatalf("unknown=%v outcome=%+v ok=%v err=%v", unknown, out, ok, err)
-			}
+				f := newBehaviorExecutorFixture(t, e, `{"items":[]}`, true)
+				f.drain(t)
+				f.drain(t)
+				wantSends := 1
+				wantStatus := behavior.OutcomeOK
+				if unknown {
+					wantSends, wantStatus = 0, behavior.OutcomeUnknown
+				}
+				if f.messenger.count() != wantSends || len(f.caller.snapshot()) != 0 {
+					t.Fatalf("unknown=%v sends=%d writes=%#v", unknown, f.messenger.count(), f.caller.snapshot())
+				}
+				run, err := e.behaviors.GetRun(e.ctx, workspaceA, br.run.ID)
+				out, ok := behavior.DecodeRunActions(run.RunActions).Get(2)
+				if err != nil || !ok || out.Status != wantStatus || (unknown && out.Code != behavior.OutcomeUnknown) {
+					t.Fatalf("unknown=%v outcome=%+v ok=%v err=%v", unknown, out, ok, err)
+				}
+			})
 		}
 	})
 
