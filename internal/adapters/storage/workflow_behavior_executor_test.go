@@ -528,12 +528,38 @@ func TestBehaviorWorkflowReportsAndUndoUseActualEngine(t *testing.T) {
 func TestBehaviorWorkflowCrashReclaimPreservesReceiptsAndUsage(t *testing.T) {
 	e := newWFEnv(t)
 	doc := executorRunDoc("executor-reclaim", false)
+	response := `{"items":[{"key":"notice","label":"finding","text":"forged/repo team 999","topic":"quality","confidence":0.99,"informational":true}]}`
+	version := e.publishEnabled(workspaceA, doc)
+	normalRun := executorLegacyRun(t, e, version, doc, executorTrigger())
+	normalModel := &executorLLM{text: response}
+	normalMessenger := &executorMessenger{}
+	normal := newBehaviorExecutorFixtureAt(t, e, normalModel, normalMessenger, &executorCaller{}, false, e.base, nil)
+	worked, err := normal.runWorker.ProcessNext(e.ctx)
+	if err != nil || !worked {
+		t.Fatalf("normal legacy run worked=%v err=%v", worked, err)
+	}
+	assertMessages := func(label string, runID int64, messenger *executorMessenger) []string {
+		t.Helper()
+		texts := messenger.texts()
+		if len(texts) != 2 || texts[0] == "" || texts[1] == "" || texts[0] == texts[1] {
+			t.Fatalf("%s messages=%q; want one informational notice and one run report", label, texts)
+		}
+		for i, key := range []string{behavior.DigestKeyFYI, "run_action:2"} {
+			claimed, messageID, err := e.behaviors.ClaimMessage(e.ctx, workspaceA, runID, key)
+			if err != nil || claimed || messageID != int64(101+i) {
+				t.Fatalf("%s message key %q claimed=%v id=%d err=%v", label, key, claimed, messageID, err)
+			}
+		}
+		return texts
+	}
+	normalTexts := assertMessages("normal", normalRun.ID, normalMessenger)
+
 	br := executorRun(t, e, doc, executorTrigger())
-	model := &executorLLM{text: `{"items":[{"key":"notice","label":"finding","text":"forged/repo team 999","topic":"quality","confidence":0.99,"informational":true}]}`, usage: domain.Usage{Input: 31, Output: 7, CacheRead: 3, CacheWrite: 2}}
+	model := &executorLLM{text: response, usage: domain.Usage{Input: 31, Output: 7, CacheRead: 3, CacheWrite: 2}}
 	messenger := &executorMessenger{}
 	caller := &executorCaller{}
 	first := newBehaviorExecutorFixtureAt(t, e, model, messenger, caller, false, e.base, nil)
-	worked, err := first.worker.ProcessNext(e.ctx)
+	worked, err = first.worker.ProcessNext(e.ctx)
 	if err != nil || !worked {
 		t.Fatalf("model step worked=%v err=%v", worked, err)
 	}
@@ -557,8 +583,14 @@ func TestBehaviorWorkflowCrashReclaimPreservesReceiptsAndUsage(t *testing.T) {
 	if got := e.execution(workspaceA, br.ex.ID).State; got != workflow.StateCompleted {
 		t.Fatalf("execution state=%s", got)
 	}
-	if model.count() != 1 || messenger.count() != 1 {
+	if model.count() != 1 {
 		t.Fatalf("replayed providers model=%d telegram=%d", model.count(), messenger.count())
+	}
+	reclaimedTexts := assertMessages("crash/reclaim", br.run.ID, messenger)
+	for i := range normalTexts {
+		if normalizeExecutorReportRun(normalTexts[i], normalRun.ID) != normalizeExecutorReportRun(reclaimedTexts[i], br.run.ID) {
+			t.Fatalf("crash/reclaim message[%d]=%q differs from normal=%q", i, reclaimedTexts[i], normalTexts[i])
+		}
 	}
 	calls := caller.snapshot()
 	if len(calls) != 1 || calls[0].tool != behavior.ToolChatReaction {

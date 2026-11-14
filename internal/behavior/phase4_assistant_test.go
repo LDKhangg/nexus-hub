@@ -211,6 +211,7 @@ type p4Directory struct {
 	contacts  []people.Contact
 	listCalls []string
 	aliases   []string // "<workspace>|<ref>|<name>"
+	forgets   []string // "<workspace>|<ref>"
 	hasAlias  bool
 	aliasErr  error
 }
@@ -243,7 +244,12 @@ func (d *p4Directory) Merge(context.Context, string, string, string) (people.Con
 func (d *p4Directory) Split(context.Context, string, string) (people.Contact, error) {
 	return people.Contact{}, ErrNotAvailable
 }
-func (d *p4Directory) Forget(context.Context, string, string) error { return ErrNotAvailable }
+func (d *p4Directory) Forget(_ context.Context, ws, ref string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.forgets = append(d.forgets, ws+"|"+ref)
+	return ErrNotAvailable
+}
 func (d *p4Directory) HasAlias(context.Context, string, string, string) (bool, error) {
 	return d.hasAlias, nil
 }
@@ -252,6 +258,12 @@ func (d *p4Directory) aliasCalls() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return append([]string(nil), d.aliases...)
+}
+
+func (d *p4Directory) forgetCalls() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.forgets...)
 }
 
 type p4Reports struct {
@@ -760,14 +772,23 @@ func TestPhase4TelegramAssistant(t *testing.T) {
 			t.Fatalf("hostile item escaped scoped trace data: trace=%+v approvals=%d aliases=%v prefs=%d", trace, e.ap.count(), e.dir.aliasCalls(), e.rep.setPrefsCount())
 		}
 		// A forged "Làm" for an approval of another kind cannot be used to
-		// run an assistant write.
-		e = newP4Env()
-		if _, err := e.ap.CreateApproval(context.Background(), p4WS, NewApproval{Kind: ApprovalAssistantAction, Action: "forget", Payload: json.RawMessage(`{"ref":"c-1"}`), Nonce: "forgedNonce_0123456789abcdef", ExpiresAt: e.clock.Add(time.Minute)}); err != nil {
-			t.Fatal(err)
-		}
-		e.press("a:forgedNonce_0123456789abcdef")
-		if len(e.dir.aliasCalls()) != 0 || e.msg.lastToast(t) != msgBadButton {
-			t.Fatalf("unknown assistant action ran: toast=%q", e.msg.lastToast(t))
+		// run an assistant write. A payload without the bound chat is stale;
+		// a chat-bound payload reaches and is refused by the unknown-action
+		// branch.
+		for _, tc := range []struct {
+			name, nonce, payload, toast string
+		}{
+			{name: "missing chat binding", nonce: "forgedNonce_0123456789abcdef", payload: `{"ref":"c-1"}`, toast: msgStale},
+			{name: "unknown bound action", nonce: "forgedBound_0123456789abcdef", payload: `{"ref":"c-1","chat_id":77}`, toast: msgBadButton},
+		} {
+			e = newP4Env()
+			if _, err := e.ap.CreateApproval(context.Background(), p4WS, NewApproval{Kind: ApprovalAssistantAction, Action: "forget", Payload: json.RawMessage(tc.payload), Nonce: tc.nonce, ExpiresAt: e.clock.Add(time.Minute)}); err != nil {
+				t.Fatal(err)
+			}
+			e.press("a:" + tc.nonce)
+			if len(e.dir.aliasCalls()) != 0 || len(e.dir.forgetCalls()) != 0 || e.rep.setPrefsCount() != 0 || len(e.runs.calls) != 0 || len(e.tracer.reqs) != 0 || e.msg.lastToast(t) != tc.toast {
+				t.Fatalf("%s ran assistant action: aliases=%v forgets=%v prefs=%d runs=%v traces=%v toast=%q", tc.name, e.dir.aliasCalls(), e.dir.forgetCalls(), e.rep.setPrefsCount(), e.runs.calls, e.tracer.reqs, e.msg.lastToast(t))
+			}
 		}
 	})
 
