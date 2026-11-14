@@ -24,6 +24,7 @@ func newWorkflowCLIFixture(t *testing.T) *workflowCLIFixture {
 	c := newPhase4CLI(t)
 	c.must("behavior", "import", writeBehaviorFile(t, restoreBehaviorV1), "--workspace-id", c.ws)
 	c.must("behavior", "publish", "restore-cli", "--workspace-id", c.ws)
+	c.must("behavior", "enable", "restore-cli", "--workspace-id", c.ws)
 	store, err := storage.NewWorkflowStore(c.pool)
 	if err != nil {
 		t.Fatal(err)

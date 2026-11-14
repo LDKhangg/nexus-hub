@@ -219,6 +219,24 @@ func executorRunDoc(name string, dryRun bool) behavior.Doc {
 	return doc
 }
 
+func executorApprovalDoc(name string) behavior.Doc {
+	doc := executorDoc(name, true)
+	doc.Schema = 2
+	*doc.Autonomy.RequireCitations = false
+	maxAttempts, stepTimeout, lease, deadline := 1, 60, 90, 3600
+	doc.Workflow = &behavior.WorkflowDoc{
+		Steps: []behavior.WorkflowStepDoc{
+			{Key: "model", Kind: workflow.StepKindModel},
+			{Key: "actions", Kind: workflow.StepKindActions, DependsOn: []string{"model"}},
+		},
+		Retry:                    &behavior.WorkflowRetryDoc{MaxAttempts: &maxAttempts, DelaySeconds: []int{}},
+		StepTimeoutSeconds:       &stepTimeout,
+		LeaseSeconds:             &lease,
+		ExecutionDeadlineSeconds: &deadline,
+	}
+	return doc
+}
+
 func executorTrigger() behavior.TriggerData {
 	return behavior.TriggerData{Type: behavior.TriggerChatMessage, IntegrationID: "fake-clickup", MessageID: "message-7", ChannelID: "channel-3", ChannelType: "dm", ChannelName: "release-room", TeamID: "42", PRs: []behavior.PRRef{{Repo: "trusted/repo", Number: 17}}}
 }
@@ -286,7 +304,7 @@ func TestBehaviorWorkflowRegisteredExecutorsAreDurable(t *testing.T) {
 // registered continuation invokes Engine.ApplyDecision exactly once.
 func TestBehaviorWorkflowApprovalContinuesThroughEngine(t *testing.T) {
 	e := newWFEnv(t)
-	doc := executorDoc("executor-approval", true)
+	doc := executorApprovalDoc("executor-approval")
 	v := e.publishEnabled(workspaceA, doc)
 	def := e.definitionOf(workspaceA, doc.Name, v.Version)
 	br := e.runExecution(workspaceA, doc.Name, "task-9", &def)
@@ -299,9 +317,19 @@ func TestBehaviorWorkflowApprovalContinuesThroughEngine(t *testing.T) {
 	if err != nil || len(approvals) != 1 || approvals[0].Kind != behavior.ApprovalPostDraft {
 		t.Fatalf("approvals=%#v err=%v", approvals, err)
 	}
-	if _, err := e.behaviors.Decide(e.ctx, workspaceA, approvals[0].Nonce, behavior.DecisionApproved, "", "owner", e.base); err != nil {
+	restartedWorkflow, err := NewWorkflowStore(e.pool)
+	if err != nil {
 		t.Fatal(err)
 	}
+	restartedBehaviors, err := NewBehaviorStore(e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.store, e.behaviors = restartedWorkflow, restartedBehaviors
+	parallel(4, func(int) {
+		_, _ = e.behaviors.Decide(e.ctx, workspaceA, approvals[0].Nonce, behavior.DecisionApproved, "", "owner", e.base)
+	})
+	f = newBehaviorExecutorFixtureAt(t, e, f.model, f.messenger, f.caller, true, e.base, nil)
 	f.drain(t)
 	f.drain(t)
 	if got := e.execution(workspaceA, br.ex.ID).State; got != workflow.StateCompleted {
@@ -309,6 +337,81 @@ func TestBehaviorWorkflowApprovalContinuesThroughEngine(t *testing.T) {
 	}
 	if f.model.count() != 1 || f.messenger.count() != 2 {
 		t.Fatalf("provider counts model=%d telegram=%d", f.model.count(), f.messenger.count())
+	}
+	if e.signalCount(br.ex.ID) != 1 {
+		t.Fatalf("duplicate callbacks recorded %d signals", e.signalCount(br.ex.ID))
+	}
+}
+
+// TC-C08/TC-C09: several approvals created by the actual actions executor
+// settle independently. Each wake continues the same last attempt, releases
+// its lease while waiting and preserves the execution deadline.
+func TestBehaviorWorkflowMultipleApprovalRoundsJoinOnLastAttempt(t *testing.T) {
+	e := newWFEnv(t)
+	doc := executorApprovalDoc("executor-approval-join")
+	v := e.publishEnabled(workspaceA, doc)
+	def := e.definitionOf(workspaceA, doc.Name, v.Version)
+	if def.Retry.MaxAttempts != 1 || len(def.Retry.Delays) != 0 || def.LeaseDuration < def.StepTimeout+30*time.Second {
+		t.Fatalf("unsafe normalized definition: %+v", def)
+	}
+	br := e.runExecution(workspaceA, doc.Name, "task-9", &def)
+	model := `{"items":[` +
+		`{"key":"one","label":"one","text":"finding one","proposal":"post one","topic":"quality","confidence":0.99,"informational":false},` +
+		`{"key":"two","label":"two","text":"finding two","proposal":"post two","topic":"quality","confidence":0.99,"informational":false},` +
+		`{"key":"three","label":"three","text":"finding three","proposal":"post three","topic":"quality","confidence":0.99,"informational":false}]}`
+	f := newBehaviorExecutorFixture(t, e, model, true)
+	f.drain(t)
+	approvals, err := e.behaviors.ListApprovals(e.ctx, workspaceA, br.run.ID)
+	if err != nil || len(approvals) != 3 {
+		t.Fatalf("approvals=%#v err=%v", approvals, err)
+	}
+	original := e.execution(workspaceA, br.ex.ID)
+	if original.State != workflow.StateWaitingForApproval || original.Deadline == nil || len(e.activeJobs(br.ex.ID)) != 0 {
+		t.Fatalf("initial wait=%#v jobs=%s", original, describeJobs(e.activeJobs(br.ex.ID)))
+	}
+	selectedExpiry := e.base.Add(-time.Minute)
+	if _, err := e.pool.Exec(e.ctx, `UPDATE approvals SET expires_at=$1 WHERE workspace_id=$2 AND id=$3`, selectedExpiry, workspaceA, approvals[2].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.behaviors.Decide(e.ctx, workspaceA, approvals[1].Nonce, behavior.DecisionRejected, "", "owner", e.base); err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := f.worker.ProcessNext(e.ctx); err != nil || !worked {
+		t.Fatalf("reject continuation worked=%v err=%v", worked, err)
+	}
+	assertExecutorApprovalWait(t, e, br.ex.ID, *original.Deadline)
+	if expired, err := e.behaviors.ExpireDue(e.ctx, e.base, 10); err != nil || len(expired) != 1 || expired[0].ID != approvals[2].ID {
+		t.Fatalf("expired=%#v err=%v", expired, err)
+	}
+	if worked, err := f.worker.ProcessNext(e.ctx); err != nil || !worked {
+		t.Fatalf("expiry continuation worked=%v err=%v", worked, err)
+	}
+	assertExecutorApprovalWait(t, e, br.ex.ID, *original.Deadline)
+	if _, err := e.behaviors.Decide(e.ctx, workspaceA, approvals[0].Nonce, behavior.DecisionApproved, "", "owner", e.base); err != nil {
+		t.Fatal(err)
+	}
+	f.drain(t)
+	if got := e.execution(workspaceA, br.ex.ID); got.State != workflow.StateCompleted || got.Deadline == nil || !got.Deadline.Equal(*original.Deadline) {
+		t.Fatalf("completed execution=%#v", got)
+	}
+	for id, want := range map[int64]behavior.ItemStatus{
+		approvals[0].ItemID: behavior.ItemDone,
+		approvals[1].ItemID: behavior.ItemSkipped,
+		approvals[2].ItemID: behavior.ItemExpired,
+	} {
+		item, err := e.behaviors.GetItem(e.ctx, workspaceA, id)
+		if err != nil || item.Status != want {
+			t.Fatalf("item %d status=%s want=%s err=%v", id, item.Status, want, err)
+		}
+	}
+}
+
+func assertExecutorApprovalWait(t *testing.T, e *wfEnv, executionID int64, deadline time.Time) {
+	t.Helper()
+	ex := e.execution(workspaceA, executionID)
+	step := e.step(workspaceA, executionID, "actions")
+	if ex.State != workflow.StateWaitingForApproval || ex.Deadline == nil || !ex.Deadline.Equal(deadline) || step.Attempts != 1 || len(e.activeJobs(executionID)) != 0 {
+		t.Fatalf("approval round execution=%#v step=%#v jobs=%s", ex, step, describeJobs(e.activeJobs(executionID)))
 	}
 }
 

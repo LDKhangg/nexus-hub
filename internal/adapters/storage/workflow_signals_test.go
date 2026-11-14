@@ -177,7 +177,7 @@ func TestApprovalSignalDuplicateIsNoOp(t *testing.T) {
 	}
 }
 
-// TC-B23 (REQ-11): Resume needs a recorded, unapplied decision of a bound
+// TC-B23/TC-C13 (REQ-11): Resume needs a recorded, unapplied decision of a bound
 // wait. It never decides, creates or bypasses an approval, and a repeated
 // command is idempotent.
 func TestResumeCannotBypassApproval(t *testing.T) {
@@ -222,9 +222,10 @@ func TestResumeCannotBypassApproval(t *testing.T) {
 	}
 }
 
-// TC-B24 (REQ-8, REQ-10): reject, expiry and cancel racing each other and a
-// restart: exactly one decision is kept, one signal at most, and a cancelled
-// execution records the decision without ever applying it.
+// TC-B24/TC-C11/TC-C12 (REQ-8, REQ-10): reject, expiry and cancel racing each
+// other and a restart: exactly one decision is kept, one signal at most, and
+// a cancelled execution records the decision through the legacy route without
+// ever applying it.
 func TestApprovalRejectExpireCancelRaces(t *testing.T) {
 	t.Run("TC-B24/cancel then decide", func(t *testing.T) {
 		e := newWFEnv(t)
@@ -238,6 +239,9 @@ func TestApprovalRejectExpireCancelRaces(t *testing.T) {
 		d := e.decide(workspaceA, aps[0], behavior.DecisionApproved, e.base)
 		if d.Decision != behavior.DecisionApproved {
 			t.Fatal("TC-B24: decision not recorded after cancel")
+		}
+		if d.ExecutionID != 0 {
+			t.Fatalf("TC-C12: closed wait did not take legacy route: execution %d", d.ExecutionID)
 		}
 		assertState(t, e.execution(workspaceA, br.ex.ID), workflow.StateCancelled, workflow.ReasonCancelled)
 		e.reconcile(e.base.Add(time.Hour))
@@ -384,7 +388,7 @@ func TestAliasPrefsFeedbackDoNotBlockExecution(t *testing.T) {
 	}
 }
 
-// TC-B27 (REQ-10 abuse): a signal from another workspace, for another
+// TC-B27/TC-C13 (REQ-10 abuse): a signal from another workspace, for another
 // execution or step, for an undecided approval, or with a malformed
 // reference is rejected and changes nothing.
 func TestForeignWorkspaceSignalRejected(t *testing.T) {
