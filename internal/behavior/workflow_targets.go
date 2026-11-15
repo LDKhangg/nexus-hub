@@ -61,21 +61,57 @@ func (w *InboxWorker) workflowOrAssistant(ctx context.Context, u InboundUpdate, 
 		return w.reply(ctx, to, msgAssistantGone, "assistant_text_gone")
 	}
 	trimmed := strings.TrimSpace(text)
+	// Target order: exactly one explicit WF-n anywhere in the text, then the
+	// reply target, then a clarification. Several references never store.
+	refs := workflow.FindRefs(trimmed)
 	if id, instruction, explicit := leadingWorkflowInstruction(trimmed); explicit {
-		if len(workflow.FindRefs(trimmed)) != 1 {
-			id = 0
+		if len(refs) != 1 {
+			return w.clarifyWorkflowTarget(ctx, u, to, "note", instruction)
 		}
 		return w.handleWorkflowRequest(ctx, u, to, actor, corr, "note", instruction, id)
 	}
 	if u.ReplyToMessageID > 0 && trimmed != "" && !strings.HasPrefix(trimmed, "/") {
-		if id, resolved := w.resolveWorkflowTarget(ctx, u, 0); resolved {
-			if isWorkflowQuestion(trimmed) {
+		if isWorkflowQuestion(trimmed) {
+			var id int64
+			var resolved bool
+			switch len(refs) {
+			case 0:
+				id, resolved = w.resolveWorkflowTarget(ctx, u, 0)
+			case 1:
+				id, resolved = w.resolveWorkflowTarget(ctx, u, refs[0])
+			}
+			if resolved {
 				return w.queueAssistantTextForWorkflow(ctx, u, to, actor, corr, text, id)
 			}
-			return w.executeWorkflowRequest(ctx, u, to, actor, corr, "note", trimmed, id)
+			return w.queueAssistantText(ctx, u, to, actor, corr, text)
+		}
+		switch len(refs) {
+		case 0:
+			if id, resolved := w.resolveWorkflowTarget(ctx, u, 0); resolved {
+				if w.workflowTerminal(ctx, u.WorkspaceID, id) {
+					// A plain reply to a finished workflow's message (for example a
+					// final report) is a conversation, not an instruction.
+					return w.queueAssistantTextForWorkflow(ctx, u, to, actor, corr, text, id)
+				}
+				return w.executeWorkflowRequest(ctx, u, to, actor, corr, "note", trimmed, id)
+			}
+		case 1:
+			return w.handleWorkflowRequest(ctx, u, to, actor, corr, "note", trimmed, refs[0])
+		default:
+			return w.clarifyWorkflowTarget(ctx, u, to, "note", trimmed)
 		}
 	}
 	return w.queueAssistantText(ctx, u, to, actor, corr, text)
+}
+
+// workflowTerminal reports whether the execution is known to be terminal.
+func (w *InboxWorker) workflowTerminal(ctx context.Context, ws string, id int64) bool {
+	r := w.workflowReader()
+	if r == nil {
+		return false
+	}
+	d, err := r.GetExecutionDetail(ctx, ws, id)
+	return err == nil && d.State.IsTerminal()
 }
 
 func isWorkflowQuestion(text string) bool {
@@ -108,15 +144,18 @@ func (w *InboxWorker) workflowControlCommand(ctx context.Context, u InboundUpdat
 			return w.reply(ctx, to, "Cú pháp: /note [WF-id] <nội dung>", "usage")
 		}
 		id, text := int64(0), args
+		refs := workflow.FindRefs(args)
 		first, rest, found := strings.Cut(args, " ")
 		if parsed, ok := workflow.ParseRef(first); ok {
 			if !found || strings.TrimSpace(rest) == "" {
 				return w.reply(ctx, to, "Cú pháp: /note [WF-id] <nội dung>", "usage")
 			}
 			id, text = parsed, strings.TrimSpace(rest)
-			if len(workflow.FindRefs(args)) != 1 {
-				id = 0
-			}
+		} else if len(refs) == 1 {
+			id = refs[0]
+		}
+		if len(refs) > 1 {
+			return w.clarifyWorkflowTarget(ctx, u, to, "note", text)
 		}
 		return w.handleWorkflowRequest(ctx, u, to, actor, corr, "note", text, id)
 	case "/status", "/cancel", "/resume":

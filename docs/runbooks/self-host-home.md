@@ -905,6 +905,11 @@ an update received during a model or provider call waits for the next such
 step or retry and is never injected mid-call. Instructions cannot widen
 allowed actions, trusted targets, budgets, dry-run behavior or approval rules.
 
+A reply that ends with `?`, and a reply without an explicit reference to a
+message bound to a finished workflow (for example a final report), go to the
+assistant with that workflow as context instead of being stored. An explicit
+`WF-n <text>` or `/note WF-n <text>` for a finished workflow is refused.
+
 The owner-chat commands are:
 
 - `/status WF-n`: state, current step, waits, latest instruction version and
@@ -930,7 +935,7 @@ bindings, instruction versions and waits continue from durable storage.
 
 `nh workflow show --workspace-id $WS WF-101` reports `resources` grouped by
 kind with a count. It prints external IDs only for metadata-only task/PR
-identifiers and Telegram `<chat>:<message>` identifiers, never resource text.
+identifiers and Telegram `<integration>:<chat>:<message>` identifiers, never resource text.
 Its `instructions` object contains only `count`, `latest_version`, `latest_at`
 and `used_version`; `used_version` is the highest version recorded by an
 `owner_instructions` checkpoint. Instruction text and conversation summaries
