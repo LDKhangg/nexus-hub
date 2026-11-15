@@ -2,6 +2,8 @@ package behavior
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -11,20 +13,31 @@ import (
 )
 
 type phase6BReader struct {
-	details map[int64]workflow.ExecutionDetail
-	list    []workflow.ExecutionView
-	query   workflow.ExecutionQuery
+	details   map[int64]workflow.ExecutionDetail
+	detailErr map[int64]error
+	list      []workflow.ExecutionView
+	query     workflow.ExecutionQuery
 }
 
 func (f *phase6BReader) ListExecutions(_ context.Context, q workflow.ExecutionQuery) ([]workflow.ExecutionView, int64, error) {
 	f.query = q
-	items := f.list
+	items := make([]workflow.ExecutionView, 0, len(f.list))
+	for _, item := range f.list {
+		if q.BeforeID == 0 || item.ID < q.BeforeID {
+			items = append(items, item)
+		}
+	}
+	next := int64(0)
 	if q.Limit > 0 && len(items) > q.Limit {
+		next = items[q.Limit-1].ID
 		items = items[:q.Limit]
 	}
-	return append([]workflow.ExecutionView(nil), items...), int64(len(f.list)), nil
+	return append([]workflow.ExecutionView(nil), items...), next, nil
 }
 func (f *phase6BReader) GetExecutionDetail(_ context.Context, ws string, id int64) (workflow.ExecutionDetail, error) {
+	if err := f.detailErr[id]; err != nil {
+		return workflow.ExecutionDetail{}, err
+	}
 	d, ok := f.details[id]
 	if !ok || d.WorkspaceID != ws {
 		return workflow.ExecutionDetail{}, workflow.ErrNotFound
@@ -42,13 +55,16 @@ func (*phase6BReader) ListJobs(context.Context, workflow.JobQuery) ([]workflow.J
 }
 
 type phase6BConversations struct {
-	conversation workflow.Conversation
-	bound        []int64
-	byResource   []int64
-	instructions map[int64][]workflow.Instruction
-	updates      map[int64]workflow.Instruction
-	appendErr    error
-	resources    []workflow.ResourceBinding
+	conversation  workflow.Conversation
+	bound         []int64
+	byResource    []int64
+	instructions  map[int64][]workflow.Instruction
+	updates       map[int64]workflow.Instruction
+	appendErr     error
+	resources     []workflow.ResourceBinding
+	resourceKind  string
+	resourceID    string
+	resourcesByID map[string][]int64
 }
 
 func (f *phase6BConversations) EnsureConversation(_ context.Context, c workflow.Conversation) (workflow.Conversation, error) {
@@ -75,7 +91,11 @@ func (f *phase6BConversations) BindResource(_ context.Context, r workflow.Resour
 	f.resources = append(f.resources, r)
 	return nil
 }
-func (f *phase6BConversations) ExecutionsByResource(context.Context, string, string, string) ([]int64, error) {
+func (f *phase6BConversations) ExecutionsByResource(_ context.Context, _ string, kind, externalID string) ([]int64, error) {
+	f.resourceKind, f.resourceID = kind, externalID
+	if f.resourcesByID != nil {
+		return append([]int64(nil), f.resourcesByID[externalID]...), nil
+	}
 	return append([]int64(nil), f.byResource...), nil
 }
 func (f *phase6BConversations) AppendInstruction(_ context.Context, r workflow.InstructionRequest) (workflow.Instruction, error) {
@@ -121,9 +141,9 @@ func phase6BWorker(r *phase6BReader, c *phase6BConversations, m *p4Messenger) *I
 // when it identifies one execution.
 func TestPhase6WorkflowTarget_WorkspaceIsolationAndReplyAmbiguity(t *testing.T) {
 	r := &phase6BReader{details: map[int64]workflow.ExecutionDetail{7: phase6BDetail(7, p4WS, workflow.StateRunning)}}
-	c := &phase6BConversations{byResource: []int64{7, 8}}
+	c := &phase6BConversations{resourcesByID: map[string][]int64{"bot-a:5:9": {7}}}
 	w := phase6BWorker(r, c, &p4Messenger{})
-	u := InboundUpdate{WorkspaceID: p4WS, ChatID: 5, ReplyToMessageID: 9}
+	u := InboundUpdate{WorkspaceID: p4WS, IntegrationID: "bot-b", ChatID: 5, ReplyToMessageID: 9}
 	if id, ok := w.resolveWorkflowTarget(context.Background(), u, 7); !ok || id != 7 {
 		t.Fatalf("explicit target=(%d,%v)", id, ok)
 	}
@@ -131,7 +151,85 @@ func TestPhase6WorkflowTarget_WorkspaceIsolationAndReplyAmbiguity(t *testing.T) 
 		t.Fatalf("unknown target leaked as (%d,%v)", id, ok)
 	}
 	if id, ok := w.resolveWorkflowTarget(context.Background(), u, 0); ok || id != 0 {
-		t.Fatalf("ambiguous reply target=(%d,%v)", id, ok)
+		t.Fatalf("another bot resolved bot-a binding as (%d,%v)", id, ok)
+	}
+	u.IntegrationID = "bot-a"
+	if id, ok := w.resolveWorkflowTarget(context.Background(), u, 0); !ok || id != 7 || c.resourceID != "bot-a:5:9" {
+		t.Fatalf("scoped reply target=(%d,%v), lookup=%q", id, ok, c.resourceID)
+	}
+}
+
+func phase6BTargetApproval(t *testing.T, w *InboxWorker, ap *p4Approvals, kind, text string, id int64) Approval {
+	t.Helper()
+	key := ""
+	if text != "" {
+		var err error
+		key, err = w.workflowTargetInbox.stageUntil(p4WS, text, w.now(), w.now().Add(time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload, err := json.Marshal(workflowTargetPayload{ChatID: 5, Kind: kind, MemoryKey: key, UpdateID: 11, MessageID: 12, ConversationID: 77, Candidates: []int64{id}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := ap.CreateApproval(context.Background(), p4WS, NewApproval{Kind: ApprovalWorkflowTarget, Nonce: "target-" + kind + "-" + text, Payload: payload, ExpiresAt: w.now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+// TC-B06A (REQ-6, REQ-7): clarification persistence contains routing metadata
+// and an opaque memory key, never the owner's request. A restart loses that
+// volatile request, closes the choice as expired, and stores no instruction.
+func TestPhase6WorkflowTarget_RequestTextIsVolatileAcrossRestart(t *testing.T) {
+	const request = "private restart request"
+	r := &phase6BReader{details: map[int64]workflow.ExecutionDetail{42: phase6BDetail(42, p4WS, workflow.StateRunning)}}
+	c := &phase6BConversations{bound: []int64{42}}
+	ap := newP4Approvals()
+	w := phase6BWorker(r, c, &p4Messenger{})
+	w.d.Approvals = ap
+	w.clarifyWorkflowTarget(withConversation(context.Background(), 77, UpdateText), InboundUpdate{WorkspaceID: p4WS, IntegrationID: "bot-a", ChatID: 5, UpdateID: 11, MessageID: 12}, ChatRef{}, "note", request)
+	if len(ap.created) != 1 || strings.Contains(string(ap.created[0].Payload), request) {
+		t.Fatalf("persisted clarification=%s", ap.created[0].Payload)
+	}
+	var payload workflowTargetPayload
+	if err := json.Unmarshal(ap.created[0].Payload, &payload); err != nil || payload.MemoryKey == "" || payload.Kind != "note" || payload.ConversationID != 77 {
+		t.Fatalf("payload=%+v err=%v", payload, err)
+	}
+	a, err := ap.GetApprovalByNonce(context.Background(), p4WS, ap.created[0].Nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.workflowTargetInbox = NewAssistantInbox()
+	toast, code, done := w.workflowTargetCallback(context.Background(), InboundUpdate{WorkspaceID: p4WS, ChatID: 5}, ChatRef{}, CallbackData{Kind: CallbackOption, Nonce: a.Nonce, Option: 0}, a, "owner", "c")
+	if !done || code != "workflow_target_expired" || toast != "Yêu cầu đã hết hạn, hãy gửi lại." || len(c.instructions) != 0 {
+		t.Fatalf("toast=%q code=%q done=%v instructions=%v", toast, code, done, c.instructions)
+	}
+}
+
+// TC-B06B (REQ-6): status and cancel clarifications need no volatile request
+// body; choosing either target still completes or creates the control proposal.
+func TestPhase6WorkflowTarget_NonNoteChoicesWorkWithoutMemory(t *testing.T) {
+	for _, kind := range []string{"status", "cancel"} {
+		t.Run(kind, func(t *testing.T) {
+			f := &d5Workflow{detail: phase6BDetail(42, p4WS, workflow.StateRunning)}
+			c := &phase6BConversations{}
+			ap := newP4Approvals()
+			m := &p4Messenger{}
+			w := NewInboxWorker(InboxDeps{Workflows: f, WorkflowCommands: f, Conversations: c, Approvals: ap, Messenger: m}, InboxSettings{})
+			w.now = func() time.Time { return time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC) }
+			a := phase6BTargetApproval(t, w, ap, kind, "", 42)
+			_, code, done := w.workflowTargetCallback(context.Background(), InboundUpdate{WorkspaceID: p4WS, ChatID: 5}, ChatRef{WorkspaceID: p4WS}, CallbackData{Kind: CallbackOption, Nonce: a.Nonce, Option: 0}, a, "owner", "c")
+			wantCode := ""
+			if kind == "cancel" {
+				wantCode = "assistant_" + toolWorkflowCancel
+			}
+			if !done || code != wantCode || (kind == "cancel" && ap.count() != 2) {
+				t.Fatalf("kind=%s code=%q done=%v approvals=%d", kind, code, done, ap.count())
+			}
+		})
 	}
 }
 
@@ -162,11 +260,7 @@ func TestPhase6WorkflowTarget_CallbackIsBoundAndExactlyOnce(t *testing.T) {
 	ap := newP4Approvals()
 	w := phase6BWorker(r, c, &p4Messenger{})
 	w.d.Approvals = ap
-	payload := []byte(`{"chat_id":5,"kind":"note","text":"add test","update_id":11,"message_id":12,"conversation_id":77,"candidates":[42]}`)
-	a, err := ap.CreateApproval(context.Background(), p4WS, NewApproval{Kind: ApprovalWorkflowTarget, Nonce: "target-once", Payload: payload, ExpiresAt: w.now().Add(time.Minute)})
-	if err != nil {
-		t.Fatal(err)
-	}
+	a := phase6BTargetApproval(t, w, ap, "note", "add test", 42)
 	data := CallbackData{Kind: CallbackOption, Nonce: a.Nonce, Option: 0}
 	if _, code, _ := w.workflowTargetCallback(context.Background(), InboundUpdate{WorkspaceID: p4WS, ChatID: 6}, ChatRef{}, data, a, "owner", "c"); code != "stale" {
 		t.Fatalf("other chat code=%q", code)
@@ -184,6 +278,10 @@ func TestPhase6WorkflowTarget_CallbackIsBoundAndExactlyOnce(t *testing.T) {
 		t.Fatalf("instructions=%v decide attempts=%d", c.instructions[42], ap.decideCount())
 	}
 
+	payload, err := json.Marshal(workflowTargetPayload{ChatID: 5, Kind: "note", MemoryKey: "missing", UpdateID: 11, MessageID: 12, ConversationID: 77, Candidates: []int64{42}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	expired, err := ap.CreateApproval(context.Background(), p4WS, NewApproval{Kind: ApprovalWorkflowTarget, Nonce: "target-expired", Payload: payload, ExpiresAt: w.now().Add(-time.Second)})
 	if err != nil {
 		t.Fatal(err)
@@ -194,6 +292,57 @@ func TestPhase6WorkflowTarget_CallbackIsBoundAndExactlyOnce(t *testing.T) {
 	}
 	if len(c.instructions[42]) != 1 {
 		t.Fatalf("expired callback appended: %v", c.instructions[42])
+	}
+}
+
+// TC-B06C (REQ-6, REQ-7): a retryable instruction-store failure leaves the
+// choice open and its volatile text intact. A second press stores exactly once;
+// terminal and missing targets instead close with an understandable reason.
+func TestPhase6WorkflowTarget_RetryThenTerminalDecisions(t *testing.T) {
+	t.Run("storage retry then double press", func(t *testing.T) {
+		r := &phase6BReader{details: map[int64]workflow.ExecutionDetail{42: phase6BDetail(42, p4WS, workflow.StateRunning)}}
+		c := &phase6BConversations{appendErr: errors.New("temporary storage failure")}
+		ap := newP4Approvals()
+		w := phase6BWorker(r, c, &p4Messenger{})
+		w.d.Approvals = ap
+		a := phase6BTargetApproval(t, w, ap, "note", "store once", 42)
+		data := CallbackData{Kind: CallbackOption, Nonce: a.Nonce, Option: 0}
+		toast, code, done := w.workflowTargetCallback(context.Background(), InboundUpdate{WorkspaceID: p4WS, ChatID: 5}, ChatRef{}, data, a, "owner", "c")
+		stored, _ := ap.GetApprovalByNonce(context.Background(), p4WS, a.Nonce)
+		if done || code != "storage" || !strings.Contains(toast, "bấm lại") || stored.Decision != "" || len(c.instructions[42]) != 0 {
+			t.Fatalf("first toast=%q code=%q done=%v approval=%+v instructions=%v", toast, code, done, stored, c.instructions[42])
+		}
+		c.appendErr = nil
+		if _, code, done = w.workflowTargetCallback(context.Background(), InboundUpdate{WorkspaceID: p4WS, ChatID: 5}, ChatRef{}, data, a, "owner", "c"); !done || code != "" {
+			t.Fatalf("second code=%q done=%v", code, done)
+		}
+		if _, code, _ = w.workflowTargetCallback(context.Background(), InboundUpdate{WorkspaceID: p4WS, ChatID: 5}, ChatRef{}, data, a, "owner", "c"); code != "stale" || len(c.instructions[42]) != 1 {
+			t.Fatalf("double press code=%q instructions=%v", code, c.instructions[42])
+		}
+	})
+
+	for _, tc := range []struct {
+		name       string
+		details    map[int64]workflow.ExecutionDetail
+		appendErr  error
+		wantCode   string
+		wantReason string
+	}{
+		{name: "terminal", details: map[int64]workflow.ExecutionDetail{42: phase6BDetail(42, p4WS, workflow.StateRunning)}, appendErr: workflow.ErrNotEligible, wantCode: "workflow_terminal", wantReason: "đã kết thúc"},
+		{name: "not found", details: map[int64]workflow.ExecutionDetail{}, wantCode: "not_found", wantReason: "Không tìm thấy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &phase6BConversations{appendErr: tc.appendErr}
+			ap := newP4Approvals()
+			w := phase6BWorker(&phase6BReader{details: tc.details}, c, &p4Messenger{})
+			w.d.Approvals = ap
+			a := phase6BTargetApproval(t, w, ap, "note", "request", 42)
+			toast, code, done := w.workflowTargetCallback(context.Background(), InboundUpdate{WorkspaceID: p4WS, ChatID: 5}, ChatRef{}, CallbackData{Kind: CallbackOption, Nonce: a.Nonce, Option: 0}, a, "owner", "c")
+			stored, _ := ap.GetApprovalByNonce(context.Background(), p4WS, a.Nonce)
+			if !done || code != tc.wantCode || !strings.Contains(toast, tc.wantReason) || stored.Decision != DecisionApproved {
+				t.Fatalf("toast=%q code=%q done=%v decision=%q", toast, code, done, stored.Decision)
+			}
+		})
 	}
 }
 
@@ -353,11 +502,48 @@ func TestPhase6AssistantWorkflowNote_OncePerTurn(t *testing.T) {
 	r := &phase6BReader{details: map[int64]workflow.ExecutionDetail{42: phase6BDetail(42, p4WS, workflow.StateRunning)}}
 	c := &phase6BConversations{}
 	w := phase6BWorker(r, c, &p4Messenger{})
-	tt := &assistantToolTurn{u: InboundUpdate{WorkspaceID: p4WS, UpdateID: 55}, to: ChatRef{WorkspaceID: p4WS}}
+	tt := &assistantToolTurn{u: InboundUpdate{WorkspaceID: p4WS, UpdateID: 55}, to: ChatRef{WorkspaceID: p4WS}, ownerText: "Please update WF-42"}
 	first, failed := w.toolWorkflowNote(context.Background(), tt, toolArgs{"id": float64(42), "text": "add tests"})
 	second, _ := w.toolWorkflowNote(context.Background(), tt, toolArgs{"id": float64(42), "text": "broaden target"})
 	if failed || !strings.Contains(first, "v1") || !strings.Contains(second, "already") || len(c.instructions[42]) != 1 {
 		t.Fatalf("first=%q failed=%v second=%q instructions=%v", first, failed, second, c.instructions[42])
+	}
+}
+
+// TC-B11A (REQ-7, REQ-9): a model cannot guess between two active workflows.
+// Owner text, a reply target, or one sole active binding each supplies the
+// necessary authority to write exactly the selected workflow.
+func TestPhase6AssistantWorkflowNote_RequiresOwnerDisambiguation(t *testing.T) {
+	r := &phase6BReader{details: map[int64]workflow.ExecutionDetail{
+		42: phase6BDetail(42, p4WS, workflow.StateRunning),
+		43: phase6BDetail(43, p4WS, workflow.StateRunning),
+	}}
+	t.Run("ambiguous", func(t *testing.T) {
+		c := &phase6BConversations{bound: []int64{42, 43}}
+		w := phase6BWorker(r, c, &p4Messenger{})
+		got, failed := w.toolWorkflowNote(context.Background(), &assistantToolTurn{u: InboundUpdate{WorkspaceID: p4WS, UpdateID: 60}, to: ChatRef{WorkspaceID: p4WS}}, toolArgs{"id": float64(42), "text": "guessed note"})
+		if !failed || !strings.Contains(got, "Ask the owner") || len(c.instructions) != 0 {
+			t.Fatalf("result=%q failed=%v instructions=%v", got, failed, c.instructions)
+		}
+	})
+	for _, tc := range []struct {
+		name       string
+		ownerText  string
+		workflowID int64
+		bound      []int64
+	}{
+		{name: "owner text", ownerText: "Ghi chú WF-42", bound: []int64{42, 43}},
+		{name: "reply target", workflowID: 42, bound: []int64{42, 43}},
+		{name: "sole binding", bound: []int64{42}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &phase6BConversations{bound: tc.bound}
+			w := phase6BWorker(r, c, &p4Messenger{})
+			got, failed := w.toolWorkflowNote(context.Background(), &assistantToolTurn{u: InboundUpdate{WorkspaceID: p4WS, UpdateID: 61}, to: ChatRef{WorkspaceID: p4WS}, ownerText: tc.ownerText, workflowID: tc.workflowID}, toolArgs{"id": float64(42), "text": "authorized note"})
+			if failed || !strings.Contains(got, "v1") || len(c.instructions[42]) != 1 || len(c.instructions[43]) != 0 {
+				t.Fatalf("result=%q failed=%v instructions=%v", got, failed, c.instructions)
+			}
+		})
 	}
 }
 

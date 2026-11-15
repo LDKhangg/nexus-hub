@@ -337,8 +337,8 @@ func TestPhase5Assistant_ContentPrivacy(t *testing.T) {
 		t.Fatalf("content leaked: logs=%q approvals=%d", logs.String(), e.ap.count())
 	}
 	integrationID := e.update(77, UpdateText, "", "").IntegrationID
-	history, ok := e.assistant.chatHistoryFor(p4WS, integrationID, 77)
-	if !ok {
+	history, created := e.assistant.chatHistoryFor(p4WS, integrationID, 77)
+	if created {
 		t.Fatal("volatile history was not retained for the active integration")
 	}
 	msgs := history.messages()

@@ -284,7 +284,7 @@ func normalizeExecutorReportRun(text string, runID int64) string {
 
 func withoutWorkflowRef(text, ref string) string {
 	text = strings.ReplaceAll(text, " · "+ref, "")
-	return strings.TrimSuffix(text, "\n"+ref)
+	return strings.ReplaceAll(text, "\n"+ref, "")
 }
 
 // TC-C04/C05: the registered behavior model/actions executors use the real

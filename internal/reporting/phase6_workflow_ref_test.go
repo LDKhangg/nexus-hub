@@ -24,8 +24,8 @@ func TestPhase6WorkflowReferenceTemplateAndPreview(t *testing.T) {
 	}
 }
 
-// TC-A3.4 (REQ-3): durable default reports show the workflow reference beside
-// the trace hint, while legacy reports without a reference remain unchanged.
+// TC-A3.4 (REQ-3): normal durable reports add only a standalone workflow
+// reference, while legacy reports without a reference remain unchanged.
 func TestPhase6DefaultReportWorkflowReferenceIsAdditive(t *testing.T) {
 	store := newPhase4Store()
 	store.prefs[scopeKey("owner", "ws", "")] = fullPrefs(StyleNormal)
@@ -41,7 +41,7 @@ func TestPhase6DefaultReportWorkflowReferenceIsAdditive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(legacy, "WF-") || !strings.Contains(got, "trace 7 · WF-7") || strings.Replace(got, "\ntrace 7 · WF-7", "", 1) != legacy {
+	if strings.Contains(legacy, "WF-") || got != legacy+"\nWF-7" || strings.Contains(got, "/trace") {
 		t.Fatalf("legacy=%q withRef=%q", legacy, got)
 	}
 }

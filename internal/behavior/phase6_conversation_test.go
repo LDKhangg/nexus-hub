@@ -184,8 +184,8 @@ func TestPhase6WorkflowMessageBindings(t *testing.T) {
 		t.Fatalf("bindings=%v", store.bindings)
 	}
 	want := []workflow.ResourceBinding{
-		{WorkspaceID: "ws-a", ExecutionID: 9001, Kind: "telegram.message", ExternalID: "77:101"},
-		{WorkspaceID: "ws-a", ExecutionID: 9002, Kind: "telegram.message", ExternalID: "77:102"},
+		{WorkspaceID: "ws-a", ExecutionID: 9001, Kind: "telegram.message", ExternalID: "bot-a:77:101"},
+		{WorkspaceID: "ws-a", ExecutionID: 9002, Kind: "telegram.message", ExternalID: "bot-a:77:102"},
 	}
 	if len(store.resources) != len(want) {
 		t.Fatalf("resources=%+v", store.resources)

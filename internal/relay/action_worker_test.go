@@ -60,6 +60,25 @@ type relayBindingTimeout struct {
 	sawTimeout bool
 }
 
+type relayBindingRecorder struct {
+	workflow.ConversationStore
+	resource workflow.ResourceBinding
+}
+
+func (*relayBindingRecorder) EnsureConversation(_ context.Context, c workflow.Conversation) (workflow.Conversation, error) {
+	c.ID = 19
+	return c, nil
+}
+
+func (*relayBindingRecorder) BindWorkflow(context.Context, string, int64, int64, string) error {
+	return nil
+}
+
+func (s *relayBindingRecorder) BindResource(_ context.Context, r workflow.ResourceBinding) error {
+	s.resource = r
+	return nil
+}
+
 func (s *relayBindingTimeout) EnsureConversation(ctx context.Context, _ workflow.Conversation) (workflow.Conversation, error) {
 	s.sawReceipt = s.receipt()
 	_, s.sawTimeout = ctx.Deadline()
@@ -103,6 +122,22 @@ func TestActionWorker_BindingTimeoutAfterReceiptDoesNotResend(t *testing.T) {
 	}
 	if s.sent != 77 || tx.count != 1 || !binding.sawReceipt || !binding.sawTimeout {
 		t.Fatalf("receipt=%d sends=%d binding receipt=%v timeout=%v", s.sent, tx.count, binding.sawReceipt, binding.sawTimeout)
+	}
+}
+
+// TC-A5.6 (REQ-5, REQ-6): relay reports bind Telegram messages under the bot
+// integration as well as chat/message IDs, preventing cross-bot collisions.
+func TestActionWorker_WorkflowBindingIncludesIntegration(t *testing.T) {
+	s := &actionStore{a: &OutboundAction{ID: 1, Attempts: 1, WorkspaceID: "ws", IntegrationID: "bot-b", ExecutionID: 9, Text: "report"}}
+	tx := &textSender{}
+	binding := &relayBindingRecorder{}
+	w := NewActionWorker(s, tx, WorkerSettings{}, binding)
+	if err := w.processNext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := workflow.ResourceBinding{WorkspaceID: "ws", ExecutionID: 9, Kind: "telegram.message", ExternalID: "bot-b:-100:77"}
+	if binding.resource != want {
+		t.Fatalf("binding=%+v, want %+v", binding.resource, want)
 	}
 }
 

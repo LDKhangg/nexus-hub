@@ -127,7 +127,7 @@ func TestPhase6StartExecutionCreatesResourceBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := store.ExecutionsByResource(e.ctx, workspaceA, "clickup.chat", "message-7")
+	got, err := store.ExecutionsByResource(e.ctx, workspaceA, "clickup.chat_message", "message-7")
 	if err != nil || len(got) != 1 || got[0] != chatEx.ID {
 		t.Fatalf("chat subject executions=%v err=%v", got, err)
 	}
