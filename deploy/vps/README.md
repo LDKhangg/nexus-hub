@@ -65,12 +65,12 @@ Use the Supabase direct connection or the session pooler (port 5432). The
 transaction pooler (port 6543) does not keep session state that migrations
 and the server rely on.
 
-The master key (root:nexus 0440) is 32 random bytes. Copy the existing key
+The master key (nexus:nexus 0400; the server refuses a key readable by group or others) is 32 random bytes. Copy the existing key
 from the old host, or create a new one only for a new database (a new key
 cannot decrypt credentials stored with the old one):
 
 ```sh
-install -o root -g nexus -m 0440 /path/to/master.key /etc/nexus-hub/master.key
+install -o nexus -g nexus -m 0400 /path/to/master.key /etc/nexus-hub/master.key
 ```
 
 The server listens on `:8080` by default. Bind it to loopback once the
@@ -164,3 +164,17 @@ systemctl status nexus-hub
 journalctl -u nexus-hub -n 100 --no-pager
 cat /opt/nexus-hub/current/REVISION
 ```
+
+## Notes from the first cutover (2026-11-15)
+
+- Install `git` on the server (`dnf -y install git`); without it the code and
+  workspace tools are disabled.
+- When the database is restored from a laptop install, delete the path-valued
+  settings that point at the old host so the defaults under
+  `/var/lib/nexus-hub` apply: `repos_dir`, `tmp_dir`, `claude_cli_path`,
+  `opencode_cli_path` (otherwise the server exits with "cannot create agent
+  data directory"). Set `llm_provider` to `anthropic` on a 1 GB server.
+- Restore as the application role with `pg_restore --no-owner --no-privileges`
+  from a full dump; a data-only dump fails on circular foreign keys.
+- Store the Anthropic key as the `anthropic` credential with
+  `nh secret set --kind anthropic_key` run as the service user (value on stdin).
