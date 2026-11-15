@@ -909,6 +909,8 @@ A reply that ends with `?`, and a reply without an explicit reference to a
 message bound to a finished workflow (for example a final report), go to the
 assistant with that workflow as context instead of being stored. An explicit
 `WF-n <text>` or `/note WF-n <text>` for a finished workflow is refused.
+Free-text messages ending in `?` are questions for the assistant, even when
+they start with `WF-n`; use `/note` to force an instruction.
 
 The owner-chat commands are:
 

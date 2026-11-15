@@ -64,6 +64,23 @@ func (w *InboxWorker) workflowOrAssistant(ctx context.Context, u InboundUpdate, 
 	// Target order: exactly one explicit WF-n anywhere in the text, then the
 	// reply target, then a clarification. Several references never store.
 	refs := workflow.FindRefs(trimmed)
+	if trimmed != "" && !strings.HasPrefix(trimmed, "/") && isWorkflowQuestion(trimmed) {
+		// A free-text question is never stored as an instruction, even when it
+		// starts with WF-n; /note forces an instruction. Context is the single
+		// explicit reference, else the reply target, else none.
+		var id int64
+		var resolved bool
+		switch len(refs) {
+		case 0:
+			id, resolved = w.resolveWorkflowTarget(ctx, u, 0)
+		case 1:
+			id, resolved = w.resolveWorkflowTarget(ctx, u, refs[0])
+		}
+		if resolved {
+			return w.queueAssistantTextForWorkflow(ctx, u, to, actor, corr, text, id)
+		}
+		return w.queueAssistantText(ctx, u, to, actor, corr, text)
+	}
 	if id, instruction, explicit := leadingWorkflowInstruction(trimmed); explicit {
 		if len(refs) != 1 {
 			return w.clarifyWorkflowTarget(ctx, u, to, "note", instruction)
@@ -71,20 +88,6 @@ func (w *InboxWorker) workflowOrAssistant(ctx context.Context, u InboundUpdate, 
 		return w.handleWorkflowRequest(ctx, u, to, actor, corr, "note", instruction, id)
 	}
 	if u.ReplyToMessageID > 0 && trimmed != "" && !strings.HasPrefix(trimmed, "/") {
-		if isWorkflowQuestion(trimmed) {
-			var id int64
-			var resolved bool
-			switch len(refs) {
-			case 0:
-				id, resolved = w.resolveWorkflowTarget(ctx, u, 0)
-			case 1:
-				id, resolved = w.resolveWorkflowTarget(ctx, u, refs[0])
-			}
-			if resolved {
-				return w.queueAssistantTextForWorkflow(ctx, u, to, actor, corr, text, id)
-			}
-			return w.queueAssistantText(ctx, u, to, actor, corr, text)
-		}
 		switch len(refs) {
 		case 0:
 			if id, resolved := w.resolveWorkflowTarget(ctx, u, 0); resolved {
