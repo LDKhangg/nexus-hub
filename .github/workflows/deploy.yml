@@ -1,0 +1,157 @@
+# Deploy: after a green `ci` run on develop (or by hand), build static linux/amd64
+# binaries for the exact commit CI tested, and ship them over SSH to the VPS,
+# where /opt/nexus-hub/bin/deploy.sh migrates, switches and health-checks.
+# Gated by the repository variable DEPLOY_ENABLED == 'true'.
+# Setup and rollback: deploy/vps/README.md.
+name: deploy
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [develop]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or full commit SHA to deploy (an older SHA rolls back)
+        required: true
+        default: develop
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: build and ship to the VPS
+    if: >-
+      vars.DEPLOY_ENABLED == 'true' && (
+        github.event_name == 'workflow_dispatch' || (
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'develop'
+        )
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    env:
+      GOOSE_VERSION: v3.28.0
+      CGO_ENABLED: "0"
+      GOOS: linux
+      GOARCH: amd64
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.ref }}
+          persist-credentials: false
+
+      - name: Resolve commit
+        id: rev
+        env:
+          WANT_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          if [ -n "$WANT_SHA" ] && [ "$sha" != "$WANT_SHA" ]; then
+            echo "::error::checked out $sha, expected $WANT_SHA"; exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build
+        run: |
+          mkdir -p dist/pkg
+          go build -trimpath -ldflags "-s -w" -o dist/pkg/nexus-server ./cmd/server
+          go build -trimpath -ldflags "-s -w" -o dist/pkg/nh ./cmd/setup-notices
+          # goose is not a module dependency; pin it here. The no_* tags drop
+          # the drivers the hub does not use (PostgreSQL only).
+          GOBIN="$PWD/dist/bin" go install -trimpath -ldflags "-s -w" \
+            -tags 'no_clickhouse no_libsql no_mssql no_mysql no_sqlite3 no_vertica no_ydb no_duckdb' \
+            "github.com/pressly/goose/v3/cmd/goose@${GOOSE_VERSION}"
+          mv dist/bin/goose dist/pkg/goose
+          file dist/pkg/nexus-server dist/pkg/nh dist/pkg/goose
+
+      - name: Package
+        id: pkg
+        env:
+          SHA: ${{ steps.rev.outputs.sha }}
+        run: |
+          mkdir -p dist/pkg/db dist/pkg/deploy/vps
+          cp -R db/migrations dist/pkg/db/migrations
+          cp deploy/vps/deploy.sh dist/pkg/deploy/vps/deploy.sh
+          echo "$SHA" > dist/pkg/REVISION
+          name="nexus-hub-${SHA}.tar.gz"
+          tar -C dist/pkg --owner=0 --group=0 --numeric-owner -czf "dist/$name" .
+          (cd dist && sha256sum "$name" > "$name.sha256")
+          sum=$(cut -d' ' -f1 "dist/$name.sha256")
+          {
+            echo "name=$name"
+            echo "sum=$sum"
+            echo "size=$(stat -c %s "dist/$name")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: SSH setup
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          if [ -z "$VPS_SSH_KEY" ] || [ -z "$VPS_KNOWN_HOSTS" ]; then
+            echo "::error::VPS_SSH_KEY and VPS_KNOWN_HOSTS must be set"; exit 1
+          fi
+          umask 077
+          dir="$RUNNER_TEMP/ssh"
+          mkdir -p "$dir"
+          printf '%s\n' "$VPS_SSH_KEY" > "$dir/key"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$dir/known_hosts"
+          chmod 600 "$dir/key" "$dir/known_hosts"
+
+      - name: Ship and deploy
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          NAME: ${{ steps.pkg.outputs.name }}
+          SUM: ${{ steps.pkg.outputs.sum }}
+        run: |
+          if [ -z "$VPS_HOST" ] || [ -z "$VPS_USER" ]; then
+            echo "::error::VPS_HOST and VPS_USER must be set"; exit 1
+          fi
+          dir="$RUNNER_TEMP/ssh"
+          opts=(-i "$dir/key" -o IdentitiesOnly=yes -o BatchMode=yes
+                -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$dir/known_hosts"
+                -o ConnectTimeout=20 -o ServerAliveInterval=15)
+          scp -q "${opts[@]}" "dist/$NAME" "$VPS_USER@$VPS_HOST:/opt/nexus-hub/incoming/$NAME"
+          ssh "${opts[@]}" "$VPS_USER@$VPS_HOST" \
+            sudo /opt/nexus-hub/bin/deploy.sh "/opt/nexus-hub/incoming/$NAME" "$SUM"
+
+      - name: Remove SSH key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/ssh"
+
+      - name: Summary
+        if: always()
+        env:
+          SHA: ${{ steps.rev.outputs.sha }}
+          NAME: ${{ steps.pkg.outputs.name }}
+          SUM: ${{ steps.pkg.outputs.sum }}
+          SIZE: ${{ steps.pkg.outputs.size }}
+          TRIGGER: ${{ github.event_name }}
+          STATUS: ${{ job.status }}
+        run: |
+          {
+            echo "### Deploy \`${SHA::7}\`: ${STATUS}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Commit | \`${SHA}\` |"
+            echo "| Trigger | ${TRIGGER} |"
+            echo "| Package | \`${NAME}\` (${SIZE} bytes) |"
+            echo "| sha256 | \`${SUM}\` |"
+            echo "| goose | ${GOOSE_VERSION} |"
+          } >> "$GITHUB_STEP_SUMMARY"
