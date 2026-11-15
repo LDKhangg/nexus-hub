@@ -250,7 +250,7 @@ func (w *InboxWorker) workflowTargetCallback(ctx context.Context, u InboundUpdat
 		return msgBadButton, NoteBadCallback, false
 	}
 	var p workflowTargetPayload
-	if json.Unmarshal(a.Payload, &p) != nil || p.ChatID != u.ChatID || p.ConversationID <= 0 ||
+	if json.Unmarshal(a.Payload, &p) != nil || a.WorkspaceID != u.WorkspaceID || p.ChatID != u.ChatID || p.ConversationID <= 0 ||
 		data.Option < 0 || data.Option >= len(p.Candidates) {
 		return msgStale, "stale", true
 	}
