@@ -132,12 +132,14 @@ func (w *InboxWorker) assistantToolDefs() []domain.ToolDef {
 
 // assistantToolTurn is the state of one turn's tool calls.
 type assistantToolTurn struct {
-	u         InboundUpdate
-	to        ChatRef
-	actor     string
-	corr      string
-	proposals int
-	proposed  map[string]bool // action|resource already proposed this turn
+	u          InboundUpdate
+	to         ChatRef
+	actor      string
+	corr       string
+	ownerText  string
+	workflowID int64
+	proposals  int
+	proposed   map[string]bool // action|resource already proposed this turn
 }
 
 // toolArgs is a tool call's validated input object.

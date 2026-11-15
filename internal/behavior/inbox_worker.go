@@ -82,6 +82,7 @@ type InboxWorker struct {
 	// consumer. assistantNoticeAfter is when a "working" message is sent.
 	assistantJobs        chan assistantJob
 	assistantNoticeAfter time.Duration
+	workflowTargetInbox  *AssistantInbox
 }
 
 func NewInboxWorker(d InboxDeps, s InboxSettings) *InboxWorker {
@@ -113,7 +114,8 @@ func NewInboxWorker(d InboxDeps, s InboxSettings) *InboxWorker {
 		d.Callbacks = Unavailable{}
 	}
 	return &InboxWorker{d: d, settings: s, now: time.Now, wait: waitFor,
-		assistantJobs: make(chan assistantJob, assistantQueueSize), assistantNoticeAfter: assistantNoticeAfter}
+		assistantJobs: make(chan assistantJob, assistantQueueSize), assistantNoticeAfter: assistantNoticeAfter,
+		workflowTargetInbox: NewAssistantInbox()}
 }
 
 func waitFor(ctx context.Context, d time.Duration) error {

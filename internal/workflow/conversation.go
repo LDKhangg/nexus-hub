@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -37,6 +38,12 @@ type ResourceBinding struct {
 	ExecutionID int64
 	Kind        string
 	ExternalID  string
+}
+
+// TelegramMessageRef scopes a Telegram message to the integration that owns
+// the chat. Different bots may receive the same chat and message IDs.
+func TelegramMessageRef(integrationID string, chatID, messageID int64) string {
+	return fmt.Sprintf("%s:%d:%d", integrationID, chatID, messageID)
 }
 
 // Instruction is one immutable, explicitly supplied workflow instruction.

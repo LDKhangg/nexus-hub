@@ -1013,7 +1013,7 @@ func (e *Engine) bindWorkflowMessage(ctx context.Context, chat ChatRef, messageI
 	}
 	if err := e.d.Conversations.BindResource(ctx, workflow.ResourceBinding{
 		WorkspaceID: chat.WorkspaceID, ExecutionID: executionID, Kind: "telegram.message",
-		ExternalID: fmt.Sprintf("%d:%d", chat.ChatID, messageID),
+		ExternalID: workflow.TelegramMessageRef(chat.IntegrationID, chat.ChatID, messageID),
 	}); err != nil {
 		log.Print("behavior workflow message binding failed (bind_resource)")
 	}

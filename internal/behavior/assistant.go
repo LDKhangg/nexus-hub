@@ -181,6 +181,11 @@ func NewAssistantInbox() *AssistantInbox {
 
 // StageAssistantText keeps text for the worker and returns its key.
 func (b *AssistantInbox) StageAssistantText(workspaceID, text string, now time.Time) (string, error) {
+	return b.stageUntil(workspaceID, text, now, now.Add(assistantInboxTTL))
+}
+
+// stageUntil keeps text under a random key until the caller's deadline.
+func (b *AssistantInbox) stageUntil(workspaceID, text string, now, expires time.Time) (string, error) {
 	key, err := NewNonce()
 	if err != nil {
 		return "", err
@@ -201,8 +206,36 @@ func (b *AssistantInbox) StageAssistantText(workspaceID, text string, now time.T
 		}
 		delete(b.entries, oldest)
 	}
-	b.entries[key] = assistantEntry{workspaceID: workspaceID, text: text, expires: now.Add(assistantInboxTTL)}
+	b.entries[key] = assistantEntry{workspaceID: workspaceID, text: text, expires: expires}
 	return key, nil
+}
+
+// peek returns staged text without consuming it so a retryable operation can
+// leave the owning approval open.
+func (b *AssistantInbox) peek(workspaceID, key string, now time.Time) (string, bool) {
+	if b == nil {
+		return "", false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	e, ok := b.entries[key]
+	if !ok {
+		return "", false
+	}
+	if e.workspaceID != workspaceID || !now.Before(e.expires) {
+		delete(b.entries, key)
+		return "", false
+	}
+	return e.text, true
+}
+
+func (b *AssistantInbox) remove(key string) {
+	if b == nil || key == "" {
+		return
+	}
+	b.mu.Lock()
+	delete(b.entries, key)
+	b.mu.Unlock()
 }
 
 // take returns and removes the text staged under key for the workspace.
@@ -367,7 +400,8 @@ func (w *InboxWorker) toolLoop(ctx context.Context, tc domain.ToolCallingProvide
 	}
 	turns = append(turns, domain.Turn{Role: domain.UserRole, Text: job.text})
 	tools := w.assistantToolDefs()
-	tt := &assistantToolTurn{u: job.u, to: job.to, actor: job.actor, corr: job.corr, proposed: map[string]bool{}}
+	tt := &assistantToolTurn{u: job.u, to: job.to, actor: job.actor, corr: job.corr,
+		ownerText: job.text, workflowID: job.workflowID, proposed: map[string]bool{}}
 	var res assistantTurnResult
 	for step := 0; step < assistantMaxSteps; step++ {
 		offered := tools

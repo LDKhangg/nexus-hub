@@ -3,7 +3,6 @@ package relay
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"strconv"
 	"time"
@@ -141,7 +140,7 @@ func (w *ActionWorker) bindWorkflowMessage(ctx context.Context, a OutboundAction
 	}
 	if err := w.conversations.BindResource(ctx, workflow.ResourceBinding{
 		WorkspaceID: a.WorkspaceID, ExecutionID: a.ExecutionID, Kind: "telegram.message",
-		ExternalID: fmt.Sprintf("%d:%d", chat, messageID),
+		ExternalID: workflow.TelegramMessageRef(a.IntegrationID, chat, messageID),
 	}); err != nil {
 		log.Print("action worker workflow binding failed (bind_resource)")
 	}

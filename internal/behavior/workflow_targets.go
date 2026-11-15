@@ -20,7 +20,7 @@ const workflowTargetLifetime = 10 * time.Minute
 type workflowTargetPayload struct {
 	ChatID         int64   `json:"chat_id"`
 	Kind           string  `json:"kind"`
-	Text           string  `json:"text,omitempty"`
+	MemoryKey      string  `json:"memory_key,omitempty"`
 	UpdateID       int64   `json:"update_id"`
 	MessageID      int64   `json:"message_id,omitempty"`
 	ConversationID int64   `json:"conversation_id"`
@@ -152,7 +152,8 @@ func (w *InboxWorker) resolveWorkflowTarget(ctx context.Context, u InboundUpdate
 	if u.ReplyToMessageID <= 0 || w.d.Conversations == nil {
 		return 0, false
 	}
-	ids, err := w.d.Conversations.ExecutionsByResource(ctx, u.WorkspaceID, "telegram.message", fmt.Sprintf("%d:%d", u.ChatID, u.ReplyToMessageID))
+	ids, err := w.d.Conversations.ExecutionsByResource(ctx, u.WorkspaceID, "telegram.message",
+		workflow.TelegramMessageRef(u.IntegrationID, u.ChatID, u.ReplyToMessageID))
 	if err != nil || len(ids) != 1 {
 		return 0, false
 	}
@@ -197,7 +198,16 @@ func (w *InboxWorker) clarifyWorkflowTarget(ctx context.Context, u InboundUpdate
 	if len(items) == 0 || w.d.Approvals == nil {
 		return w.reply(ctx, to, "Không tìm thấy workflow đang hoạt động phù hợp. Hãy ghi rõ mã WF-id, ví dụ: WF-123 <nội dung>.", "workflow_target_not_found")
 	}
-	p := workflowTargetPayload{ChatID: u.ChatID, Kind: kind, Text: text, UpdateID: u.UpdateID,
+	expires := w.now().Add(workflowTargetLifetime)
+	memoryKey := ""
+	if text != "" {
+		var err error
+		memoryKey, err = w.workflowTargetInbox.stageUntil(u.WorkspaceID, text, w.now(), expires)
+		if err != nil {
+			return w.reply(ctx, to, msgFailed, "handler_failed")
+		}
+	}
+	p := workflowTargetPayload{ChatID: u.ChatID, Kind: kind, MemoryKey: memoryKey, UpdateID: u.UpdateID,
 		MessageID: u.MessageID, ConversationID: state.id, Candidates: make([]int64, len(items))}
 	labels := make([]string, len(items))
 	for i, item := range items {
@@ -212,8 +222,9 @@ func (w *InboxWorker) clarifyWorkflowTarget(ctx context.Context, u InboundUpdate
 	}
 	ap, err := w.d.Approvals.CreateApproval(ctx, u.WorkspaceID, NewApproval{Kind: ApprovalWorkflowTarget,
 		Action: kind, Resource: "conversation:" + strconv.FormatInt(state.id, 10), Payload: payload, Options: options,
-		Nonce: nonce, ExpiresAt: w.now().Add(workflowTargetLifetime)})
+		Nonce: nonce, ExpiresAt: expires})
 	if err != nil {
+		w.workflowTargetInbox.remove(memoryKey)
 		return w.reply(ctx, to, msgFailed, "storage")
 	}
 	buttons := make([][]Button, 0, len(items))
@@ -246,23 +257,69 @@ func (w *InboxWorker) workflowTargetCallback(ctx context.Context, u InboundUpdat
 	id := p.Candidates[data.Option]
 	r := w.workflowReader()
 	if r == nil {
-		return msgStale, "stale", true
+		return "Không xử lý được, hãy bấm lại.", "workflow_target_retry", false
 	}
 	if _, err := r.GetExecutionDetail(ctx, u.WorkspaceID, id); err != nil {
-		return msgStale, "stale", true
+		if !errors.Is(err, workflow.ErrNotFound) {
+			return "Không xử lý được, hãy bấm lại.", "workflow_target_retry", false
+		}
+		return w.finishWorkflowTarget(ctx, u, a, actor, p.MemoryKey, "Không tìm thấy workflow.", "not_found")
 	}
-	if _, err := w.d.Approvals.Decide(ctx, u.WorkspaceID, a.Nonce, DecisionApproved, workflow.FormatRef(id), actor, w.now()); err != nil {
-		text, code := handlerText("", err)
-		return text, code, code == "stale"
+	text := ""
+	if p.Kind == "note" {
+		var ok bool
+		text, ok = w.workflowTargetInbox.peek(u.WorkspaceID, p.MemoryKey, w.now())
+		if !ok {
+			return w.finishWorkflowTarget(ctx, u, a, actor, p.MemoryKey, "Yêu cầu đã hết hạn, hãy gửi lại.", "workflow_target_expired")
+		}
 	}
 	original := InboundUpdate{WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, UpdateID: p.UpdateID,
 		ChatID: u.ChatID, MessageID: p.MessageID, Kind: UpdateText}
 	ctx = withConversation(ctx, p.ConversationID, UpdateText)
-	out := w.executeWorkflowRequest(ctx, original, to, actor, corr, p.Kind, p.Text, id)
-	if out.code == "" || out.code == "reply_failed" {
-		return "Đã chọn " + workflow.FormatRef(id), out.code, true
+	out := w.executeWorkflowRequest(ctx, original, to, actor, corr, p.Kind, text, id)
+	if workflowTargetSucceeded(p.Kind, out.code) {
+		return w.finishWorkflowTarget(ctx, u, a, actor, p.MemoryKey, "Đã chọn "+workflow.FormatRef(id), out.code)
 	}
-	return "Không xử lý được.", out.code, true
+	if toast, terminal := workflowTargetTerminal(out.code); terminal {
+		return w.finishWorkflowTarget(ctx, u, a, actor, p.MemoryKey, toast, out.code)
+	}
+	return "Không xử lý được, hãy bấm lại.", out.code, false
+}
+
+func (w *InboxWorker) finishWorkflowTarget(ctx context.Context, u InboundUpdate, a Approval, actor, memoryKey, toast, code string) (string, string, bool) {
+	if _, err := w.d.Approvals.Decide(ctx, u.WorkspaceID, a.Nonce, DecisionApproved, "", actor, w.now()); err != nil {
+		text, decideCode := handlerText("", err)
+		if decideCode == "stale" {
+			w.workflowTargetInbox.remove(memoryKey)
+			return text, decideCode, true
+		}
+		return "Không xử lý được, hãy bấm lại.", "workflow_target_retry", false
+	}
+	w.workflowTargetInbox.remove(memoryKey)
+	return toast, code, true
+}
+
+func workflowTargetSucceeded(kind, code string) bool {
+	if code == "" || code == "reply_failed" {
+		return true
+	}
+	return kind == "cancel" && code == "assistant_"+toolWorkflowCancel ||
+		kind == "resume" && code == "assistant_"+toolWorkflowResume
+}
+
+func workflowTargetTerminal(code string) (string, bool) {
+	switch code {
+	case "not_found":
+		return "Không tìm thấy workflow.", true
+	case "workflow_terminal", "not_cancellable":
+		return "Workflow đã kết thúc.", true
+	case "not_resumable":
+		return "Workflow không thể tiếp tục.", true
+	case "usage", "unknown_command":
+		return "Yêu cầu không hợp lệ.", true
+	default:
+		return "", false
+	}
 }
 
 func (w *InboxWorker) executeWorkflowRequest(ctx context.Context, u InboundUpdate, to ChatRef, actor, corr, kind, text string, id int64) outcome {
@@ -297,7 +354,7 @@ func (w *InboxWorker) appendWorkflowInstruction(ctx context.Context, u InboundUp
 	_ = w.d.Conversations.BindWorkflow(ctx, u.WorkspaceID, state.id, id, "instruction")
 	if u.MessageID > 0 {
 		_ = w.d.Conversations.BindResource(ctx, workflow.ResourceBinding{WorkspaceID: u.WorkspaceID, ExecutionID: id,
-			Kind: "telegram.message", ExternalID: fmt.Sprintf("%d:%d", u.ChatID, u.MessageID)})
+			Kind: "telegram.message", ExternalID: workflow.TelegramMessageRef(u.IntegrationID, u.ChatID, u.MessageID)})
 	}
 	return w.reply(ctx, to, fmt.Sprintf("%s: đã nhận yêu cầu bổ sung (v%d)", workflow.FormatRef(id), ins.Version), "")
 }
@@ -454,12 +511,21 @@ func (w *InboxWorker) toolWorkflowNote(ctx context.Context, tt *assistantToolTur
 	if r == nil || w.d.Conversations == nil {
 		return toolMsgNotAvailable, true
 	}
-	if _, err := r.GetExecutionDetail(ctx, tt.u.WorkspaceID, id); err != nil {
-		return toolErr(err)
-	}
 	conversation, err := w.ensureConversation(ctx, tt.to)
 	if err != nil || conversation.ID <= 0 {
 		return toolMsgFailed, true
+	}
+	allowed := tt.workflowID == id
+	for _, ref := range workflow.FindRefs(tt.ownerText) {
+		allowed = allowed || ref == id
+	}
+	bound := w.activeBoundWorkflows(ctx, tt.u.WorkspaceID, conversation.ID)
+	allowed = allowed || len(bound) == 1 && bound[0].ID == id
+	if !allowed {
+		return "The workflow target is ambiguous. Ask the owner which WF-id to use; no instruction was recorded.", true
+	}
+	if _, err := r.GetExecutionDetail(ctx, tt.u.WorkspaceID, id); err != nil {
+		return toolErr(err)
 	}
 	ins, err := w.d.Conversations.AppendInstruction(ctx, workflow.InstructionRequest{WorkspaceID: tt.u.WorkspaceID,
 		ExecutionID: id, Text: text, ConversationID: conversation.ID, TelegramUpdateID: tt.u.UpdateID})
