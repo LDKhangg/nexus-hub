@@ -919,6 +919,11 @@ The owner-chat commands are:
   **Làm** / **Huỷ** confirmation path;
 - `/note WF-n <text>`: add a versioned instruction.
 
+`/note` arguments are limited to 512 characters because commands are stored
+in the durable inbox. For longer instructions send `WF-n <text>`, which is
+kept only in memory until it is stored as an instruction (up to 2,000
+characters).
+
 For `/status`, `/cancel`, `/resume` and `/note`, omitting the reference uses the
 same reply/clarification resolution rules where the command form permits it.
 
