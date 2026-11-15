@@ -547,5 +547,94 @@ func TestPhase6AssistantWorkflowNote_RequiresOwnerDisambiguation(t *testing.T) {
 	}
 }
 
+// TC-B11B (REQ-7, REQ-9; regression for review #2 R1, 84b8486): workflow_note
+// writes only the single target the owner's turn makes unambiguous. Precedence:
+// owner WF refs in the text (exactly one), then the reply target, then exactly
+// one active bound workflow. Two distinct owner refs block every write, and a
+// weaker source never widens a stronger one.
+func TestPhase6AssistantWorkflowNote_UnambiguousTargetOnly(t *testing.T) {
+	r := &phase6BReader{details: map[int64]workflow.ExecutionDetail{
+		42: phase6BDetail(42, p4WS, workflow.StateRunning),
+		43: phase6BDetail(43, p4WS, workflow.StateRunning),
+		44: phase6BDetail(44, p4WS, workflow.StateCompleted),
+		45: phase6BDetail(45, "019a6690-abcd-7000-8000-0000000000ff", workflow.StateRunning),
+	}}
+	for _, tc := range []struct {
+		name       string
+		ownerText  string
+		workflowID int64
+		bound      []int64
+		id         int64
+		write      bool
+	}{
+		// Two distinct owner refs: no write whichever id the model picks, even
+		// when a reply target or a sole binding would otherwise name one.
+		{name: "two refs pick first", ownerText: "Ghi chú WF-42 và WF-43", bound: []int64{42, 43}, id: 42},
+		{name: "two refs pick second", ownerText: "Ghi chú WF-42 và WF-43", bound: []int64{42, 43}, id: 43},
+		{name: "two refs with reply target", ownerText: "compare WF-42 with WF-43", workflowID: 42, bound: []int64{42}, id: 42},
+		{name: "two refs with sole binding", ownerText: "compare WF-42 with WF-43", bound: []int64{43}, id: 43},
+		{name: "two refs pick unrelated id", ownerText: "WF-42, WF-43", id: 44},
+		// The same ref repeated (any case) is still one ref.
+		{name: "repeated ref is one", ownerText: "WF-42 ... wf-42 again", bound: []int64{42, 43}, id: 42, write: true},
+		// Exactly one ref: only that id is writable.
+		{name: "one ref writes it", ownerText: "Ghi chú WF-43", workflowID: 42, bound: []int64{42}, id: 43, write: true},
+		{name: "one ref refuses sole binding", ownerText: "Ghi chú WF-43", bound: []int64{42}, id: 42},
+		{name: "one ref refuses reply target", ownerText: "Ghi chú WF-43", workflowID: 42, bound: []int64{42, 43}, id: 42},
+		// No ref, reply target present: only the reply target.
+		{name: "reply target writes it", workflowID: 43, bound: []int64{42}, id: 43, write: true},
+		{name: "reply target refuses sole binding", workflowID: 43, bound: []int64{42}, id: 42},
+		{name: "reply target refuses other id", workflowID: 43, bound: []int64{42, 43}, id: 42},
+		// No ref, no reply target: exactly one active bound workflow.
+		{name: "sole active binding writes it", bound: []int64{42}, id: 42, write: true},
+		{name: "terminal binding does not count", bound: []int64{44, 42}, id: 42, write: true},
+		{name: "sole binding refuses other id", bound: []int64{42}, id: 43},
+		{name: "zero bindings", id: 42},
+		{name: "only terminal binding", bound: []int64{44}, id: 44},
+		{name: "foreign binding is not active", bound: []int64{45}, id: 45},
+		{name: "two active bindings pick first", bound: []int64{42, 43}, id: 42},
+		{name: "two active bindings pick second", bound: []int64{42, 43}, id: 43},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &phase6BConversations{bound: tc.bound}
+			w := phase6BWorker(r, c, &p4Messenger{})
+			tt := &assistantToolTurn{u: InboundUpdate{WorkspaceID: p4WS, UpdateID: 70}, to: ChatRef{WorkspaceID: p4WS},
+				ownerText: tc.ownerText, workflowID: tc.workflowID}
+			got, failed := w.toolWorkflowNote(context.Background(), tt, toolArgs{"id": float64(tc.id), "text": "owner note"})
+			total := 0
+			for _, items := range c.instructions {
+				total += len(items)
+			}
+			if tc.write {
+				if failed || !strings.Contains(got, "v1") || total != 1 || len(c.instructions[tc.id]) != 1 {
+					t.Fatalf("want write to WF-%d: result=%q failed=%v instructions=%v", tc.id, got, failed, c.instructions)
+				}
+				return
+			}
+			if !failed || !strings.Contains(got, "Ask the owner which WF-id") || total != 0 || tt.proposed[toolWorkflowNote] {
+				t.Fatalf("want refusal: result=%q failed=%v instructions=%v", got, failed, c.instructions)
+			}
+		})
+	}
+}
+
+// TC-B11C (REQ-7, REQ-9): after a refusal the model may retry within the same
+// turn with the one id the owner named; the refusal does not use up the
+// once-per-turn budget, and the guessed id stays untouched.
+func TestPhase6AssistantWorkflowNote_RefusalThenOwnerTarget(t *testing.T) {
+	r := &phase6BReader{details: map[int64]workflow.ExecutionDetail{
+		42: phase6BDetail(42, p4WS, workflow.StateRunning),
+		43: phase6BDetail(43, p4WS, workflow.StateRunning),
+	}}
+	c := &phase6BConversations{bound: []int64{42}}
+	w := phase6BWorker(r, c, &p4Messenger{})
+	tt := &assistantToolTurn{u: InboundUpdate{WorkspaceID: p4WS, UpdateID: 71}, to: ChatRef{WorkspaceID: p4WS}, ownerText: "Ghi chú WF-43", workflowID: 42}
+	refused, failed1 := w.toolWorkflowNote(context.Background(), tt, toolArgs{"id": float64(42), "text": "guess"})
+	accepted, failed2 := w.toolWorkflowNote(context.Background(), tt, toolArgs{"id": float64(43), "text": "owner note"})
+	if !failed1 || !strings.Contains(refused, "Ask the owner") || failed2 || !strings.Contains(accepted, "WF-43") ||
+		len(c.instructions[42]) != 0 || len(c.instructions[43]) != 1 {
+		t.Fatalf("refused=%q/%v accepted=%q/%v instructions=%v", refused, failed1, accepted, failed2, c.instructions)
+	}
+}
+
 var _ workflow.Reader = (*phase6BReader)(nil)
 var _ workflow.ConversationStore = (*phase6BConversations)(nil)
