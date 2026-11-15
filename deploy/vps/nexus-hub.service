@@ -1,0 +1,43 @@
+# Nexus-Hub on the VPS (Oracle Linux 9). Installed to
+# /etc/systemd/system/nexus-hub.service; see deploy/vps/README.md.
+# /etc/nexus-hub/env holds DATABASE_URL and NEXUS_MASTER_KEY_FILE.
+# Releases are switched by /opt/nexus-hub/bin/deploy.sh through the
+# /opt/nexus-hub/current symlink.
+[Unit]
+Description=Nexus-Hub ClickUp/GitHub/Telegram agent hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexus
+Group=nexus
+EnvironmentFile=/etc/nexus-hub/env
+Environment=GOMEMLIMIT=300MiB
+ExecStart=/opt/nexus-hub/current/nexus-server
+WorkingDirectory=/var/lib/nexus-hub
+Restart=always
+RestartSec=5
+
+# repos_dir and tmp_dir default to /var/lib/nexus-hub/{repos,tmp}.
+StateDirectory=nexus-hub
+StateDirectoryMode=0700
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/nexus-hub
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+
+MemoryMax=400M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

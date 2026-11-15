@@ -1,0 +1,7 @@
+# /etc/sudoers.d/nexus-hub-deploy (mode 0440, root:root). Check with
+#   visudo -cf /etc/sudoers.d/nexus-hub-deploy
+# The deploy user may run exactly the installed deploy script on a tarball in
+# the incoming directory, as root, without a password. deploy.sh validates
+# both arguments itself, because '*' also matches spaces.
+Defaults:deploy !requiretty
+deploy ALL=(root) NOPASSWD: /opt/nexus-hub/bin/deploy.sh /opt/nexus-hub/incoming/*

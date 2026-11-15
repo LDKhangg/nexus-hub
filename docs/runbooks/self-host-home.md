@@ -10,6 +10,9 @@ Phase 3 is merged with test debt (`docs/product/test-debt/phase3-behavior-engine
 Keep every behavior on `dry_run: true`: then nothing is written to ClickUp until
 you press "Đăng" or confirm.
 
+To run the hub on a VPS with continuous deployment from GitHub instead, see
+`deploy/vps/README.md`.
+
 Never paste tokens, secrets or webhook responses into chat, Git or shell
 arguments. Secrets go in through `secret set` on stdin.
 
