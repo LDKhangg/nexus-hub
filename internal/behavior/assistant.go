@@ -27,8 +27,9 @@ import (
 //
 // The owner's text is never stored in the database or logged: the webhook
 // hands it to the worker through AssistantInbox, in memory. Recent turns of
-// the chat are kept in a bounded in-memory history (assistant_history.go)
-// so follow-ups work; a restart forgets them. The inbox worker only takes
+// the chat are kept in a bounded in-memory history (assistant_history.go),
+// and a sanitized persisted summary seeds the next process after restart.
+// The inbox worker only takes
 // the text and queues an assistant job; one assistant goroutine waits for
 // the model, so a slow model never holds up other Telegram updates.
 
@@ -103,15 +104,22 @@ type Assistant struct {
 	// Redact, when set, removes secrets from every tool result before the
 	// model sees it.
 	Redact func(string) string
+	// Conversations stores routing metadata and bounded summaries only.
+	// SummaryModel is the triage model used by the asynchronous summarizer.
+	Conversations   workflow.ConversationStore
+	SummaryModel    string
+	SummarySanitize func(string) string
 	// Timeout bounds one turn, tool steps included (assistant_timeout).
 	Timeout time.Duration
 	// RatePerMinute is each chat's message budget per minute
 	// (assistant_rate_per_minute); it only stops runaway loops.
 	RatePerMinute int
 
-	mu      sync.Mutex
-	calls   map[int64][]time.Time // per chat, the calls in the last minute
-	history map[assistantHistoryKey]*assistantHistory
+	mu        sync.Mutex
+	calls     map[int64][]time.Time // per chat, the calls in the last minute
+	history   map[assistantHistoryKey]*assistantHistory
+	summaries map[assistantSummaryKey]*assistantSummaryState
+	summaryWG sync.WaitGroup
 }
 
 func (a *Assistant) rate() int {
@@ -173,6 +181,11 @@ func NewAssistantInbox() *AssistantInbox {
 
 // StageAssistantText keeps text for the worker and returns its key.
 func (b *AssistantInbox) StageAssistantText(workspaceID, text string, now time.Time) (string, error) {
+	return b.stageUntil(workspaceID, text, now, now.Add(assistantInboxTTL))
+}
+
+// stageUntil keeps text under a random key until the caller's deadline.
+func (b *AssistantInbox) stageUntil(workspaceID, text string, now, expires time.Time) (string, error) {
 	key, err := NewNonce()
 	if err != nil {
 		return "", err
@@ -193,8 +206,36 @@ func (b *AssistantInbox) StageAssistantText(workspaceID, text string, now time.T
 		}
 		delete(b.entries, oldest)
 	}
-	b.entries[key] = assistantEntry{workspaceID: workspaceID, text: text, expires: now.Add(assistantInboxTTL)}
+	b.entries[key] = assistantEntry{workspaceID: workspaceID, text: text, expires: expires}
 	return key, nil
+}
+
+// peek returns staged text without consuming it so a retryable operation can
+// leave the owning approval open.
+func (b *AssistantInbox) peek(workspaceID, key string, now time.Time) (string, bool) {
+	if b == nil {
+		return "", false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	e, ok := b.entries[key]
+	if !ok {
+		return "", false
+	}
+	if e.workspaceID != workspaceID || !now.Before(e.expires) {
+		delete(b.entries, key)
+		return "", false
+	}
+	return e.text, true
+}
+
+func (b *AssistantInbox) remove(key string) {
+	if b == nil || key == "" {
+		return
+	}
+	b.mu.Lock()
+	delete(b.entries, key)
+	b.mu.Unlock()
 }
 
 // take returns and removes the text staged under key for the workspace.
@@ -224,7 +265,7 @@ How to answer:
 - Answer anything the owner asks: general knowledge, programming and code, ideas, writing, planning, and questions about the hub itself. Give complete, useful answers; long answers are fine (the hub splits them into several Telegram messages).
 - Reply in Vietnamese unless the owner writes in another language or asks for one.
 - Plain text only: Telegram shows no Markdown formatting here. Use short paragraphs and simple "-" lists; code may be written as plain lines.
-- Earlier messages of this chat may be included for context. The hub keeps only recent ones, in memory, and forgets them on restart.
+- Earlier messages of this chat may be included for context. The hub keeps recent exchanges in memory and may restore a compact sanitized summary after restart.
 
 Hub tools:
 - When the answer needs hub data (contacts, behavior runs and their traces, report preferences and templates, workflow executions, their history and the job queue), call the tools and answer from their results. Never invent IDs, names, states or numbers; if a tool fails or finds nothing, say so.
@@ -234,10 +275,11 @@ Hub tools:
 
 // assistantTurnResult is what one turn produced.
 type assistantTurnResult struct {
-	text      string
-	cut       bool // the model stopped at its output limit
-	steps     int  // model calls
-	toolCalls int  // tool calls run
+	text           string
+	cut            bool // the model stopped at its output limit
+	steps          int  // model calls
+	toolCalls      int  // tool calls run
+	conversationID int64
 }
 
 // assistantDecision and parseAssistantDecision are retained as a narrow
@@ -306,18 +348,30 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 	if err != nil || p == nil {
 		return assistantTurnResult{}, errAssistantModel
 	}
-	hist := a.chatHistory(job.u.WorkspaceID, job.u.ChatID)
+	conversation, conversationErr := w.ensureConversation(ctx, job.to)
+	if conversationErr != nil {
+		log.Print("telegram assistant: conversation ensure failed")
+	}
+	hist, created := a.chatHistoryFor(job.u.WorkspaceID, job.u.IntegrationID, job.u.ChatID)
+	if created && conversation.ID > 0 {
+		if summary, summaryErr := a.Conversations.GetSummary(ctx, job.u.WorkspaceID, conversation.ID); summaryErr == nil {
+			hist.setSummary(summary)
+		} else {
+			log.Print("telegram assistant: conversation summary load failed")
+		}
+	}
 	prior := hist.messages()
 	var res assistantTurnResult
 	if tc, ok := p.(domain.ToolCallingProvider); ok {
 		res, err = w.toolLoop(ctx, tc, job, prior)
 	} else {
-		res, err = a.plainTurn(ctx, p, prior, job.text)
+		res, err = a.plainTurnWithSystem(ctx, p, prior, job.text, assistantSystemForWorkflow(job.workflowID))
 	}
 	if err != nil {
 		return res, err
 	}
 	res.text = cleanAssistantReply(res.text)
+	res.conversationID = conversation.ID
 	hist.add(job.text, res.text)
 	return res, nil
 }
@@ -325,8 +379,12 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 // plainTurn answers with a provider that has no tool calling: the history
 // and the owner's text, no tools.
 func (a *Assistant) plainTurn(ctx context.Context, p domain.LLMProvider, prior []domain.Message, text string) (assistantTurnResult, error) {
+	return a.plainTurnWithSystem(ctx, p, prior, text, assistantSystem)
+}
+
+func (a *Assistant) plainTurnWithSystem(ctx context.Context, p domain.LLMProvider, prior []domain.Message, text, system string) (assistantTurnResult, error) {
 	msgs := append(append([]domain.Message(nil), prior...), domain.Message{Role: domain.UserRole, Text: text})
-	resp, err := p.Generate(ctx, &domain.LLMRequest{Model: a.Model, System: assistantSystem, MaxTokens: assistantMaxTokens, Messages: msgs})
+	resp, err := p.Generate(ctx, &domain.LLMRequest{Model: a.Model, System: system, MaxTokens: assistantMaxTokens, Messages: msgs})
 	if err != nil || resp == nil {
 		return assistantTurnResult{steps: 1}, assistantErr(ctx, err)
 	}
@@ -342,7 +400,8 @@ func (w *InboxWorker) toolLoop(ctx context.Context, tc domain.ToolCallingProvide
 	}
 	turns = append(turns, domain.Turn{Role: domain.UserRole, Text: job.text})
 	tools := w.assistantToolDefs()
-	tt := &assistantToolTurn{u: job.u, to: job.to, actor: job.actor, corr: job.corr, proposed: map[string]bool{}}
+	tt := &assistantToolTurn{u: job.u, to: job.to, actor: job.actor, corr: job.corr,
+		ownerText: job.text, workflowID: job.workflowID, proposed: map[string]bool{}}
 	var res assistantTurnResult
 	for step := 0; step < assistantMaxSteps; step++ {
 		offered := tools
@@ -350,7 +409,7 @@ func (w *InboxWorker) toolLoop(ctx context.Context, tc domain.ToolCallingProvide
 			offered = nil // the last step must answer
 		}
 		resp, err := tc.GenerateWithTools(ctx, &domain.ToolRequest{
-			Model: a.Model, System: assistantSystem, MaxTokens: assistantMaxTokens,
+			Model: a.Model, System: assistantSystemForWorkflow(job.workflowID), MaxTokens: assistantMaxTokens,
 			Tools: offered, Turns: turns, CacheStatic: true,
 		})
 		res.steps++
@@ -383,6 +442,13 @@ func (w *InboxWorker) toolLoop(ctx context.Context, tc domain.ToolCallingProvide
 		turns = append(turns, domain.Turn{Role: domain.UserRole, Results: results})
 	}
 	return res, errAssistantModel
+}
+
+func assistantSystemForWorkflow(id int64) string {
+	if id <= 0 {
+		return assistantSystem
+	}
+	return assistantSystem + "\nThe owner's current message replies to " + workflow.FormatRef(id) + ". Treat that workflow as the resolved target for this turn."
 }
 
 // assistantErr maps a provider failure to a turn failure: busy for a
@@ -427,12 +493,13 @@ type assistantPayload struct {
 // message, kept in memory only until the job ends (and, after a
 // successful turn, in the bounded chat history).
 type assistantJob struct {
-	u      InboundUpdate
-	to     ChatRef
-	actor  string
-	corr   string
-	text   string
-	queued time.Time
+	u          InboundUpdate
+	to         ChatRef
+	actor      string
+	corr       string
+	text       string
+	workflowID int64
+	queued     time.Time
 }
 
 // assistant takes the staged text of one plain free-text message, checks
@@ -448,11 +515,23 @@ func (w *InboxWorker) assistant(ctx context.Context, u InboundUpdate, to ChatRef
 	if !ok {
 		return w.reply(ctx, to, msgAssistantGone, "assistant_text_gone")
 	}
+	return w.queueAssistantText(ctx, u, to, actor, corr, text)
+}
+
+func (w *InboxWorker) queueAssistantText(ctx context.Context, u InboundUpdate, to ChatRef, actor, corr, text string) outcome {
+	return w.queueAssistantTextForWorkflow(ctx, u, to, actor, corr, text, 0)
+}
+
+func (w *InboxWorker) queueAssistantTextForWorkflow(ctx context.Context, u InboundUpdate, to ChatRef, actor, corr, text string, workflowID int64) outcome {
+	a := w.d.Assistant
+	if a == nil || a.Models == nil {
+		return w.reply(ctx, to, msgHint, "")
+	}
 	if !a.allow(u.ChatID, w.now()) {
 		return w.reply(ctx, to, msgAssistantBusy, "assistant_rate_limited")
 	}
 	select {
-	case w.assistantJobs <- assistantJob{u: u, to: to, actor: actor, corr: corr, text: text, queued: time.Now()}:
+	case w.assistantJobs <- assistantJob{u: u, to: to, actor: actor, corr: corr, text: text, workflowID: workflowID, queued: time.Now()}:
 		return outcome{code: "assistant_queued"}
 	default:
 		return w.reply(ctx, to, msgAssistantOverloaded, "assistant_queue_full")
@@ -527,6 +606,8 @@ func (w *InboxWorker) assistantJob(ctx context.Context, job assistantJob) outcom
 	case err != nil:
 		return w.reply(ctx, to, msgFailed, "assistant_model_error")
 	}
+	ctx = withConversation(ctx, res.conversationID, UpdateText)
+	a.scheduleSummary(ctx, job.u.WorkspaceID, res.conversationID, assistantExchange{question: job.text, answer: res.text})
 	text := res.text
 	if text == "" {
 		if res.toolCalls > 0 {

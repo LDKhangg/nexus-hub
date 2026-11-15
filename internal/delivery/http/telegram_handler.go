@@ -303,7 +303,7 @@ func (h *TelegramHandler) normalize(ctx context.Context, workspaceID string, upd
 		if q.Message == nil {
 			return behavior.InboundUpdate{}, false, nil // inline-mode presses are not ours
 		}
-		u := behavior.InboundUpdate{ChatID: q.Message.Chat.ID, Kind: behavior.UpdateCallback}
+		u := behavior.InboundUpdate{ChatID: q.Message.Chat.ID, MessageID: q.Message.MessageID, Kind: behavior.UpdateCallback}
 		if !h.isOwner(q.Message.Chat.ID, q.From.ID) {
 			return u, false, nil
 		}
@@ -320,12 +320,15 @@ func (h *TelegramHandler) normalize(ctx context.Context, workspaceID string, upd
 		return u, true, nil
 	case upd.Message != nil:
 		m := upd.Message
-		u := behavior.InboundUpdate{ChatID: m.Chat.ID, Kind: behavior.UpdateOther}
+		u := behavior.InboundUpdate{ChatID: m.Chat.ID, MessageID: m.MessageID, Kind: behavior.UpdateOther}
 		if m.From == nil || !h.isOwner(m.Chat.ID, m.From.ID) {
 			return u, false, nil
 		}
 		if m.Text == nil {
 			return u, true, nil
+		}
+		if m.ReplyTo != nil {
+			u.ReplyToMessageID = m.ReplyTo.MessageID
 		}
 		text := strings.TrimSpace(*m.Text)
 		if strings.HasPrefix(text, "/") {

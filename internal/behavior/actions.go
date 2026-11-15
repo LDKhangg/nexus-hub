@@ -19,6 +19,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
+	"github.com/LDKhangg/nexus-hub/internal/workflow"
 )
 
 // This file is the action library: it delivers a run's classified items
@@ -175,6 +176,9 @@ type ActionDeps struct {
 	// Nil uses owner defaults and platform/id contact fallbacks.
 	Reports *reporting.Renderer
 	People  people.Directory
+	// Conversations receives metadata-only links after a durable workflow
+	// message is sent. Nil keeps legacy behavior unchanged.
+	Conversations workflow.ConversationStore
 }
 
 // ActionSettings tune the action library.
@@ -793,7 +797,11 @@ func (e *Engine) requestConfirm(ctx context.Context, rc RunContext, env writeEnv
 	_ = json.Unmarshal(a.Payload, &p)
 	t := textsFor(rc.Doc.Language)
 	var b strings.Builder
-	b.WriteString(t.confirmHead() + " (" + t.runRef(rc.Doc.Name, rc.Run.ID) + ")\n")
+	runRef := t.runRef(rc.Doc.Name, rc.Run.ID)
+	if ref := workflowRef(ctx); ref != "" {
+		runRef += " · " + ref
+	}
+	b.WriteString(t.confirmHead() + " (" + runRef + ")\n")
 	for _, c := range p.Changes {
 		if c.Type == ActionSetStatus {
 			b.WriteString(t.changeStatus(p.TaskID, c.From, c.To) + "\n")
@@ -978,8 +986,37 @@ func (e *Engine) sendOnce(ctx context.Context, run Run, key string, chat ChatRef
 		log.Printf("behavior run %d corr=%s: message %s sent, id not stored", runID, run.CorrelationID, key)
 		return id, err
 	}
+	bindCtx, bindCancel := context.WithTimeout(context.WithoutCancel(ctx), e.s.RequestTimeout)
+	e.bindWorkflowMessage(bindCtx, chat, id, workflowExecutionID(ctx), key)
+	bindCancel()
 	log.Printf("behavior run %d corr=%s: message %s sent", runID, run.CorrelationID, key)
 	return id, nil
+}
+
+func (e *Engine) bindWorkflowMessage(ctx context.Context, chat ChatRef, messageID, executionID int64, key string) {
+	if e.d.Conversations == nil || executionID <= 0 || messageID <= 0 {
+		return
+	}
+	conversation, err := e.d.Conversations.EnsureConversation(ctx, workflow.Conversation{
+		WorkspaceID: chat.WorkspaceID, IntegrationID: chat.IntegrationID, ChatID: chat.ChatID,
+	})
+	if err != nil {
+		log.Print("behavior workflow message binding failed (ensure_conversation)")
+	} else {
+		source := "report"
+		if strings.HasPrefix(key, "approval:") {
+			source = "approval"
+		}
+		if err := e.d.Conversations.BindWorkflow(ctx, chat.WorkspaceID, conversation.ID, executionID, source); err != nil {
+			log.Print("behavior workflow message binding failed (bind_conversation)")
+		}
+	}
+	if err := e.d.Conversations.BindResource(ctx, workflow.ResourceBinding{
+		WorkspaceID: chat.WorkspaceID, ExecutionID: executionID, Kind: "telegram.message",
+		ExternalID: workflow.TelegramMessageRef(chat.IntegrationID, chat.ChatID, messageID),
+	}); err != nil {
+		log.Print("behavior workflow message binding failed (bind_resource)")
+	}
 }
 
 // sendApproval sends an approval's message once and records its ID.
@@ -1008,9 +1045,13 @@ func citations(cs []Citation) string {
 }
 
 // itemText is the body of a draft or ask message.
-func itemText(t texts, head, proposalLabel string, rc RunContext, it Item) string {
+func itemText(ctx context.Context, t texts, head, proposalLabel string, rc RunContext, it Item) string {
 	var b strings.Builder
-	b.WriteString(head + " (" + t.runRef(rc.Doc.Name, rc.Run.ID) + ")\n")
+	runRef := t.runRef(rc.Doc.Name, rc.Run.ID)
+	if ref := workflowRef(ctx); ref != "" {
+		runRef += " · " + ref
+	}
+	b.WriteString(head + " (" + runRef + ")\n")
 	label := it.Label
 	if strings.TrimSpace(label) == "" {
 		label = it.Key
@@ -1034,7 +1075,7 @@ func (e *Engine) sendDraft(ctx context.Context, rc RunContext, chat ChatRef, it 
 		return err
 	}
 	t := textsFor(rc.Doc.Language)
-	msg := OutMessage{Text: itemText(t, t.draftHead(), t.proposalLabel(), rc, it), Buttons: [][]Button{
+	msg := OutMessage{Text: itemText(ctx, t, t.draftHead(), t.proposalLabel(), rc, it), Buttons: [][]Button{
 		e.buttons(a.Nonce, Button{Text: t.btnPost()}, CallbackApprove, Button{Text: t.btnSkip()}, CallbackReject),
 		e.feedbackRow(t, a.Nonce),
 	}}
@@ -1063,7 +1104,7 @@ func (e *Engine) sendAsk(ctx context.Context, rc RunContext, chat ChatRef, it It
 	}
 	rows = append(rows, e.buttons(a.Nonce, Button{Text: t.btnSkip()}, CallbackReject, Button{Text: t.btnOther()}, CallbackFreeText))
 	rows = append(rows, e.feedbackRow(t, a.Nonce))
-	msg := OutMessage{Text: itemText(t, t.askHead(), t.suggestLabel(), rc, it), Buttons: rows}
+	msg := OutMessage{Text: itemText(ctx, t, t.askHead(), t.suggestLabel(), rc, it), Buttons: rows}
 	return e.sendApproval(ctx, rc, chat, a, msg)
 }
 
@@ -1105,7 +1146,7 @@ func (e *Engine) summary(ctx context.Context, rc RunContext, chat ChatRef, key, 
 		Values: reporting.Values{
 			Items: head + "\n" + strings.TrimSpace(summaryLines(t, items, withStatus, max(maxTelegramRunes/len(items)-40, 60))),
 			Link:  RunLink(rc), Behavior: rc.Doc.Name, RunID: fmt.Sprint(rc.Run.ID), Channel: rc.Trigger.ChannelName,
-		}, TraceHint: fmt.Sprintf("/trace %d", rc.Run.ID),
+		}, TraceHint: fmt.Sprintf("/trace %d", rc.Run.ID), WorkflowRef: workflowRef(ctx),
 	})
 	if err != nil {
 		return err
@@ -1273,7 +1314,7 @@ func (e *Engine) RunFailed(ctx context.Context, rc RunContext, code string) erro
 		Kind: reporting.KindFailure, WorkspaceID: rc.Run.WorkspaceID,
 		Behavior: rc.Run.BehaviorName, Language: rc.Doc.Language, Platform: "clickup", ExternalID: rc.Trigger.SenderID,
 		Values:    reporting.Values{Reason: code, Behavior: name, RunID: fmt.Sprint(rc.Run.ID)},
-		TraceHint: fmt.Sprintf("/trace %d", rc.Run.ID),
+		TraceHint: fmt.Sprintf("/trace %d", rc.Run.ID), WorkflowRef: workflowRef(ctx),
 	})
 	if renderErr != nil {
 		return renderErr

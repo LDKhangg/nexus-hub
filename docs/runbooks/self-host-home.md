@@ -786,7 +786,7 @@ on their pinned version.
 nh workflow list    --workspace-id $WS                      # newest first, 50 per page
 nh workflow list    --workspace-id $WS --state FAILED --limit 20
 nh workflow list    --workspace-id $WS --cursor <next_cursor>
-nh workflow show    --workspace-id $WS 42                   # state, reason, version, deadline, waits, live job, lineage
+nh workflow show    --workspace-id $WS WF-42                # state, waits, resources, instruction versions, lineage
 nh workflow steps   --workspace-id $WS 42                   # steps, attempts, usage, checkpoint references
 nh workflow history --workspace-id $WS 42                   # ordered timeline
 nh workflow jobs    --workspace-id $WS --status processing  # leases in flight
@@ -874,6 +874,79 @@ nothing more, and its lease expires. At startup the reconciler requeues it.
 It continues from its last checkpoint, never from the beginning. Waiting
 executions stay waiting. A button pressed while the hub was down arrives when
 it starts (Telegram keeps updates for 24 hours) and wakes the step.
+
+## Conversations and control (Phase 6)
+
+Every durable execution has an owner-facing reference such as `WF-101`. Use
+that reference in Telegram and with `nh workflow show`, `cancel`, `resume`,
+`retry` and `history`; the CLI also accepts the positive numeric ID. A
+reference is valid only inside its workspace, so another workspace's reference
+is reported as not found.
+
+When an owner message needs a workflow target, Nexus resolves it in this order:
+
+1. exactly one explicit `WF-n` in the message;
+2. the single workflow bound to the Telegram message being replied to;
+3. otherwise, a clarification with at most five buttons for active workflows
+   bound to that conversation.
+
+An unknown or foreign reference, multiple references, or an ambiguous reply
+does nothing until the owner chooses a target. Clarification buttons expire
+after 10 minutes; a valid choice continues the original request once.
+
+### Instructions and control commands
+
+The explicit instruction forms are `WF-n <text>`, `/note WF-n <text>`, and a
+text reply to a message bound to one workflow. Each accepted update is an
+immutable numbered version (`v1`, `v2`, and so on). It does not interrupt work
+already in progress. The behavior model step and the comment-pipeline
+investigate step read the available versions when their next attempt starts;
+an update received during a model or provider call waits for the next such
+step or retry and is never injected mid-call. Instructions cannot widen
+allowed actions, trusted targets, budgets, dry-run behavior or approval rules.
+
+A reply that ends with `?`, and a reply without an explicit reference to a
+message bound to a finished workflow (for example a final report), go to the
+assistant with that workflow as context instead of being stored. An explicit
+`WF-n <text>` or `/note WF-n <text>` for a finished workflow is refused.
+Free-text messages ending in `?` are questions for the assistant, even when
+they start with `WF-n`; use `/note` to force an instruction.
+
+The owner-chat commands are:
+
+- `/status WF-n`: state, current step, waits, latest instruction version and
+  bound-resource metadata;
+- `/list`: up to 20 active workflows in the workspace, newest first;
+- `/cancel WF-n` and `/resume WF-n`: propose the operation through the normal
+  **Làm** / **Huỷ** confirmation path;
+- `/note WF-n <text>`: add a versioned instruction.
+
+`/note` arguments are limited to 512 characters because commands are stored
+in the durable inbox. For longer instructions send `WF-n <text>`, which is
+kept only in memory until it is stored as an instruction (up to 2,000
+characters).
+
+For `/status`, `/cancel`, `/resume` and `/note`, omitting the reference uses the
+same reply/clarification resolution rules where the command form permits it.
+
+### Conversation privacy and restart behavior
+
+The database stores message routing metadata, bindings and a sanitized
+conversation summary, but no raw Telegram chat text. After an assistant
+exchange, `triage_model` produces the summary from the previous summary and
+the exchange. A stored summary is at most 2,000 bytes and is never written to
+logs; if summary generation fails or is oversized, the previous summary is
+kept. Raw recent chat context remains in memory only and disappears on
+restart. The persisted summary is loaded after restart, while workflows,
+bindings, instruction versions and waits continue from durable storage.
+
+`nh workflow show --workspace-id $WS WF-101` reports `resources` grouped by
+kind with a count. It prints external IDs only for metadata-only task/PR
+identifiers and Telegram `<integration>:<chat>:<message>` identifiers, never resource text.
+Its `instructions` object contains only `count`, `latest_version`, `latest_at`
+and `used_version`; `used_version` is the highest version recorded by an
+`owner_instructions` checkpoint. Instruction text and conversation summaries
+are never printed. All lookups are workspace-scoped.
 
 ## Upkeep
 

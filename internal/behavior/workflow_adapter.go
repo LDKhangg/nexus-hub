@@ -144,9 +144,11 @@ func RunOperationKey(runID int64) string { return "behavior_run:" + strconv.Form
 // and the run as legacy reference. def is NormalizeWorkflow of the pinned
 // version.
 func WorkflowStartRequest(run Run, def workflow.Definition) workflow.StartRequest {
+	resources := workflowResources(run)
 	return workflow.StartRequest{
 		WorkspaceID: run.WorkspaceID, VersionID: run.VersionID, TriggerKey: RunOperationKey(run.ID),
 		CorrelationID: run.CorrelationID, Definition: def,
+		ResourceReferences: resources,
 		References: workflow.References{
 			SourceKind: WorkflowSourceRun, SourceID: strconv.FormatInt(run.ID, 10),
 			Subject: run.Subject, Revision: run.Revision, OperationKey: RunOperationKey(run.ID), LegacyRunID: run.ID,
@@ -154,9 +156,47 @@ func WorkflowStartRequest(run Run, def workflow.Definition) workflow.StartReques
 	}
 }
 
+func workflowResources(run Run) []workflow.ResourceReference {
+	trigger, err := DecodeTriggerData(run.Trigger)
+	if err != nil {
+		return nil
+	}
+	resources := make([]workflow.ResourceReference, 0, 3+len(trigger.PRs))
+	if trigger.TaskID != "" {
+		resources = append(resources, workflow.ResourceReference{Kind: "clickup.task", ExternalID: trigger.TaskID})
+	}
+	if trigger.CommentID != "" {
+		resources = append(resources, workflow.ResourceReference{Kind: "clickup.comment", ExternalID: trigger.CommentID})
+	}
+	if trigger.MessageID != "" {
+		resources = append(resources, workflow.ResourceReference{Kind: "clickup.chat_message", ExternalID: trigger.MessageID})
+	}
+	for _, pr := range trigger.PRs {
+		resources = append(resources, workflow.ResourceReference{Kind: "github.pr", ExternalID: pr.String()})
+	}
+	return resources
+}
+
 // --- action gate ---
 
 type actionGateKey struct{}
+type workflowExecutionKey struct{}
+
+func withWorkflowExecution(ctx context.Context, executionID int64) context.Context {
+	return context.WithValue(ctx, workflowExecutionKey{}, executionID)
+}
+
+func workflowExecutionID(ctx context.Context) int64 {
+	id, _ := ctx.Value(workflowExecutionKey{}).(int64)
+	return id
+}
+
+func workflowRef(ctx context.Context) string {
+	if id := workflowExecutionID(ctx); id > 0 {
+		return workflow.FormatRef(id)
+	}
+	return ""
+}
 
 // withActionGate makes every external write of the action library under ctx
 // re-check gate first. A legacy run has no gate.
@@ -177,10 +217,11 @@ func authorizeAction(ctx context.Context) error {
 
 // WorkflowSteps executes behavior runs as workflow steps.
 type WorkflowSteps struct {
-	w    *RunWorker
-	runs DurableRunStore
-	auth ActionAuthorizer
-	now  func() time.Time
+	w            *RunWorker
+	runs         DurableRunStore
+	auth         ActionAuthorizer
+	instructions workflow.InstructionReader
+	now          func() time.Time
 	// waits and applier make blocking approvals durable waits; nil keeps
 	// unbound approvals (see EnableApprovalWaits).
 	waits   ApprovalWaitStore
@@ -189,11 +230,15 @@ type WorkflowSteps struct {
 
 // NewWorkflowSteps builds the behavior step executors over the run
 // executor's collaborators and settings. It starts no worker.
-func NewWorkflowSteps(w *RunWorker, runs DurableRunStore, auth ActionAuthorizer) (*WorkflowSteps, error) {
+func NewWorkflowSteps(w *RunWorker, runs DurableRunStore, auth ActionAuthorizer, readers ...workflow.InstructionReader) (*WorkflowSteps, error) {
 	if w == nil || runs == nil || auth == nil {
 		return nil, errors.New("behavior workflow steps: missing dependency")
 	}
-	return &WorkflowSteps{w: w, runs: runs, auth: auth, now: time.Now}, nil
+	var instructions workflow.InstructionReader
+	if len(readers) > 0 {
+		instructions = readers[0]
+	}
+	return &WorkflowSteps{w: w, runs: runs, auth: auth, instructions: instructions, now: time.Now}, nil
 }
 
 type stepPhase int
@@ -510,7 +555,7 @@ func (s *WorkflowSteps) execute(ctx context.Context, sc workflow.StepContext, ph
 	}
 	actx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	actx = withActionGate(actx, s.gate(fence))
+	actx = withWorkflowExecution(withActionGate(actx, s.gate(fence)), ex.ID)
 	if s.waits != nil {
 		actx = withApprovalBinder(actx, s.binder(fence))
 	}
@@ -543,7 +588,7 @@ func (s *WorkflowSteps) execute(ctx context.Context, sc workflow.StepContext, ph
 		}
 		out = &runOutcome{status: RunDone, code: verdictEndCode(rc)}
 	}
-	res, err := s.end(ctx, &rc, at, out, st)
+	res, err := s.end(withWorkflowExecution(ctx, ex.ID), &rc, at, out, st)
 	return s.awaitDecisions(ctx, sc, fence, st, res, err)
 }
 
@@ -720,6 +765,17 @@ func (s *WorkflowSteps) modelPhase(ctx context.Context, rc *RunContext, sc workf
 		}
 		if modelStepEnded(rc) {
 			return nil, nil
+		}
+	}
+	if s.instructions != nil {
+		instructions, err := s.instructions.ListInstructions(ctx, sc.Execution.WorkspaceID, sc.Execution.ID)
+		if err != nil {
+			return nil, err
+		}
+		block, version := workflow.FormatOwnerInstructions(instructions, workflow.OwnerInstructionsMaxBytes)
+		rc.ownerInstructions = block
+		if version > 0 {
+			st.add(workflow.CheckpointOwnerInstructions, strconv.FormatInt(version, 10), "")
 		}
 	}
 	stored, out, err := s.w.modelPhase(ctx, rc)

@@ -233,6 +233,41 @@ type ContactAccount struct {
 	LastSeen     pgtype.Timestamptz
 }
 
+// Workspace-scoped conversation routing and bounded sanitized summary; raw chat text is never stored.
+type Conversation struct {
+	ID               int64
+	WorkspaceID      pgtype.UUID
+	IntegrationID    pgtype.UUID
+	ChatID           int64
+	UserID           pgtype.UUID
+	Summary          string
+	SummaryUpdatedAt pgtype.Timestamptz
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
+}
+
+// Message identifiers and routing metadata only; message bodies are never stored.
+type ConversationMessage struct {
+	ID                int64
+	WorkspaceID       pgtype.UUID
+	ConversationID    int64
+	Direction         string
+	Kind              string
+	TelegramMessageID int64
+	ReplyToMessageID  pgtype.Int8
+	ExecutionID       pgtype.Int8
+	CreatedAt         pgtype.Timestamptz
+}
+
+// Links conversations to workflow executions without storing chat content.
+type ConversationWorkflow struct {
+	WorkspaceID    pgtype.UUID
+	ConversationID int64
+	ExecutionID    int64
+	Source         string
+	CreatedAt      pgtype.Timestamptz
+}
+
 // AES-256-GCM ciphertext only; AAD binds workspace, name and kind. The master key lives outside the database.
 type Credential struct {
 	ID          pgtype.UUID
@@ -439,6 +474,16 @@ type ReportTemplatePrompt struct {
 	CreatedAt    pgtype.Timestamptz
 }
 
+// Trusted external resource identifiers bound to workflow executions; resource content is never stored.
+type ResourceBinding struct {
+	ID          int64
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+	Kind        string
+	ExternalID  string
+	CreatedAt   pgtype.Timestamptz
+}
+
 type RunItem struct {
 	ID            int64
 	WorkspaceID   pgtype.UUID
@@ -482,6 +527,10 @@ type TelegramUpdate struct {
 	IntegrationID pgtype.UUID
 	// A short code such as args_too_long; never message text.
 	Note string
+	// Telegram message identifier only; no message body is stored.
+	TelegramMessageID pgtype.Int8
+	// Telegram replied-to message identifier only; no message body is stored.
+	ReplyToMessageID pgtype.Int8
 }
 
 // Explicit same-workspace related-to links. A link neither authorizes access nor automatically merges context. Metadata may record the confirmed URL or human decision.
@@ -563,6 +612,17 @@ type WorkflowExecution struct {
 	FinishedAt        pgtype.Timestamptz
 	CreatedAt         pgtype.Timestamptz
 	UpdatedAt         pgtype.Timestamptz
+}
+
+// Sanitized, explicitly supplied workflow instructions; prompts and surrounding messages are never stored.
+type WorkflowInstruction struct {
+	WorkspaceID      pgtype.UUID
+	ExecutionID      int64
+	Version          int64
+	Text             string
+	ConversationID   int64
+	TelegramUpdateID int64
+	CreatedAt        pgtype.Timestamptz
 }
 
 // Runtime-mode fence per workspace: legacy claimers or the durable workflow queue schedule its agent and behavior work, never both.

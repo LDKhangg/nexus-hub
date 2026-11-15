@@ -34,6 +34,13 @@ type References struct {
 	LegacyJobID int64
 }
 
+// ResourceReference identifies an external resource before its execution ID
+// and workspace are known.
+type ResourceReference struct {
+	Kind       string
+	ExternalID string
+}
+
 // CheckpointReference points to an existing result or side-effect receipt.
 type CheckpointReference struct {
 	Kind string `json:"kind"`
@@ -153,6 +160,10 @@ type StartRequest struct {
 	Definition Definition
 
 	References References
+
+	// ResourceReferences are trusted external identifiers already stored by
+	// the source domain. StartExecution binds them without fetching data.
+	ResourceReferences []ResourceReference
 
 	// Deadline is an explicit execution deadline. When the definition sets
 	// ExecutionDeadline, the stored deadline is the earlier of Deadline and

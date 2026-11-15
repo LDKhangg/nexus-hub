@@ -491,7 +491,7 @@ func (s *AgentWorkflowStore) finish(ctx context.Context, f agent.AgentFence, job
 				WorkspaceID: t.ws, ID: jobID,
 			}))
 		}
-		if err := s.agents.writeBatchOutcome(ctx, t.q, agentBatchJob(b), t.ws, thread, code, routerNote, actorNote, text, through, finish); err != nil {
+		if err := s.agents.writeBatchOutcome(ctx, t.q, agentBatchJob(b), t.ws, thread, code, routerNote, actorNote, text, through, f.ExecutionID, finish); err != nil {
 			return err
 		}
 		return t.progress(ctx, &cp, workflow.Usage{})

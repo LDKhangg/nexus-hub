@@ -678,7 +678,7 @@ func (s *AgentWorkflowStore) ReleaseOrphanBatch(ctx context.Context, o agent.Orp
 			WorkspaceID: ws, ID: b.ID,
 		}))
 	}
-	if err := s.agents.writeBatchOutcome(ctx, q, agentBatchJob(b), ws, thread, code, "", "", text, through, finish); err != nil {
+	if err := s.agents.writeBatchOutcome(ctx, q, agentBatchJob(b), ws, thread, code, "", "", text, through, o.ExecutionID, finish); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

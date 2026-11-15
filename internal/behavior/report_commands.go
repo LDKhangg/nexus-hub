@@ -153,6 +153,7 @@ func (w *InboxWorker) sendReportMessageID(ctx context.Context, to ChatRef, messa
 	if err != nil {
 		return 0, outcome{code: firstCode(code, "reply_failed")}
 	}
+	w.recordOutboundConversation(ctx, to, id, message.ReplyTo)
 	return id, outcome{code: code}
 }
 

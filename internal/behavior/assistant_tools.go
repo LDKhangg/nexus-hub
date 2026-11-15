@@ -39,6 +39,7 @@ const (
 	toolWorkflowShow    = "workflow_show"
 	toolWorkflowHistory = "workflow_history"
 	toolWorkflowJobs    = "workflow_jobs"
+	toolWorkflowNote    = "workflow_note"
 
 	toolContactAlias   = "contact_alias"
 	toolReportStyle    = "report_style"
@@ -101,6 +102,8 @@ var assistantTools = []assistantTool{
 		InputSchema: toolSchema(`"id":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":50},"after_sequence":{"type":"integer","minimum":0}`, "id")}},
 	{workflow: true, def: domain.ToolDef{Name: toolWorkflowJobs, Description: "List rows of the durable job queue, newest first; filter by status (dead_letter shows failed work) or execution.",
 		InputSchema: toolSchema(`"status":{"type":"string","enum":["pending","processing","completed","dead_letter"]},"execution_id":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":20}`)}},
+	{workflow: true, def: domain.ToolDef{Name: toolWorkflowNote, Description: "Add an owner-requested instruction to a non-terminal workflow immediately. This is an internal update, not an external side effect.",
+		InputSchema: toolSchema(`"id":{"type":"integer","minimum":1},"text":{"type":"string","description":"the owner's instruction"}`, "id", "text")}},
 
 	{def: domain.ToolDef{Name: toolContactAlias, Description: "Propose giving a contact a display name. Sends the owner a Làm/Huỷ confirmation; nothing changes unless the owner taps Làm.",
 		InputSchema: toolSchema(`"ref":{"type":"string","description":"contact ID or platform:external-id, e.g. clickup:12345"},"name":{"type":"string"}`, "ref", "name")}},
@@ -129,12 +132,14 @@ func (w *InboxWorker) assistantToolDefs() []domain.ToolDef {
 
 // assistantToolTurn is the state of one turn's tool calls.
 type assistantToolTurn struct {
-	u         InboundUpdate
-	to        ChatRef
-	actor     string
-	corr      string
-	proposals int
-	proposed  map[string]bool // action|resource already proposed this turn
+	u          InboundUpdate
+	to         ChatRef
+	actor      string
+	corr       string
+	ownerText  string
+	workflowID int64
+	proposals  int
+	proposed   map[string]bool // action|resource already proposed this turn
 }
 
 // toolArgs is a tool call's validated input object.
@@ -237,6 +242,8 @@ func (w *InboxWorker) runAssistantTool(ctx context.Context, tt *assistantToolTur
 		text, isErr = w.toolWorkflowHistory(hctx, ws, args)
 	case toolWorkflowJobs:
 		text, isErr = w.toolWorkflowJobs(hctx, ws, args)
+	case toolWorkflowNote:
+		text, isErr = w.toolWorkflowNote(hctx, tt, args)
 	case toolContactAlias, toolReportStyle, toolWorkflowCancel, toolWorkflowResume, toolWorkflowRetry:
 		// The confirmation is sent with the turn's context, not the
 		// handler timeout, like a reply.
@@ -409,7 +416,7 @@ func toolTime(t *time.Time) string {
 
 func toolExecution(v workflow.ExecutionView) map[string]any {
 	m := map[string]any{
-		"id": v.ID, "state": v.State, "behavior": oneLine(v.BehaviorName, 80), "behavior_version": v.BehaviorVersion,
+		"id": v.ID, "ref": workflow.FormatRef(v.ID), "state": v.State, "behavior": oneLine(v.BehaviorName, 80), "behavior_version": v.BehaviorVersion,
 		"source_kind": v.References.SourceKind, "created_at": toolTime(&v.CreatedAt), "updated_at": toolTime(&v.UpdatedAt),
 	}
 	if v.Reason != "" {
@@ -639,8 +646,8 @@ func (w *InboxWorker) toolPropose(ctx context.Context, tt *assistantToolTurn, na
 		action, p = intentPrefsStyle, assistantPayload{Style: string(style)}
 		text = "Đổi kiểu báo cáo thành " + string(style) + "?"
 	case toolWorkflowCancel, toolWorkflowResume, toolWorkflowRetry:
-		a := w.d.Assistant
-		if a.Workflows == nil || a.WorkflowCommands == nil {
+		r := w.workflowReader()
+		if r == nil || w.workflowEngine() == nil {
 			return toolMsgNotAvailable, true
 		}
 		id, err := args.num("id", 0, 1, math.MaxInt64)
@@ -648,7 +655,7 @@ func (w *InboxWorker) toolPropose(ctx context.Context, tt *assistantToolTurn, na
 			return toolErr(errToolArgs)
 		}
 		rctx, cancel := context.WithTimeout(ctx, w.settings.HandlerTimeout)
-		d, err := a.Workflows.GetExecutionDetail(rctx, tt.u.WorkspaceID, id)
+		d, err := r.GetExecutionDetail(rctx, tt.u.WorkspaceID, id)
 		cancel()
 		if err != nil {
 			return toolErr(err)
@@ -711,15 +718,15 @@ func (w *InboxWorker) toolPropose(ctx context.Context, tt *assistantToolTurn, na
 // had already taken effect). Idempotency keys follow plan §3.3 like the
 // CLI's, with their own "telegram:" source.
 func (w *InboxWorker) workflowCommand(ctx context.Context, ws, action string, p assistantPayload) (string, string) {
-	a := w.d.Assistant
-	if a == nil || a.Workflows == nil || a.WorkflowCommands == nil {
+	r, engine := w.workflowReader(), w.workflowEngine()
+	if r == nil || engine == nil {
 		return msgNotAvailable, "not_available"
 	}
 	id := p.ExecutionID
 	if id <= 0 || p.IdempotencyKey == "" {
 		return msgBadButton, NoteBadCallback
 	}
-	d, err := a.Workflows.GetExecutionDetail(ctx, ws, id)
+	d, err := r.GetExecutionDetail(ctx, ws, id)
 	if errors.Is(err, workflow.ErrNotFound) {
 		return msgNotFound, "not_found"
 	}
@@ -730,61 +737,61 @@ func (w *InboxWorker) workflowCommand(ctx context.Context, ws, action string, p 
 	switch action {
 	case toolWorkflowCancel:
 		if d.State == workflow.StateCancelled {
-			return fmt.Sprintf("Execution #%d đã bị huỷ trước đó.", id), ""
+			return fmt.Sprintf("%s đã bị huỷ trước đó.", workflow.FormatRef(id)), ""
 		}
 		if d.State.IsTerminal() {
-			return fmt.Sprintf("Execution #%d đã kết thúc (%s), không huỷ được.", id, d.State), "not_cancellable"
+			return fmt.Sprintf("%s đã kết thúc (%s), không huỷ được.", workflow.FormatRef(id), d.State), "not_cancellable"
 		}
-		e, err := a.WorkflowCommands.Cancel(ctx, cmd)
+		e, err := engine.Cancel(ctx, cmd)
 		switch {
 		case errors.Is(err, workflow.ErrNotEligible), errors.Is(err, workflow.ErrConflict):
-			if now, rerr := a.Workflows.GetExecutionDetail(ctx, ws, id); rerr == nil && now.State == workflow.StateCancelled {
-				return fmt.Sprintf("Execution #%d đã bị huỷ trước đó.", id), ""
+			if now, rerr := r.GetExecutionDetail(ctx, ws, id); rerr == nil && now.State == workflow.StateCancelled {
+				return fmt.Sprintf("%s đã bị huỷ trước đó.", workflow.FormatRef(id)), ""
 			}
-			return fmt.Sprintf("Execution #%d vừa đổi trạng thái, không huỷ được.", id), "not_cancellable"
+			return fmt.Sprintf("%s vừa đổi trạng thái, không huỷ được.", workflow.FormatRef(id)), "not_cancellable"
 		case err != nil:
 			return msgFailed, "handler_failed"
 		}
-		return fmt.Sprintf("Đã huỷ execution #%d (%s). Yêu cầu bên ngoài đang chạy dở không được hoàn tác.", e.ID, e.State), ""
+		return fmt.Sprintf("Đã huỷ %s (%s). Yêu cầu bên ngoài đang chạy dở không được hoàn tác.", workflow.FormatRef(e.ID), e.State), ""
 	case toolWorkflowResume:
-		e, err := a.WorkflowCommands.Resume(ctx, cmd)
+		e, err := engine.Resume(ctx, cmd)
 		switch {
 		case errors.Is(err, workflow.ErrNotEligible), errors.Is(err, workflow.ErrConflict):
-			now, rerr := a.Workflows.GetExecutionDetail(ctx, ws, id)
+			now, rerr := r.GetExecutionDetail(ctx, ws, id)
 			if rerr != nil {
 				now = d
 			}
 			switch {
 			case now.State.IsTerminal():
-				return fmt.Sprintf("Execution #%d đã kết thúc (%s).", id, now.State), "not_resumable"
+				return fmt.Sprintf("%s đã kết thúc (%s).", workflow.FormatRef(id), now.State), "not_resumable"
 			case !now.State.IsWaiting():
-				return fmt.Sprintf("Execution #%d không ở trạng thái chờ (%s).", id, now.State), "not_resumable"
+				return fmt.Sprintf("%s không ở trạng thái chờ (%s).", workflow.FormatRef(id), now.State), "not_resumable"
 			default:
-				return fmt.Sprintf("Execution #%d chưa có quyết định cho bước đang chờ; hãy quyết định yêu cầu duyệt trước.", id), "not_resumable"
+				return fmt.Sprintf("%s chưa có quyết định cho bước đang chờ; hãy quyết định yêu cầu duyệt trước.", workflow.FormatRef(id)), "not_resumable"
 			}
 		case err != nil:
 			return msgFailed, "handler_failed"
 		}
 		if !d.State.IsWaiting() {
-			return fmt.Sprintf("Execution #%d đã được tiếp tục trước đó (%s).", e.ID, e.State), ""
+			return fmt.Sprintf("%s đã được tiếp tục trước đó (%s).", workflow.FormatRef(e.ID), e.State), ""
 		}
-		return fmt.Sprintf("Đã tiếp tục execution #%d (%s).", e.ID, e.State), ""
+		return fmt.Sprintf("Đã tiếp tục %s (%s).", workflow.FormatRef(e.ID), e.State), ""
 	case toolWorkflowRetry:
-		child, err := a.WorkflowCommands.Retry(ctx, cmd)
+		child, err := engine.Retry(ctx, cmd)
 		switch {
 		case errors.Is(err, workflow.ErrProviderUncertainty):
-			return fmt.Sprintf("Không thử lại execution #%d: có hành động chưa rõ kết quả; không gửi lại gì cả, hãy kiểm tra phía nhà cung cấp.", id), "side_effect_uncertain"
+			return fmt.Sprintf("Không thử lại %s: có hành động chưa rõ kết quả; không gửi lại gì cả, hãy kiểm tra phía nhà cung cấp.", workflow.FormatRef(id)), "side_effect_uncertain"
 		case errors.Is(err, workflow.ErrUnsafeRetry):
-			return fmt.Sprintf("Không thử lại execution #%d: có bước đã xong mà không có checkpoint dùng lại được.", id), "unsafe_retry"
+			return fmt.Sprintf("Không thử lại %s: có bước đã xong mà không có checkpoint dùng lại được.", workflow.FormatRef(id)), "unsafe_retry"
 		case errors.Is(err, workflow.ErrNotEligible):
-			return fmt.Sprintf("Chỉ thử lại được execution FAILED; execution #%d đang là %s.", id, d.State), "not_retryable"
+			return fmt.Sprintf("Chỉ thử lại được workflow FAILED; %s đang là %s.", workflow.FormatRef(id), d.State), "not_retryable"
 		case err != nil:
 			return msgFailed, "handler_failed"
 		}
 		if d.RetryChildID != 0 {
-			return fmt.Sprintf("Execution #%d đã có lần thử lại #%d (%s).", id, child.ID, child.State), ""
+			return fmt.Sprintf("%s đã có lần thử lại %s (%s).", workflow.FormatRef(id), workflow.FormatRef(child.ID), child.State), ""
 		}
-		return fmt.Sprintf("Đã tạo lần thử lại #%d cho execution #%d (%s).", child.ID, id, child.State), ""
+		return fmt.Sprintf("Đã tạo lần thử lại %s cho %s (%s).", workflow.FormatRef(child.ID), workflow.FormatRef(id), child.State), ""
 	}
 	return msgBadButton, NoteBadCallback
 }

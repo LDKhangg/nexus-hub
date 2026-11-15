@@ -4,7 +4,7 @@ Status of every PCC-001 requirement. Statuses follow PCC §10.1.2: `PENDING`, `I
 
 Snapshot: 2026-11-12. Phase 1 merged; Phase 2 under test and review. Nothing is `VERIFIED` against the PCC yet: Phase 1/2 work covers parts of the IDs marked `IN_PROGRESS`.
 
-Update 2026-11-15: Phase 5 (durable workflow engine + open Telegram assistant) passed Test and Review on feature/phase5 2ac779b, deployed locally, merge pending; its IDs are IN_PROGRESS until merged.
+Update 2026-11-15: Phase 5 (durable workflow engine + open Telegram assistant) merged into develop 65be4ac (CI 43631958237 green) after Test PASS and Review APPROVE on 2ac779b; its scoped IDs are VERIFIED. E2E-005 live part stays open (Phase 12/13).
 
 Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889383 green (664 tests). Open test debt: TD-6, TD3-2, TD3-3, TD3d-2, TD3d-3 (independent reviews of Phases 2/3/3d and live ClickUp payload facts). Per-ID statuses are updated per phase when the owner asks.
 
@@ -39,19 +39,19 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-027 | Unknown event types được xử lý an toàn. | 4 | PENDING |  |
 | FR-028 | Có event replay phù hợp từ dữ liệu đã lưu. | 4 | PENDING |  |
 | FR-029 | Event processing không phụ thuộc vào tốc độ phản hồi của LLM. | 2, 4 | IN_PROGRESS | Phase 1/2: webhook stores then processes asynchronously |
-| FR-030 | Persistent conversations. | 6 | PENDING |  |
-| FR-031 | Conversation-to-user binding. | 6 | PENDING |  |
-| FR-032 | Conversation-to-workflow binding. | 6 | PENDING |  |
-| FR-033 | Một conversation hỗ trợ nhiều workflows. | 6 | PENDING |  |
-| FR-034 | Một workflow liên kết được với nhiều external resources. | 6 | PENDING |  |
-| FR-035 | Context resolution cho follow-up messages. | 6 | PENDING |  |
-| FR-036 | Có workflow reference ID để định danh tường minh. | 6 | PENDING |  |
-| FR-037 | Nếu không rõ workflow đích, hệ thống phải hỏi lại. | 6 | PENDING |  |
-| FR-038 | Hỗ trợ bổ sung instructions khi workflow đang chạy. | 6 | PENDING |  |
-| FR-039 | Version hóa instruction updates. | 6 | PENDING |  |
-| FR-040 | Hỗ trợ cancel, resume, status và list từ conversation. | 6 | PENDING |  |
-| FR-041 | Không trộn context của hai workflow độc lập. | 6 | PENDING |  |
-| FR-042 | Có cơ chế giới hạn và tóm tắt context khi cần. | 2, 6 | IN_PROGRESS | Phase 2: rolling summary + packet budget |
+| FR-030 | Persistent conversations. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
+| FR-031 | Conversation-to-user binding. | 6 | IN_PROGRESS | Phase 6: bound to workspace + owner chat (Q3a, nullable user_id seam); users table later (Phase 4b) |
+| FR-032 | Conversation-to-workflow binding. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
+| FR-033 | Một conversation hỗ trợ nhiều workflows. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
+| FR-034 | Một workflow liên kết được với nhiều external resources. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
+| FR-035 | Context resolution cho follow-up messages. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
+| FR-036 | Có workflow reference ID để định danh tường minh. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
+| FR-037 | Nếu không rõ workflow đích, hệ thống phải hỏi lại. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
+| FR-038 | Hỗ trợ bổ sung instructions khi workflow đang chạy. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
+| FR-039 | Version hóa instruction updates. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
+| FR-040 | Hỗ trợ cancel, resume, status và list từ conversation. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
+| FR-041 | Không trộn context của hai workflow độc lập. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
+| FR-042 | Có cơ chế giới hạn và tóm tắt context khi cần. | 2, 6 | IN_PROGRESS | Phase 2: rolling summary + packet budget; Phase 6: persisted conversation summary ≤2,000 bytes, 8 KiB instruction block (52af5e0) |
 | FR-043 | Intent classification. | 2, 7 | IN_PROGRESS | Phase 2: Tier-1 triage categories |
 | FR-044 | Task type classification. | 7 | PENDING |  |
 | FR-045 | Task priority proposal. | 2, 7 | IN_PROGRESS | Phase 2: urgency in triage |
@@ -82,42 +82,42 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-070 | Artifact references. | 8 | PENDING |  |
 | FR-071 | Workspace cleanup và retention. | 8 | PENDING |  |
 | FR-072 | Ngăn concurrent write conflicts đối với cùng repository/branch. | 8 | PENDING |  |
-| FR-073 | Create workflow definition. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-074 | Update draft workflow. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-075 | Validate workflow schema. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-076 | Publish workflow version. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-077 | Enable/disable workflow. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-078 | Define triggers. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-079 | Define orchestration settings. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-080 | Define worker constraints. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-081 | Define notification rules. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-082 | Define approval rules. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-083 | Define retries/timeouts. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-084 | Persist immutable published versions. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-085 | Execution luôn tham chiếu một workflow version cụ thể. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-086 | Có cơ chế xuất/nhập config dạng JSON/YAML. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-087 | State machine với valid transitions. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-088 | Persistent execution records. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-089 | Step-level checkpoints. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-090 | Event history. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-091 | Retry policy. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-092 | Cancellation. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-093 | Resume/recovery. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-094 | Execution timeout. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-095 | Dead-letter hoặc failed-job inspection. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-096 | Dependency-aware task progression. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
+| FR-073 | Create workflow definition. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-074 | Update draft workflow. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-075 | Validate workflow schema. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-076 | Publish workflow version. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-077 | Enable/disable workflow. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-078 | Define triggers. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-079 | Define orchestration settings. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-080 | Define worker constraints. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-081 | Define notification rules. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-082 | Define approval rules. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-083 | Define retries/timeouts. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-084 | Persist immutable published versions. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-085 | Execution luôn tham chiếu một workflow version cụ thể. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-086 | Có cơ chế xuất/nhập config dạng JSON/YAML. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-087 | State machine với valid transitions. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-088 | Persistent execution records. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-089 | Step-level checkpoints. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-090 | Event history. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-091 | Retry policy. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-092 | Cancellation. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-093 | Resume/recovery. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-094 | Execution timeout. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-095 | Dead-letter hoặc failed-job inspection. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-096 | Dependency-aware task progression. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-097 | Không giữ worker khi đang chờ user. | 8 | PENDING |  |
-| FR-098 | Optimistic locking/leases để tránh nhiều scheduler cùng claim một job. | 2, 5 | IN_PROGRESS | Phase 2: agent job leases + thread lock; Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-099 | Reconciliation sau process restart. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
-| FR-100 | Persistent job queue. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
+| FR-098 | Optimistic locking/leases để tránh nhiều scheduler cùng claim một job. | 2, 5 | IN_PROGRESS | Phase 2: agent job leases + thread lock; Phase 5: generic queue leases + fenced claims, merged develop 65be4ac |
+| FR-099 | Reconciliation sau process restart. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
+| FR-100 | Persistent job queue. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-101 | Configurable per-user workflow concurrency. | 8 | PENDING |  |
 | FR-102 | Configurable worker pool size. | 8 | PENDING |  |
 | FR-103 | Worker capability matching. | 8 | PENDING |  |
 | FR-104 | Priority scheduling. | 8 | PENDING |  |
 | FR-105 | Resource conflict handling. | 8 | PENDING |  |
-| FR-106 | Job leases và lease expiration. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
+| FR-106 | Job leases và lease expiration. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-107 | Worker heartbeat hoặc tương đương. | 8 | PENDING |  |
-| FR-108 | Queue visibility. | 5 | IN_PROGRESS | Phase 5: Test PASS (CI 43630791438, 1120 tests, 0 skip) + Review APPROVE on feature/phase5 2ac779b; VERIFIED after merge |
+| FR-108 | Queue visibility. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-109 | Backpressure khi quá tải. | 8 | PENDING |  |
 | FR-110 | Worker allocation được audit. | 8 | PENDING |  |
 | FR-111 | Rule schema có version. | 9 | PENDING |  |
@@ -216,7 +216,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | NFR-031 | Health/readiness endpoints. | 3 | PENDING |  |
 | NFR-032 | Có cảnh báo hoặc notification cho stuck/failed workflows. | 12 | PENDING |  |
 | NFR-033 | Có README. | 3 | PENDING |  |
-| NFR-034 | Có architecture documentation. | every | IN_PROGRESS | docs/architecture.md predates PCC; ROADMAP.md added |
+| NFR-034 | Có architecture documentation. | every | IN_PROGRESS | docs/architecture.md predates PCC; ROADMAP.md added; Phase 6 runbook section |
 | NFR-035 | Có database migrations. | 3 | IN_PROGRESS | goose migrations 00001–00003 |
 | NFR-036 | Có OpenAPI hoặc tài liệu API tương đương. | 11 | PENDING |  |
 | NFR-037 | Có automated tests. | 3 | IN_PROGRESS | Go tests exist; CI missing (P3) |
@@ -237,7 +237,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | DEP-012 | Có fresh-install test trên môi trường sạch. | 13 | PENDING |  |
 | E2E-001 | Mobile Prompt to Pull Request | 10, 13 | PENDING |  |
 | E2E-002 | Multiple Concurrent Workflows | 8, 13 | PENDING |  |
-| E2E-003 | Update Running Workflow | 6, 8, 13 | PENDING |  |
+| E2E-003 | Update Running Workflow | 6, 8, 13 | IN_PROGRESS | Phase 6: fake-provider journey (reply → v1 → next model/investigate step → /status) on 52af5e0; worker-delivery part Phase 8, live part Phase 13 |
 | E2E-004 | Approval from Phone | 9, 13 | PENDING |  |
 | E2E-005 | Server Restart Recovery | 5, 12, 13 | IN_PROGRESS | Phase 5: fake-provider crash/restart/reclaim tests pass on 2ac779b; live evidence is Phase 12/13 |
 | E2E-006 | Duplicate Webhook | 4, 13 | PENDING |  |
