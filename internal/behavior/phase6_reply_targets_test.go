@@ -334,3 +334,68 @@ func TestPhase6ReplyTarget_UnknownOrForeignRefNeverWrites(t *testing.T) {
 		})
 	}
 }
+
+// TC-RT09 (REQ-9; regression for 0a45234): free text that starts with WF-n
+// but ends in ?/？ is a question for the assistant, plain or as a reply to
+// another workflow's message, terminal or not. An unknown or foreign leading
+// ref gets no workflow context and is not echoed. /note still forces an
+// instruction.
+func TestPhase6ReplyTarget_WFPrefixedQuestionGoesToAssistant(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		text     string
+		reply    bool
+		terminal bool
+		want     int64
+	}{
+		{name: "plain", text: "WF-102 chạy tới đâu rồi?", want: 102},
+		{name: "reply to WF-101", text: "WF-102 chạy tới đâu rồi?", reply: true, want: 102},
+		{name: "fullwidth", text: "WF-102 chạy tới đâu rồi？", reply: true, want: 102},
+		{name: "terminal plain", text: "WF-102 chạy tới đâu rồi?", terminal: true, want: 102},
+		{name: "terminal reply", text: "WF-102 chạy tới đâu rồi?", reply: true, terminal: true, want: 102},
+		{name: "foreign plain", text: "WF-45 chạy tới đâu rồi?"},
+		{name: "foreign reply", text: "WF-45 chạy tới đâu rồi?", reply: true},
+		{name: "unknown plain", text: "WF-999 chạy tới đâu rồi?"},
+		{name: "unknown reply", text: "WF-999 chạy tới đâu rồi?", reply: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := phase6RTSetup(101, 101, 102)
+			if tc.terminal {
+				e.r.details[102] = phase6BDetail(102, p4WS, workflow.StateCompleted)
+				e.c.appendErr = workflow.ErrNotEligible
+			}
+			out := e.text(t, tc.text, tc.reply)
+			j, ok := e.job(t)
+			if out.code != "assistant_queued" || !ok || j.workflowID != tc.want || j.text != tc.text || e.total() != 0 {
+				t.Fatalf("code=%q job=%+v queued=%v instructions=%v", out.code, j, ok, e.c.instructions)
+			}
+			if len(e.ap.created) != 0 {
+				t.Fatalf("question created %d approvals", len(e.ap.created))
+			}
+			for _, text := range e.m.texts() {
+				if strings.Contains(text, "45") || strings.Contains(text, "999") || strings.Contains(text, "đã kết thúc") {
+					t.Fatalf("unexpected reply %q", text)
+				}
+			}
+		})
+	}
+	for _, reply := range []bool{false, true} {
+		name := "note plain"
+		if reply {
+			name = "note reply to WF-101"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := phase6RTSetup(101, 101, 102)
+			out := e.note("WF-102 chạy tới đâu rồi?", reply)
+			if out.code != "" || len(e.c.instructions[102]) != 1 || e.total() != 1 {
+				t.Fatalf("code=%q instructions=%v", out.code, e.c.instructions)
+			}
+			if got := e.c.instructions[102][0].Text; got != "chạy tới đâu rồi?" {
+				t.Fatalf("stored text=%q", got)
+			}
+			if _, queued := e.job(t); queued {
+				t.Fatal("/note queued an assistant job")
+			}
+		})
+	}
+}
