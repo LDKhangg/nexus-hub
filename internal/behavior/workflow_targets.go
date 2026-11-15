@@ -515,13 +515,22 @@ func (w *InboxWorker) toolWorkflowNote(ctx context.Context, tt *assistantToolTur
 	if err != nil || conversation.ID <= 0 {
 		return toolMsgFailed, true
 	}
-	allowed := tt.workflowID == id
-	for _, ref := range workflow.FindRefs(tt.ownerText) {
-		allowed = allowed || ref == id
+	refs := workflow.FindRefs(tt.ownerText)
+	var targetID int64
+	switch {
+	case len(refs) == 1:
+		targetID = refs[0]
+	case len(refs) > 1:
+		// Multiple owner references are ambiguous even when the model chooses one.
+	case tt.workflowID > 0:
+		targetID = tt.workflowID
+	default:
+		bound := w.activeBoundWorkflows(ctx, tt.u.WorkspaceID, conversation.ID)
+		if len(bound) == 1 {
+			targetID = bound[0].ID
+		}
 	}
-	bound := w.activeBoundWorkflows(ctx, tt.u.WorkspaceID, conversation.ID)
-	allowed = allowed || len(bound) == 1 && bound[0].ID == id
-	if !allowed {
+	if targetID != id {
 		return "The workflow target is ambiguous. Ask the owner which WF-id to use; no instruction was recorded.", true
 	}
 	if _, err := r.GetExecutionDetail(ctx, tt.u.WorkspaceID, id); err != nil {
