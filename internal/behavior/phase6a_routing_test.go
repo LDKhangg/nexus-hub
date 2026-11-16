@@ -190,7 +190,8 @@ func TestPhase6aRouter_FastAnswerUsesOnlyTheFastModel(t *testing.T) {
 		t.Fatalf("calls: tools=%d plain=%d json=%d", len(m.toolReqs), len(m.plainReqs), len(m.jsonReqs))
 	}
 	r := m.jsonReqs[0]
-	if r.Model != p6aFast || r.MaxTokens != 600 || !r.CacheHistory || r.System != assistantRouterSystem || string(r.Schema) != assistantRouterSchema {
+	// Fix R-2: the router call does not set CacheHistory.
+	if r.Model != p6aFast || r.MaxTokens != 600 || r.CacheHistory || r.System != assistantRouterSystem || string(r.Schema) != assistantRouterSchema {
 		t.Fatalf("router request model=%q max=%d cache=%v", r.Model, r.MaxTokens, r.CacheHistory)
 	}
 	if len(r.Messages) != 1 || r.Messages[0].Role != domain.UserRole || r.Messages[0].Text != "cảm ơn nhé" {
@@ -239,7 +240,10 @@ func TestPhase6aRouter_EscalationPicksTheModel(t *testing.T) {
 				t.Fatalf("sent=%q", got)
 			}
 			line := logs.requireTurn(t, 1, tc.route, tc.model)
-			if line["steps"] != float64(2) || line["input_tokens"] != float64(110) || line["output_tokens"] != float64(22) || line["cache_read_tokens"] != float64(33) || line["cache_write_tokens"] != float64(44) {
+			// Fix R-3: turn token fields are the final model's; the router
+			// call is in router_* fields.
+			if line["steps"] != float64(2) || line["input_tokens"] != float64(100) || line["output_tokens"] != float64(20) || line["cache_read_tokens"] != float64(30) || line["cache_write_tokens"] != float64(40) ||
+				line["router_model"] != p6aFast || line["router_input_tokens"] != float64(10) || line["router_output_tokens"] != float64(2) || line["router_cache_read_tokens"] != float64(3) || line["router_cache_write_tokens"] != float64(4) {
 				t.Fatalf("usage line=%v", line)
 			}
 		})
@@ -596,7 +600,9 @@ func TestPhase6aUsageLogHasNoText(t *testing.T) {
 		t.Fatalf("usage lines=%d: %s", len(turns), logs.String())
 	}
 	allowed := map[string]bool{"time": true, "level": true, "msg": true, "route": true, "model": true, "steps": true,
-		"input_tokens": true, "output_tokens": true, "cache_read_tokens": true, "cache_write_tokens": true, "latency_ms": true}
+		"input_tokens": true, "output_tokens": true, "cache_read_tokens": true, "cache_write_tokens": true, "latency_ms": true,
+		// Fix R-3: router usage fields.
+		"router_model": true, "router_input_tokens": true, "router_output_tokens": true, "router_cache_read_tokens": true, "router_cache_write_tokens": true}
 	for i, line := range turns {
 		for k := range allowed {
 			if _, ok := line[k]; !ok {
