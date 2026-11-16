@@ -76,11 +76,15 @@ func (a *Anthropic) Generate(ctx context.Context, req *domain.LLMRequest) (*doma
 
 	msgs := make([]anthropic.MessageParam, 0, len(req.Messages))
 	for i, m := range req.Messages {
+		block := anthropic.NewTextBlock(m.Text)
+		if req.CacheHistory && i == len(req.Messages)-1 {
+			block.OfText.CacheControl = anthropic.NewCacheControlEphemeralParam()
+		}
 		switch m.Role {
 		case domain.UserRole:
-			msgs = append(msgs, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Text)))
+			msgs = append(msgs, anthropic.NewUserMessage(block))
 		case domain.AIRole:
-			msgs = append(msgs, anthropic.NewAssistantMessage(anthropic.NewTextBlock(m.Text)))
+			msgs = append(msgs, anthropic.NewAssistantMessage(block))
 		default:
 			return nil, fmt.Errorf("anthropic generate: message %d has unknown role %q", i, m.Role)
 		}

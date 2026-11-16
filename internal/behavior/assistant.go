@@ -399,7 +399,7 @@ func (a *Assistant) plainTurn(ctx context.Context, p domain.LLMProvider, prior [
 
 func (a *Assistant) plainTurnWithSystem(ctx context.Context, p domain.LLMProvider, prior []domain.Message, text, system string) (assistantTurnResult, error) {
 	msgs := append(append([]domain.Message(nil), prior...), domain.Message{Role: domain.UserRole, Text: text})
-	resp, err := p.Generate(ctx, &domain.LLMRequest{Model: a.Model, System: system, MaxTokens: assistantMaxTokens, Messages: msgs})
+	resp, err := p.Generate(ctx, &domain.LLMRequest{Model: a.Model, System: system, MaxTokens: assistantMaxTokens, Messages: msgs, CacheHistory: true})
 	if err != nil || resp == nil {
 		return assistantTurnResult{model: a.Model, steps: 1}, assistantErr(ctx, err)
 	}
@@ -425,7 +425,7 @@ func (w *InboxWorker) toolLoop(ctx context.Context, tc domain.ToolCallingProvide
 		}
 		resp, err := tc.GenerateWithTools(ctx, &domain.ToolRequest{
 			Model: a.Model, System: assistantSystem, MaxTokens: assistantMaxTokens,
-			Tools: offered, Turns: turns, CacheStatic: true,
+			Tools: offered, Turns: turns, CacheStatic: true, CacheHistory: true,
 		})
 		res.steps++
 		if err != nil || resp == nil {

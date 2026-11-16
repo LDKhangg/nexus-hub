@@ -22,6 +22,8 @@ type LLMRequest struct {
 	System    string
 	MaxTokens int64
 	Messages  []Message
+	// CacheHistory marks the newest turn as a cache breakpoint.
+	CacheHistory bool
 }
 
 type LLMResponse struct {
@@ -90,6 +92,8 @@ type ToolRequest struct {
 	Tools         []ToolDef
 	Turns         []Turn
 	CacheStatic   bool
+	// CacheHistory marks the newest turn as a cache breakpoint.
+	CacheHistory bool
 }
 
 // ToolResponse is the model's reply.
