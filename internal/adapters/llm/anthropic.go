@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -74,19 +75,9 @@ func (a *Anthropic) Generate(ctx context.Context, req *domain.LLMRequest) (*doma
 		maxTokens = a.defaultMaxTokens
 	}
 
-	msgs := make([]anthropic.MessageParam, 0, len(req.Messages))
-	for i, m := range req.Messages {
-		switch m.Role {
-		case domain.UserRole:
-			msgs = append(msgs, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Text)))
-		case domain.AIRole:
-			msgs = append(msgs, anthropic.NewAssistantMessage(anthropic.NewTextBlock(m.Text)))
-		default:
-			return nil, fmt.Errorf("anthropic generate: message %d has unknown role %q", i, m.Role)
-		}
-	}
-	if len(msgs) == 0 {
-		return nil, errors.New("anthropic generate: no messages")
+	msgs, err := anthropicMessages("anthropic generate", req.Messages, req.CacheHistory)
+	if err != nil {
+		return nil, err
 	}
 
 	params := anthropic.MessageNewParams{
@@ -115,4 +106,85 @@ func (a *Anthropic) Generate(ctx context.Context, req *domain.LLMRequest) (*doma
 	return &domain.LLMResponse{Text: text.String(), Usage: usageOf(resp.Usage)}, nil
 }
 
-var _ domain.LLMProvider = (*Anthropic)(nil)
+// anthropicMessages converts plain messages. With cache, the newest message
+// carries an ephemeral cache breakpoint; content and order never change.
+func anthropicMessages(op string, in []domain.Message, cache bool) ([]anthropic.MessageParam, error) {
+	msgs := make([]anthropic.MessageParam, 0, len(in))
+	for i, m := range in {
+		block := anthropic.NewTextBlock(m.Text)
+		if cache && i == len(in)-1 {
+			block.OfText.CacheControl = anthropic.NewCacheControlEphemeralParam()
+		}
+		switch m.Role {
+		case domain.UserRole:
+			msgs = append(msgs, anthropic.NewUserMessage(block))
+		case domain.AIRole:
+			msgs = append(msgs, anthropic.NewAssistantMessage(block))
+		default:
+			return nil, fmt.Errorf("%s: message %d has unknown role %q", op, i, m.Role)
+		}
+	}
+	if len(msgs) == 0 {
+		return nil, errors.New(op + ": no messages")
+	}
+	return msgs, nil
+}
+
+// GenerateJSON runs one structured-output call (output_config.format with a
+// JSON schema), no tools. A refusal or a cut output is returned with its
+// Stop reason and usage; the caller validates the JSON.
+func (a *Anthropic) GenerateJSON(ctx context.Context, req *domain.JSONRequest) (*domain.JSONResponse, error) {
+	if req == nil {
+		return nil, errors.New("anthropic json: nil request")
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(req.Schema, &schema); err != nil || schema == nil {
+		return nil, errors.New("anthropic json: invalid schema")
+	}
+	model := req.Model
+	if model == "" {
+		model = a.defaultModel
+	}
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = a.defaultMaxTokens
+	}
+	msgs, err := anthropicMessages("anthropic json", req.Messages, req.CacheHistory)
+	if err != nil {
+		return nil, err
+	}
+	params := anthropic.MessageNewParams{
+		Model:        model,
+		MaxTokens:    maxTokens,
+		Messages:     msgs,
+		OutputConfig: anthropic.OutputConfigParam{Format: anthropic.JSONOutputFormatParam{Schema: schema}},
+	}
+	if req.System != "" {
+		params.System = []anthropic.TextBlockParam{{Text: req.System}}
+	}
+	resp, err := a.client.Messages.New(ctx, params)
+	if err != nil {
+		return nil, safeErr(err)
+	}
+	var text strings.Builder
+	for _, block := range resp.Content {
+		if b, ok := block.AsAny().(anthropic.TextBlock); ok {
+			text.WriteString(b.Text)
+		}
+	}
+	out := &domain.JSONResponse{JSON: json.RawMessage(text.String()), Usage: usageOf(resp.Usage), Stop: domain.StopEndTurn}
+	switch resp.StopReason {
+	case anthropic.StopReasonMaxTokens:
+		out.Stop = domain.StopMaxTokens
+	case anthropic.StopReasonRefusal:
+		out.Stop = domain.StopRefusal
+	case anthropic.StopReasonToolUse:
+		out.Stop = domain.StopToolUse
+	}
+	return out, nil
+}
+
+var (
+	_ domain.LLMProvider  = (*Anthropic)(nil)
+	_ domain.JSONProvider = (*Anthropic)(nil)
+)

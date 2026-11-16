@@ -14,7 +14,8 @@ func TestPhase5AssistantSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.AssistantModel != "claude-opus-5-5" || s.AssistantTimeout != 180*time.Second || s.AssistantRatePerMinute != 30 {
+	// Phase 6a REQ-1: assistant_model now defaults to Sonnet.
+	if s.AssistantModel != "claude-sonnet-5-5" || s.AssistantTimeout != 180*time.Second || s.AssistantRatePerMinute != 30 {
 		t.Fatalf("assistant defaults: model=%q timeout=%s rate=%d", s.AssistantModel, s.AssistantTimeout, s.AssistantRatePerMinute)
 	}
 

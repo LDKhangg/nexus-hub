@@ -159,13 +159,33 @@ func truncateAssistantBytes(s string, limit int) string {
 func (h *assistantHistory) messages() []domain.Message {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	out := make([]domain.Message, 0, 1+2*len(h.exchanges))
+	return h.messagesLocked(h.exchanges, true)
+}
+
+// messagesForTurns returns the persisted summary and at most the newest
+// limit exchanges. The larger in-memory buffer remains available to the
+// summarizer and digest maintenance.
+func (h *assistantHistory) messagesForTurns(limit int) []domain.Message {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if limit < 1 {
+		limit = 1
+	}
+	exchanges := h.exchanges
+	if len(exchanges) > limit {
+		exchanges = exchanges[len(exchanges)-limit:]
+	}
+	return h.messagesLocked(exchanges, false)
+}
+
+func (h *assistantHistory) messagesLocked(exchanges []assistantExchange, includeDigest bool) []domain.Message {
+	out := make([]domain.Message, 0, 1+2*len(exchanges))
 	if note := h.summaryNote(); note != "" {
 		out = append(out, domain.Message{Role: domain.UserRole, Text: note})
 	}
-	for i, e := range h.exchanges {
+	for i, e := range exchanges {
 		q := e.question
-		if i == 0 && h.dropped > 0 {
+		if i == 0 && includeDigest && h.dropped > 0 {
 			q = h.digestNote() + q
 		}
 		out = append(out, domain.Message{Role: domain.UserRole, Text: q}, domain.Message{Role: domain.AIRole, Text: e.answer})

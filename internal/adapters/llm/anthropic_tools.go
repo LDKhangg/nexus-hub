@@ -59,7 +59,8 @@ func toolParam(d domain.ToolDef) (anthropic.ToolParam, error) {
 }
 
 // GenerateWithTools runs one tool-calling step. With CacheStatic, the system
-// block and the last tool carry an ephemeral cache breakpoint.
+// block and the last tool carry ephemeral cache breakpoints. CacheHistory adds
+// one on the newest turn.
 func (a *Anthropic) GenerateWithTools(ctx context.Context, req *domain.ToolRequest) (*domain.ToolResponse, error) {
 	if req == nil || len(req.Turns) == 0 {
 		return nil, errors.New("anthropic tools: empty request")
@@ -92,11 +93,19 @@ func (a *Anthropic) GenerateWithTools(ctx context.Context, req *domain.ToolReque
 	}
 	for i, t := range req.Turns {
 		var blocks []anthropic.ContentBlockParamUnion
-		for _, r := range t.Results {
-			blocks = append(blocks, anthropic.NewToolResultBlock(r.CallID, r.Content, r.IsError))
+		for j, r := range t.Results {
+			block := anthropic.NewToolResultBlock(r.CallID, r.Content, r.IsError)
+			if req.CacheHistory && i == len(req.Turns)-1 && t.Text == "" && j == len(t.Results)-1 {
+				block.OfToolResult.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			}
+			blocks = append(blocks, block)
 		}
 		if t.Text != "" {
-			blocks = append(blocks, anthropic.NewTextBlock(t.Text))
+			block := anthropic.NewTextBlock(t.Text)
+			if req.CacheHistory && i == len(req.Turns)-1 {
+				block.OfText.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			}
+			blocks = append(blocks, block)
 		}
 		for _, c := range t.Calls {
 			var input any = json.RawMessage(c.Input)

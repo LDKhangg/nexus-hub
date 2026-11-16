@@ -39,20 +39,20 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-027 | Unknown event types được xử lý an toàn. | 4 | PENDING |  |
 | FR-028 | Có event replay phù hợp từ dữ liệu đã lưu. | 4 | PENDING |  |
 | FR-029 | Event processing không phụ thuộc vào tốc độ phản hồi của LLM. | 2, 4 | IN_PROGRESS | Phase 1/2: webhook stores then processes asynchronously |
-| FR-030 | Persistent conversations. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
+| FR-030 | Persistent conversations. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
 | FR-031 | Conversation-to-user binding. | 6 | IN_PROGRESS | Phase 6: bound to workspace + owner chat (Q3a, nullable user_id seam); users table later (Phase 4b) |
-| FR-032 | Conversation-to-workflow binding. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
-| FR-033 | Một conversation hỗ trợ nhiều workflows. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
-| FR-034 | Một workflow liên kết được với nhiều external resources. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
-| FR-035 | Context resolution cho follow-up messages. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
-| FR-036 | Có workflow reference ID để định danh tường minh. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
-| FR-037 | Nếu không rõ workflow đích, hệ thống phải hỏi lại. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
-| FR-038 | Hỗ trợ bổ sung instructions khi workflow đang chạy. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
-| FR-039 | Version hóa instruction updates. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
-| FR-040 | Hỗ trợ cancel, resume, status và list từ conversation. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
-| FR-041 | Không trộn context của hai workflow độc lập. | 6 | IN_PROGRESS | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; VERIFIED after merge |
-| FR-042 | Có cơ chế giới hạn và tóm tắt context khi cần. | 2, 6 | IN_PROGRESS | Phase 2: rolling summary + packet budget; Phase 6: persisted conversation summary ≤2,000 bytes, 8 KiB instruction block (52af5e0) |
-| FR-043 | Intent classification. | 2, 7 | IN_PROGRESS | Phase 2: Tier-1 triage categories |
+| FR-032 | Conversation-to-workflow binding. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
+| FR-033 | Một conversation hỗ trợ nhiều workflows. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
+| FR-034 | Một workflow liên kết được với nhiều external resources. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
+| FR-035 | Context resolution cho follow-up messages. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
+| FR-036 | Có workflow reference ID để định danh tường minh. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
+| FR-037 | Nếu không rõ workflow đích, hệ thống phải hỏi lại. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
+| FR-038 | Hỗ trợ bổ sung instructions khi workflow đang chạy. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
+| FR-039 | Version hóa instruction updates. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
+| FR-040 | Hỗ trợ cancel, resume, status và list từ conversation. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
+| FR-041 | Không trộn context của hai workflow độc lập. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
+| FR-042 | Có cơ chế giới hạn và tóm tắt context khi cần. | 2, 6, 6a | IN_PROGRESS | Phase 2: rolling summary + packet budget; Phase 6: persisted conversation summary ≤2,000 bytes, 8 KiB instruction block (52af5e0); Phase 6a: assistant history = summary + last N, cached (8bd07d9) |
+| FR-043 | Intent classification. | 2, 7, 6a | IN_PROGRESS | Phase 2: Tier-1 triage categories; Phase 6a: assistant router answer/work/deep (8bd07d9) |
 | FR-044 | Task type classification. | 7 | PENDING |  |
 | FR-045 | Task priority proposal. | 2, 7 | IN_PROGRESS | Phase 2: urgency in triage |
 | FR-046 | Complexity estimation. | 7 | PENDING |  |
@@ -65,7 +65,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-053 | Clarification request generation. | 7 | PENDING |  |
 | FR-054 | Plan revision. | 7 | PENDING |  |
 | FR-055 | Structured outputs và schema validation. | 2, 7 | IN_PROGRESS | Phase 2: triage JSON validated |
-| FR-056 | Configurable reasoning/iteration budget. | 2, 7 | IN_PROGRESS | Phase 2: token budget, step limit |
+| FR-056 | Configurable reasoning/iteration budget. | 2, 7, 6a | IN_PROGRESS | Phase 2: token budget, step limit; Phase 6a: fast/work/deep model settings, history turns (8bd07d9) |
 | FR-057 | Worker registry. | 8 | PENDING |  |
 | FR-058 | Worker capability profiles. | 8 | PENDING |  |
 | FR-059 | Worker availability tracking. | 8 | PENDING |  |
@@ -212,7 +212,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | NFR-027 | Execution timelines. | 12 | PENDING |  |
 | NFR-028 | Worker status và queue depth. | 12 | PENDING |  |
 | NFR-029 | Error metrics. | 12 | PENDING |  |
-| NFR-030 | LLM usage/cost tracking khi provider cung cấp dữ liệu. | 2, 12 | IN_PROGRESS | Phase 2: token usage per job |
+| NFR-030 | LLM usage/cost tracking khi provider cung cấp dữ liệu. | 2, 12, 6a | IN_PROGRESS | Phase 2: token usage per job; Phase 6a: per-turn assistant usage log incl. router_* (8bd07d9) |
 | NFR-031 | Health/readiness endpoints. | 3 | PENDING |  |
 | NFR-032 | Có cảnh báo hoặc notification cho stuck/failed workflows. | 12 | PENDING |  |
 | NFR-033 | Có README. | 3 | PENDING |  |

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 )
@@ -22,6 +23,8 @@ type LLMRequest struct {
 	System    string
 	MaxTokens int64
 	Messages  []Message
+	// CacheHistory marks the newest turn as a cache breakpoint.
+	CacheHistory bool
 }
 
 type LLMResponse struct {
@@ -90,6 +93,8 @@ type ToolRequest struct {
 	Tools         []ToolDef
 	Turns         []Turn
 	CacheStatic   bool
+	// CacheHistory marks the newest turn as a cache breakpoint.
+	CacheHistory bool
 }
 
 // ToolResponse is the model's reply.
@@ -100,6 +105,32 @@ type ToolResponse struct {
 	Usage Usage
 	// Note is an optional fixed, safe detail about a completed call.
 	Note string
+}
+
+// JSONRequest asks for one JSON object matching Schema, with no tools.
+// CacheHistory marks the newest message as a cache breakpoint.
+type JSONRequest struct {
+	Model, System string
+	MaxTokens     int64
+	Messages      []Message
+	Schema        json.RawMessage
+	CacheHistory  bool
+}
+
+// JSONResponse is the model's raw JSON text, why it stopped and the call's
+// usage. The caller validates the JSON; a refusal or an output cut at the
+// token limit comes back with its Stop reason and usage, not as an error.
+type JSONResponse struct {
+	JSON  json.RawMessage
+	Stop  StopReason
+	Usage Usage
+}
+
+// JSONProvider is a provider with a native structured-output call. Only
+// API providers implement it; the CLI providers keep their own
+// adapter-level structured call.
+type JSONProvider interface {
+	GenerateJSON(ctx context.Context, req *JSONRequest) (*JSONResponse, error)
 }
 
 // ErrLLMRefused is returned when the provider's safety system refuses.

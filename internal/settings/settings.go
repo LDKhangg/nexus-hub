@@ -50,7 +50,10 @@ type Settings struct {
 	OpencodeCLIConcurrency                int64         // opencode calls at once
 	TelegramAssistant                     bool          // owner free text goes to the LLM assistant
 	TelegramMode                          string        // auto | webhook | poll: how Telegram updates arrive
-	AssistantModel                        string        // the Telegram assistant's Claude model id
+	AssistantModel                        string        // the Telegram assistant's default Claude model id
+	AssistantFastModel                    string        // the Telegram assistant's fast Claude model id
+	AssistantDeepModel                    string        // the Telegram assistant's deep Claude model id
+	AssistantHistoryTurns                 int64         // recent exchanges sent to the assistant
 	AssistantTimeout                      time.Duration // one assistant answer, tool steps included
 	AssistantRatePerMinute                int64         // assistant messages per chat per minute (runaway guard)
 }
@@ -140,7 +143,10 @@ var specs = map[string]spec{
 	"opencode_cli_timeout":       {kind: kDuration, def: 120 * time.Second, min: 5, max: 1800, set: func(s *Settings, v any) { s.OpencodeCLITimeout = v.(time.Duration) }},
 	"opencode_cli_concurrency":   {kind: kInt, def: int64(1), min: 1, max: 4, set: func(s *Settings, v any) { s.OpencodeCLIConcurrency = v.(int64) }},
 	"telegram_assistant":         {kind: kBool, def: true, set: func(s *Settings, v any) { s.TelegramAssistant = v.(bool) }},
-	"assistant_model":            {kind: kClaudeModel, def: "claude-opus-5-5", set: func(s *Settings, v any) { s.AssistantModel = v.(string) }},
+	"assistant_model":            {kind: kClaudeModel, def: "claude-sonnet-5-5", set: func(s *Settings, v any) { s.AssistantModel = v.(string) }},
+	"assistant_fast_model":       {kind: kClaudeModel, def: "claude-haiku-5-5", set: func(s *Settings, v any) { s.AssistantFastModel = v.(string) }},
+	"assistant_deep_model":       {kind: kClaudeModel, def: "claude-opus-5-5", set: func(s *Settings, v any) { s.AssistantDeepModel = v.(string) }},
+	"assistant_history_turns":    {kind: kInt, def: int64(6), min: 1, max: 20, set: func(s *Settings, v any) { s.AssistantHistoryTurns = v.(int64) }},
 	"assistant_timeout":          {kind: kDuration, def: 180 * time.Second, min: 10, max: 900, set: func(s *Settings, v any) { s.AssistantTimeout = v.(time.Duration) }},
 	"assistant_rate_per_minute":  {kind: kInt, def: int64(30), min: 1, max: 120, set: func(s *Settings, v any) { s.AssistantRatePerMinute = v.(int64) }},
 	"telegram_mode":              {kind: kEnum, def: TelegramModeAuto, enum: []string{TelegramModeAuto, TelegramModeWebhook, TelegramModePoll}, set: func(s *Settings, v any) { s.TelegramMode = v.(string) }},

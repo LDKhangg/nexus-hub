@@ -360,6 +360,8 @@ func (w *InboxWorker) command(ctx context.Context, u InboundUpdate, to ChatRef, 
 		}
 	case "/prefs", "/template":
 		return w.reportCommand(hctx, u, to)
+	case "/deep":
+		return w.deepCommand(ctx, u, to, actor, corr)
 	case "/status", "/list", "/cancel", "/resume", "/note":
 		return w.workflowControlCommand(hctx, u, to, actor, corr)
 	default:
@@ -377,6 +379,7 @@ func (w *InboxWorker) helpText(ctx context.Context, workspaceID string) string {
 	var b strings.Builder
 	b.WriteString("Lệnh có sẵn:\n")
 	b.WriteString("/help: danh sách lệnh\n")
+	b.WriteString("/deep <câu hỏi>: hỏi trợ lý bằng mô hình mạnh nhất\n")
 	b.WriteString("/trace <run id hoặc task> [item]: xem một lần chạy\n")
 	b.WriteString("/prefs [short|normal|detailed]: tùy chọn báo cáo\n")
 	b.WriteString("/template <kind> [reset]: mẫu báo cáo\n")

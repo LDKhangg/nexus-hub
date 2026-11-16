@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,6 +60,7 @@ const (
 	assistantMaxArgRunes     = 200
 	assistantQueueSize       = 8
 	assistantNoticeAfter     = 3 * time.Second
+	assistantDefaultHistory  = 6
 )
 
 const (
@@ -92,10 +94,13 @@ type RecentRunLister interface {
 // Assistant holds the assistant's collaborators. A nil *Assistant, or one
 // without Models, turns the assistant off (plain text gets the /help hint).
 type Assistant struct {
-	Models ModelSource
-	Model  string // assistant_model
-	Runs   RecentRunLister
-	Inbox  *AssistantInbox
+	Models       ModelSource
+	Model        string // assistant_model
+	FastModel    string // assistant_fast_model; used by the router
+	DeepModel    string // assistant_deep_model; used by deep turns
+	HistoryTurns int    // assistant_history_turns
+	Runs         RecentRunLister
+	Inbox        *AssistantInbox
 
 	// Workflows and WorkflowCommands back the workflow tools; nil turns
 	// those tools off.
@@ -134,6 +139,13 @@ func (a *Assistant) timeout() time.Duration {
 		return a.Timeout
 	}
 	return assistantDefaultTimeout
+}
+
+func (a *Assistant) historyTurns() int {
+	if a.HistoryTurns > 0 {
+		return min(a.HistoryTurns, assistantHistoryTurns)
+	}
+	return assistantDefaultHistory
 }
 
 // allow takes one call from the chat's per-minute budget.
@@ -276,6 +288,11 @@ Hub tools:
 // assistantTurnResult is what one turn produced.
 type assistantTurnResult struct {
 	text           string
+	model          string
+	route          string       // the usage log's route label (assistant_router.go)
+	routerModel    string       // set when a router call ran before the final model
+	routerUsage    domain.Usage // that router call's usage; not in usage
+	usage          domain.Usage
 	cut            bool // the model stopped at its output limit
 	steps          int  // model calls
 	toolCalls      int  // tool calls run
@@ -344,9 +361,13 @@ func parseAssistantDecision(s string) (assistantDecision, error) {
 // answer. The turn is added to the history only when it succeeds.
 func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistantTurnResult, error) {
 	a := w.d.Assistant
+	res := assistantTurnResult{model: a.Model, route: routeSkip}
+	if job.tier == assistantTierDeep {
+		res.model, res.route = a.deepModel(), routeDeep
+	}
 	p, err := a.Models(ctx, job.u.WorkspaceID)
 	if err != nil || p == nil {
-		return assistantTurnResult{}, errAssistantModel
+		return res, errAssistantModel
 	}
 	conversation, conversationErr := w.ensureConversation(ctx, job.to)
 	if conversationErr != nil {
@@ -360,13 +381,56 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 			log.Print("telegram assistant: conversation summary load failed")
 		}
 	}
-	prior := hist.messages()
-	var res assistantTurnResult
-	if tc, ok := p.(domain.ToolCallingProvider); ok {
-		res, err = w.toolLoop(ctx, tc, job, prior)
-	} else {
-		res, err = a.plainTurnWithSystem(ctx, p, prior, job.text, assistantSystemForWorkflow(job.workflowID))
+	prior := hist.messagesForTurns(a.historyTurns())
+	ownerText := assistantOwnerText(job.text, job.workflowID)
+	// Pick the model. /deep runs on the deep model without the router. A
+	// turn with a resolved workflow target, a provider without native
+	// structured output (the CLI providers) or an unset fast model skips the
+	// router and keeps today's path on assistant_model. Otherwise the router
+	// answers simple messages itself or escalates; any router failure falls
+	// back to assistant_model (fail upward, never a fast answer). A reply
+	// to a question the assistant just asked skips the router too, so a
+	// short "ok" to an offer reaches the tools on assistant_model.
+	model, route := res.model, res.route
+	var (
+		routerUsage domain.Usage
+		routerSteps int
+		routerRan   bool
+		answered    bool
+	)
+	if job.tier != assistantTierDeep && job.workflowID <= 0 && a.FastModel != "" {
+		if jp, ok := p.(domain.JSONProvider); ok && lastAssistantAsked(prior) {
+			route = routeWorkFollowup
+		} else if ok {
+			d, usage, rerr := a.route(ctx, jp, prior, ownerText)
+			routerUsage, routerSteps, routerRan = usage, 1, true
+			switch {
+			case rerr != nil:
+				route = routeWorkFallback
+			case d.route == routeAnswer:
+				// The fast call is the final answer: its usage is the
+				// turn's, not a separate router line.
+				res = assistantTurnResult{text: d.reply, model: a.FastModel, usage: usage}
+				route, answered, routerRan = routeAnswer, true, false
+			case d.route == routeDeep:
+				model, route = a.deepModel(), routeDeep
+			default:
+				route = routeWork
+			}
+		}
 	}
+	if !answered {
+		if tc, ok := p.(domain.ToolCallingProvider); ok {
+			res, err = w.toolLoop(ctx, tc, job, prior, ownerText, model)
+		} else {
+			res, err = a.plainTurnWithSystem(ctx, p, prior, ownerText, assistantSystem, model)
+		}
+	}
+	res.route = route
+	if routerRan {
+		res.routerModel, res.routerUsage = a.FastModel, routerUsage
+	}
+	res.steps += routerSteps
 	if err != nil {
 		return res, err
 	}
@@ -379,43 +443,44 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 // plainTurn answers with a provider that has no tool calling: the history
 // and the owner's text, no tools.
 func (a *Assistant) plainTurn(ctx context.Context, p domain.LLMProvider, prior []domain.Message, text string) (assistantTurnResult, error) {
-	return a.plainTurnWithSystem(ctx, p, prior, text, assistantSystem)
+	return a.plainTurnWithSystem(ctx, p, prior, text, assistantSystem, a.Model)
 }
 
-func (a *Assistant) plainTurnWithSystem(ctx context.Context, p domain.LLMProvider, prior []domain.Message, text, system string) (assistantTurnResult, error) {
+func (a *Assistant) plainTurnWithSystem(ctx context.Context, p domain.LLMProvider, prior []domain.Message, text, system, model string) (assistantTurnResult, error) {
 	msgs := append(append([]domain.Message(nil), prior...), domain.Message{Role: domain.UserRole, Text: text})
-	resp, err := p.Generate(ctx, &domain.LLMRequest{Model: a.Model, System: system, MaxTokens: assistantMaxTokens, Messages: msgs})
+	resp, err := p.Generate(ctx, &domain.LLMRequest{Model: model, System: system, MaxTokens: assistantMaxTokens, Messages: msgs, CacheHistory: true})
 	if err != nil || resp == nil {
-		return assistantTurnResult{steps: 1}, assistantErr(ctx, err)
+		return assistantTurnResult{model: model, steps: 1}, assistantErr(ctx, err)
 	}
-	return assistantTurnResult{text: resp.Text, steps: 1}, nil
+	return assistantTurnResult{text: resp.Text, model: model, usage: resp.Usage, steps: 1}, nil
 }
 
 // toolLoop runs the tool-calling loop of one turn.
-func (w *InboxWorker) toolLoop(ctx context.Context, tc domain.ToolCallingProvider, job assistantJob, prior []domain.Message) (assistantTurnResult, error) {
+func (w *InboxWorker) toolLoop(ctx context.Context, tc domain.ToolCallingProvider, job assistantJob, prior []domain.Message, ownerText, model string) (assistantTurnResult, error) {
 	a := w.d.Assistant
 	turns := make([]domain.Turn, 0, len(prior)+1+2*assistantMaxSteps)
 	for _, m := range prior {
 		turns = append(turns, domain.Turn{Role: m.Role, Text: m.Text})
 	}
-	turns = append(turns, domain.Turn{Role: domain.UserRole, Text: job.text})
+	turns = append(turns, domain.Turn{Role: domain.UserRole, Text: ownerText})
 	tools := w.assistantToolDefs()
 	tt := &assistantToolTurn{u: job.u, to: job.to, actor: job.actor, corr: job.corr,
 		ownerText: job.text, workflowID: job.workflowID, proposed: map[string]bool{}}
-	var res assistantTurnResult
+	res := assistantTurnResult{model: model}
 	for step := 0; step < assistantMaxSteps; step++ {
 		offered := tools
 		if step == assistantMaxSteps-1 {
 			offered = nil // the last step must answer
 		}
 		resp, err := tc.GenerateWithTools(ctx, &domain.ToolRequest{
-			Model: a.Model, System: assistantSystemForWorkflow(job.workflowID), MaxTokens: assistantMaxTokens,
-			Tools: offered, Turns: turns, CacheStatic: true,
+			Model: model, System: assistantSystem, MaxTokens: assistantMaxTokens,
+			Tools: offered, Turns: turns, CacheStatic: true, CacheHistory: true,
 		})
 		res.steps++
 		if err != nil || resp == nil {
 			return res, assistantErr(ctx, err)
 		}
+		res.usage.Add(resp.Usage)
 		switch resp.Stop {
 		case domain.StopRefusal:
 			return res, errAssistantRefused
@@ -444,11 +509,15 @@ func (w *InboxWorker) toolLoop(ctx context.Context, tc domain.ToolCallingProvide
 	return res, errAssistantModel
 }
 
-func assistantSystemForWorkflow(id int64) string {
-	if id <= 0 {
-		return assistantSystem
+func assistantSystemForWorkflow(_ int64) string {
+	return assistantSystem
+}
+
+func assistantOwnerText(text string, workflowID int64) string {
+	if workflowID <= 0 {
+		return text
 	}
-	return assistantSystem + "\nThe owner's current message replies to " + workflow.FormatRef(id) + ". Treat that workflow as the resolved target for this turn."
+	return "[Context] This message replies to " + workflow.FormatRef(workflowID) + ". Treat that workflow as the resolved target for this turn.\n" + text
 }
 
 // assistantErr maps a provider failure to a turn failure: busy for a
@@ -499,6 +568,7 @@ type assistantJob struct {
 	corr       string
 	text       string
 	workflowID int64
+	tier       string // "" lets the router decide; assistantTierDeep is /deep
 	queued     time.Time
 }
 
@@ -523,7 +593,14 @@ func (w *InboxWorker) queueAssistantText(ctx context.Context, u InboundUpdate, t
 }
 
 func (w *InboxWorker) queueAssistantTextForWorkflow(ctx context.Context, u InboundUpdate, to ChatRef, actor, corr, text string, workflowID int64) outcome {
+	return w.queueAssistantJob(ctx, assistantJob{u: u, to: to, actor: actor, corr: corr, text: text, workflowID: workflowID})
+}
+
+// queueAssistantJob checks the chat's rate limit and queues job for the
+// assistant goroutine.
+func (w *InboxWorker) queueAssistantJob(ctx context.Context, job assistantJob) outcome {
 	a := w.d.Assistant
+	u, to := job.u, job.to
 	if a == nil || a.Models == nil {
 		return w.reply(ctx, to, msgHint, "")
 	}
@@ -531,11 +608,16 @@ func (w *InboxWorker) queueAssistantTextForWorkflow(ctx context.Context, u Inbou
 		return w.reply(ctx, to, msgAssistantBusy, "assistant_rate_limited")
 	}
 	select {
-	case w.assistantJobs <- assistantJob{u: u, to: to, actor: actor, corr: corr, text: text, workflowID: workflowID, queued: time.Now()}:
+	case w.assistantJobs <- withQueued(job, time.Now()):
 		return outcome{code: "assistant_queued"}
 	default:
 		return w.reply(ctx, to, msgAssistantOverloaded, "assistant_queue_full")
 	}
+}
+
+func withQueued(job assistantJob, now time.Time) assistantJob {
+	job.queued = now
+	return job
 }
 
 // runAssistant runs queued assistant jobs one at a time until ctx ends.
@@ -581,6 +663,7 @@ func (w *InboxWorker) assistantJob(ctx context.Context, job assistantJob) outcom
 	)
 	tctx, cancel := context.WithTimeout(ctx, a.timeout())
 	defer cancel()
+	started := time.Now()
 	go func() {
 		defer close(done)
 		res, err = w.converse(tctx, job)
@@ -595,6 +678,21 @@ func (w *InboxWorker) assistantJob(ctx context.Context, job assistantJob) outcom
 		<-done
 	}
 	notice.Stop()
+	slog.Info("assistant turn",
+		"route", res.route,
+		"model", res.model,
+		"steps", res.steps,
+		"input_tokens", res.usage.Input,
+		"output_tokens", res.usage.Output,
+		"cache_read_tokens", res.usage.CacheRead,
+		"cache_write_tokens", res.usage.CacheWrite,
+		"router_model", res.routerModel,
+		"router_input_tokens", res.routerUsage.Input,
+		"router_output_tokens", res.routerUsage.Output,
+		"router_cache_read_tokens", res.routerUsage.CacheRead,
+		"router_cache_write_tokens", res.routerUsage.CacheWrite,
+		"latency_ms", time.Since(started).Milliseconds(),
+	)
 	if ctx.Err() != nil {
 		return outcome{code: "assistant_cancelled"}
 	}
@@ -619,12 +717,19 @@ func (w *InboxWorker) assistantJob(ctx context.Context, job assistantJob) outcom
 	if res.cut {
 		text += msgAssistantCut
 	}
-	return w.sendAssistantReply(ctx, to, text)
+	return w.sendAssistantReplyWithModel(ctx, to, text, res.model)
 }
 
 // sendAssistantReply sends a cleaned answer as one or more ordered
 // messages under the Telegram limit. It stops at the first failed send.
 func (w *InboxWorker) sendAssistantReply(ctx context.Context, to ChatRef, text string) outcome {
+	return w.sendAssistantReplyWithModel(ctx, to, text, "")
+}
+
+func (w *InboxWorker) sendAssistantReplyWithModel(ctx context.Context, to ChatRef, text, model string) outcome {
+	if model != "" {
+		text += "\n· " + assistantModelShortName(model)
+	}
 	for _, part := range splitAssistantReply(text) {
 		if ctx.Err() != nil {
 			return outcome{code: "assistant_cancelled"}
@@ -644,6 +749,17 @@ func (w *InboxWorker) sendAssistantReply(ctx context.Context, to ChatRef, text s
 		}
 	}
 	return outcome{code: "assistant_answer"}
+}
+
+func assistantModelShortName(model string) string {
+	lower := strings.ToLower(model)
+	for _, family := range []string{"haiku", "sonnet", "opus"} {
+		if strings.Contains(lower, family) {
+			return family
+		}
+	}
+	short := strings.TrimPrefix(model, "claude-")
+	return truncateAssistantBytes(short, 32)
 }
 
 func (w *InboxWorker) latestRun(ctx context.Context, workspaceID string) (int64, error) {
