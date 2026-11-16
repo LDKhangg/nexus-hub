@@ -755,8 +755,9 @@ func (q *Queries) RefreshWorkerDeviceState(ctx context.Context, arg RefreshWorke
 const reissueWorkerLease = `-- name: ReissueWorkerLease :one
 UPDATE public.worker_jobs
 SET lease_token_hash = $1, lease_expires_at = $2,
-    updated_at = $3
+    leased_at = $3, updated_at = $3
 WHERE workspace_id = $4 AND device_id = $5 AND state = 'LEASED'
+  AND leased_at < $6
 RETURNING id, workspace_id, execution_id, step_id, required_capabilities, state, device_id, lease_token_hash, lease_expires_at, attempt, result, idempotency_key, payload, progress, progress_seq, leased_at, interrupted_at, created_at, updated_at, finished_at
 `
 
@@ -766,13 +767,17 @@ type ReissueWorkerLeaseParams struct {
 	Now            pgtype.Timestamptz
 	WorkspaceID    pgtype.UUID
 	DeviceID       pgtype.UUID
+	PollStartedAt  pgtype.Timestamptz
 }
 
 // Rotates the lease token of the job the device holds in LEASED state, i.e.
 // leased but never heartbeated nor reported: the poll response that carried
 // the first token was lost. Same attempt; RUNNING or CANCELLING jobs are not
-// touched. The unique index worker_jobs_one_active_per_device keeps it to one
-// row.
+// touched. Only a poll that started after the lease was issued may rotate
+// it (leased_at < poll_started_at), so a stale poll still open on a dead
+// connection never replaces a token already delivered. leased_at moves to
+// now: a reissue is a new issuance. The unique index
+// worker_jobs_one_active_per_device keeps it to one row.
 func (q *Queries) ReissueWorkerLease(ctx context.Context, arg ReissueWorkerLeaseParams) (WorkerJob, error) {
 	row := q.db.QueryRow(ctx, reissueWorkerLease,
 		arg.LeaseTokenHash,
@@ -780,6 +785,7 @@ func (q *Queries) ReissueWorkerLease(ctx context.Context, arg ReissueWorkerLease
 		arg.Now,
 		arg.WorkspaceID,
 		arg.DeviceID,
+		arg.PollStartedAt,
 	)
 	var i WorkerJob
 	err := row.Scan(

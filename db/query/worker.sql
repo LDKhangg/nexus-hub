@@ -95,12 +95,16 @@ RETURNING j.*;
 -- Rotates the lease token of the job the device holds in LEASED state, i.e.
 -- leased but never heartbeated nor reported: the poll response that carried
 -- the first token was lost. Same attempt; RUNNING or CANCELLING jobs are not
--- touched. The unique index worker_jobs_one_active_per_device keeps it to one
--- row.
+-- touched. Only a poll that started after the lease was issued may rotate
+-- it (leased_at < poll_started_at), so a stale poll still open on a dead
+-- connection never replaces a token already delivered. leased_at moves to
+-- now: a reissue is a new issuance. The unique index
+-- worker_jobs_one_active_per_device keeps it to one row.
 UPDATE public.worker_jobs
 SET lease_token_hash = sqlc.arg(lease_token_hash), lease_expires_at = sqlc.arg(lease_expires_at),
-    updated_at = sqlc.arg(now)
+    leased_at = sqlc.arg(now), updated_at = sqlc.arg(now)
 WHERE workspace_id = sqlc.arg(workspace_id) AND device_id = sqlc.arg(device_id) AND state = 'LEASED'
+  AND leased_at < sqlc.arg(poll_started_at)
 RETURNING *;
 
 -- name: UpdateWorkerJobLease :one

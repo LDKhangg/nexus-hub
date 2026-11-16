@@ -96,8 +96,9 @@ func (h *WorkerHandler) recordTelemetry(ctx context.Context, device behavior.Wor
 // Poll long-polls (≤ 55 s) for one job. 204 means no job; the worker polls
 // again. A client disconnect ends the wait. A device that polls while it
 // holds a LEASED job (never heartbeated or reported) gets that same job back
-// with a new lease token, same attempt: its earlier response was lost. A
-// device holding a RUNNING or CANCELLING job gets 204.
+// with a new lease token, same attempt: its earlier response was lost. Only
+// a poll that started after that lease was issued reissues it. A device
+// holding a RUNNING or CANCELLING job gets 204.
 func (h *WorkerHandler) Poll(c echo.Context) error {
 	device, ok := WorkerDeviceFrom(c)
 	if !ok || h.leases == nil {
@@ -118,6 +119,7 @@ func (h *WorkerHandler) Poll(c echo.Context) error {
 		return workerError(c, http.StatusBadRequest, "invalid telemetry")
 	}
 	ctx := c.Request().Context()
+	started := h.leases.PollStart() // fixed for every recheck of this poll (R-5)
 	h.recordTelemetry(ctx, device, req.Telemetry)
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
@@ -125,7 +127,7 @@ func (h *WorkerHandler) Poll(c echo.Context) error {
 	defer recheck.Stop()
 	for {
 		changed := h.leases.JobsChanged()
-		lease, found, err := h.leases.LeaseJob(ctx, device)
+		lease, found, err := h.leases.LeasePoll(ctx, device, started)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil

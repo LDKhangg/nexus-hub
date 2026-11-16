@@ -450,6 +450,12 @@ type WorkerLeases interface {
 	// LeaseJob leases the oldest matching waiting job, or returns ok=false
 	// (none, device busy, or blocked by telemetry thresholds).
 	LeaseJob(ctx context.Context, device WorkerDevice) (lease WorkerLease, ok bool, err error)
+	// LeasePoll is LeaseJob for a poll that started at pollStarted (from
+	// PollStart). A job the device holds in LEASED state is reissued with a
+	// new token only when it was issued before pollStarted.
+	LeasePoll(ctx context.Context, device WorkerDevice, pollStarted time.Time) (lease WorkerLease, ok bool, err error)
+	// PollStart is the store clock's now, captured once when a poll begins.
+	PollStart() time.Time
 	// JobsChanged is closed when jobs may have become available.
 	JobsChanged() <-chan struct{}
 	Heartbeat(ctx context.Context, device WorkerDevice, jobID, leaseToken string) (WorkerJob, error)

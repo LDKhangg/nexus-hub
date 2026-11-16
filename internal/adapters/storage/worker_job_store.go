@@ -397,13 +397,21 @@ func (s *WorkerStore) refreshDevice(ctx context.Context, q *sqlc.Queries, dev pg
 	})
 }
 
+// LeaseJob is LeasePoll for a poll that starts now.
 func (s *WorkerStore) LeaseJob(ctx context.Context, device behavior.WorkerDevice) (behavior.WorkerLease, bool, error) {
+	return s.LeasePoll(ctx, device, s.now())
+}
+
+// PollStart returns the store clock's now.
+func (s *WorkerStore) PollStart() time.Time { return s.now() }
+
+func (s *WorkerStore) LeasePoll(ctx context.Context, device behavior.WorkerDevice, pollStarted time.Time) (behavior.WorkerLease, bool, error) {
 	ids, err := deviceIDs(device)
 	if err != nil {
 		return behavior.WorkerLease{}, false, err
 	}
 	now := s.now()
-	if lease, found, err := s.reissueLease(ctx, ids, now); err != nil || found {
+	if lease, found, err := s.reissueLease(ctx, ids, now, pollStarted); err != nil || found {
 		return lease, found, err
 	}
 	s.mu.Lock()
@@ -460,7 +468,8 @@ func (s *WorkerStore) LeaseJob(ctx context.Context, device behavior.WorkerDevice
 // working; the attempt does not change. It runs before the telemetry block
 // because the job is already assigned to this device. RUNNING and CANCELLING
 // jobs are never reissued, and a job is never handed to another device.
-func (s *WorkerStore) reissueLease(ctx context.Context, ids workerDeviceIDs, now time.Time) (behavior.WorkerLease, bool, error) {
+// Only a poll that started after the lease was issued may reissue it (R-5).
+func (s *WorkerStore) reissueLease(ctx context.Context, ids workerDeviceIDs, now, pollStarted time.Time) (behavior.WorkerLease, bool, error) {
 	token, err := randomLeaseToken()
 	if err != nil {
 		return behavior.WorkerLease{}, false, errors.New("lease token generation failed")
@@ -473,7 +482,7 @@ func (s *WorkerStore) reissueLease(ctx context.Context, ids workerDeviceIDs, now
 	q := s.q.WithTx(tx)
 	row, err := q.ReissueWorkerLease(ctx, sqlc.ReissueWorkerLeaseParams{
 		LeaseTokenHash: hashSecret(token), LeaseExpiresAt: ts(now.Add(behavior.WorkerLeaseDuration)),
-		Now: ts(now), WorkspaceID: ids.ws, DeviceID: ids.dev,
+		Now: ts(now), WorkspaceID: ids.ws, DeviceID: ids.dev, PollStartedAt: ts(pollStarted),
 	})
 	if err != nil {
 		if isNoRows(err) {
