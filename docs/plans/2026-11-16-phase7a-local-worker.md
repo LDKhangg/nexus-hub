@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `executing-plans` for an assigned task. The role boundaries and sequential handoff process in `AGENTS.md` override generic implementation/TDD instructions. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** DRAFT 2026-11-16 — written for the owner's review. Not approved; nothing is implemented. Owner decisions W1–W10 taken (§1.3); waiting for plan approval.
+**Status:** APPROVED 2026-11-16 by the owner (decisions W1–W10, §1.3). Roadmap change §5 applied. Nothing is implemented yet; W-1 starts only when the owner says so.
 
 **Goal:** The VPS hub stays the orchestrator (Telegram, ClickUp, GitHub events, approvals, state). Heavy work — clone, edit, build, test, run Claude Code — runs on the owner's laptop when it is online, using the owner's own Claude subscription login and GitHub credentials. From a task topic the owner sends `/task <what to do>`; the laptop does the work in an isolated git worktree, pushes a branch, opens a draft PR from the owner's account, and the result appears in the same topic. When the laptop is offline the job waits and the topic says so.
 
@@ -40,7 +40,7 @@
 
 ### 1.2 Out of scope (later phases)
 
-- Plan/evaluate orchestration and DELEGATE decisions (Phase 7b, the former Phase 7 plan).
+- Plan/evaluate orchestration and DELEGATE decisions (Phase 7b, `docs/plans/2026-11-16-phase7b-ai-orchestrator.md`).
 - Switching between several Claude accounts on one device; several laptops, scheduling priorities, per-user concurrency, backpressure (Phase 8 remainder).
 - Policy engine and auto-approval rules (Phase 9); GitHub/ClickUp comment replies (Phase 10).
 
@@ -110,9 +110,9 @@ Owner decisions taken 2026-11-16 (second round):
 
 Dispatch: W-1 → W-2 → Batch A test → review → fixes → W-3 → W-4 → Batch B test → review → fixes → report on Telegram → merge after the owner's `/merge` → live check with the owner's laptop.
 
-## 5. Roadmap change (applied when this plan is approved)
+## 5. Roadmap change (applied 2026-11-16)
 
-- Phase 7 becomes **7a Local worker bridge** (this plan) and **7b AI orchestrator** (`docs/plans/2026-11-16-phase7-ai-orchestrator.md`, renamed; its O3 "DELEGATE" now targets the local worker).
+- Phase 7 becomes **7a Local worker bridge** (this plan) and **7b AI orchestrator** (renamed to `docs/plans/2026-11-16-phase7b-ai-orchestrator.md`; its O3 "DELEGATE" now targets the local worker).
 - Phase 8 keeps the remainder: several devices/slots, scheduler priority, per-user concurrency, backpressure, NFR-009, E2E-002.
 - Roadmap decision D1 (worker tests) is resolved: project tests run on the laptop.
 - Carry-ins from Phase 6b and hotfix 6b.1 go to 7b: router tuning (route-eval 13/15, 12/15), R7 (Recover reopen skips the lifecycle hook), lowercase custom IDs, command behaviors with custom IDs; the route-eval result is appended to the 6b report.

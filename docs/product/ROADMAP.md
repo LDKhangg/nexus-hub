@@ -54,8 +54,8 @@ PCC milestones and repo phases do not map one to one:
 | 1 Identity + Event Gateway | 4 |
 | 2 Integrations + Conversations | 1, 2 (inbound and tools), 4, 6 |
 | 3 Workflow Engine | 5 |
-| 4 AI Orchestrator | 2 (triage), 7 |
-| 5 Worker Runtime | 2 (tool loop, runner), 8 |
+| 4 AI Orchestrator | 2 (triage), 7b |
+| 5 Worker Runtime | 2 (tool loop, runner), 7a, 8 |
 | 6 Policies + Approvals | 2 (tool policy), 9 |
 | 7 Response Router | 1 (outbox), 10 |
 | 8 Admin UI | 11 |
@@ -78,10 +78,13 @@ P1 notices ─► P2 agent core ─► P3 behavior engine ─► P4 identity + e
                                     P5 workflow engine ─► P6 conversations + commands
                                                    │                 │
                                                    ▼                 │
-                                    P7 orchestrator ◄────────────────┘
+                                    P7a local worker ◄───────────────┘
                                                    │
                                                    ▼
-                                    P8 workers + scheduler
+                                    P7b orchestrator (DELEGATE → 7a worker)
+                                                   │
+                                                   ▼
+                                    P8 workers + scheduler (multi-slot)
                                                    │
                                                    ▼
                                     P9 policy + approvals ─► P10 response router + outbound
@@ -246,51 +249,95 @@ hosted. CI and correlation IDs are already done or built into each phase.
   - the EPIC 04 acceptance example passes exactly as written in the PCC, with
     WF-101 and WF-102.
 
-### Phase 7: AI orchestrator
+### Phase 7 split (owner decision W1, 2026-11-16)
+
+Phase 7 is split into 7a and 7b. The owner wants workers on the local PC (the
+owner's Claude subscription), with the VPS as orchestrator, so the worker
+bridge comes first and pulls the single-device part of Phase 8 forward. The
+orchestrator follows and can `DELEGATE` to that worker.
+
+### Phase 7a: Local worker bridge
+
+- **Goal:** the owner sends `/task <what to do>` in a ClickUp task topic; the
+  owner's laptop does the work in an isolated git worktree with Claude Code
+  (subscription login), pushes a branch and opens a draft PR from the owner's
+  account; the result appears in the same topic. Laptop offline → the job
+  waits and the topic says so.
+- **Plan:** `docs/plans/2026-11-16-phase7a-local-worker.md` (approved
+  2026-11-16, decisions W1–W10, REQ-1–REQ-19). Branch `feature/phase7a`,
+  migration `00026`.
+- **PCC:**
+  - FR-057–FR-061, FR-063, FR-064, FR-066–FR-068, FR-070–FR-072, FR-097
+  - FR-103, FR-107, FR-109 (telemetry-aware wait), FR-110
+  - NFR-019, ARCH-003
+  - E2E-007 (fake executor)
+- **Deliverables:**
+  - device enrollment with a one-time code, hashed per-device tokens, revoke;
+  - `nh worker` on the laptop: outbound HTTPS long-poll through the
+    Cloudflare tunnel, leases and heartbeats, durable local outbox, crash
+    recovery, sleep inhibition;
+  - `worker.run` step kind and the built-in `local-task` workflow;
+    `WAITING_FOR_WORKER` and `INTERRUPTED` states;
+  - local executor (Claude Code headless, opencode fallback) in a per-job
+    worktree; branch + draft PR, never merge, approve, force-push or push to a
+    protected branch;
+  - worker telemetry and the `/worker` card; telemetry-aware assignment;
+  - runbook section "Local worker (Phase 7a)".
+- **Exit criteria:**
+  - every REQ has CI evidence on the final head and the Reviewer approves;
+  - live check: the owner's laptop enrolls, takes a `/task`, opens a draft
+    PR; offline → waiting message; lid closed mid-job → interrupted/resume.
+- **Decisions:** resolves D1 (project tests run on the laptop).
+
+### Phase 7b: AI orchestrator
 
 - **Goal:** structured plans and evaluations replace one-shot triage.
+- **Plan:** `docs/plans/2026-11-16-phase7b-ai-orchestrator.md` (the former
+  Phase 7 plan; DRAFT, owner decisions O1–O5 open). Starts after 7a is
+  merged; migration `00027`.
 - **PCC:** FR-043–FR-056, ARCH-002, ARCH-004.
 - **Deliverables:**
   - an `Orchestrator` with `Plan` and `Evaluate`;
   - the seven decisions (`EXECUTE`, `DELEGATE`, `REQUEST_CLARIFICATION`,
     `REQUEST_APPROVAL`, `REPLAN`, `COMPLETE`, `FAIL`);
+  - `DELEGATE` targets the Phase 7a local worker;
   - JSON-schema validated outputs with bounded repair;
   - decomposition with dependencies, capability requirements,
     priority/complexity, and iteration and token budgets;
   - a provider-neutral AI runtime interface, with Anthropic as one
     implementation and a deterministic fake provider for tests;
   - `COMPLETE` only when result evidence exists.
+- **Carry-ins (from Phase 6b and hotfix 6b.1):**
+  - router tuning (route-eval 13/15 and 12/15);
+  - 6b R7: `Recover` reopening a closed topic skips the lifecycle hook;
+  - lowercase custom task IDs (`fc-6583`);
+  - command behaviors addressed with a custom ID (`FC-…`);
+  - append the route-eval result to the Phase 6b report.
 - **Exit criteria:**
   - the EPIC 05 acceptance criteria are tested with the fake provider;
   - an over-budget plan ends in `FAILED` or blocked, never in a loop.
 
-### Phase 8: Worker runtime and scheduler
+### Phase 8: Worker runtime and scheduler (remainder after 7a)
 
 - **Goal:** two isolated worker slots execute tasks in parallel under
   scheduler control.
 - **PCC:**
-  - FR-057–FR-072, FR-097
-  - FR-101–FR-105, FR-107, FR-109, FR-110
+  - finishes what 7a starts: FR-057–FR-061, FR-063–FR-072, FR-097, FR-103,
+    FR-107, FR-109, FR-110 for several devices and slots
+  - FR-101, FR-102, FR-104, FR-105
   - NFR-009, NFR-012, NFR-019
-  - ARCH-003
-  - E2E-002, E2E-007
+  - E2E-002, E2E-007 (multi-slot)
 - **Deliverables:**
-  - `worker_definitions` and `worker_runs`, with capability profiles,
-    availability, heartbeat and cancellation;
-  - one isolated workspace per worker run (a git worktree or a separate clone
-    under `repos_dir`);
-  - the Phase 2 Tier-2 loop refactored into `AgentRunner.Execute`;
-  - the worker result contract (PCC JSON) and artifact references;
-  - repo/branch write locks, workspace cleanup and retention;
-  - the scheduler: priority, capability matching, `max_parallel_workers`,
-    per-user concurrency, backpressure, allocation audit;
-  - waiting states release the slot;
-  - **test execution for workers**, according to D1.
+  - several devices / slots, `max_parallel_workers`;
+  - the Phase 2 Tier-2 loop refactored into `AgentRunner.Execute` where it
+    still runs on the hub;
+  - the scheduler: priority, capability matching across devices, per-user
+    concurrency, backpressure, allocation audit;
+  - several Claude accounts on one device (if the owner still wants it).
 - **Exit criteria:**
   - the EPIC 06 and EPIC 09 acceptance criteria pass (three jobs, two slots);
   - E2E-002 and E2E-007 pass with fakes.
-- **Decisions:** D1 (sandbox for running project tests). This changes the
-  Phase 2 constraint "git is the only binary".
+- **Decisions:** D1 is resolved by 7a (tests run on the laptop worker).
 
 ### Phase 9: Policy engine and approvals
 
@@ -413,7 +460,7 @@ hosted. CI and correlation IDs are already done or built into each phase.
 
 | ID | Topic | Status | Decision (2026-11-12) |
 |---|---|---|---|
-| D1 | How workers run project tests (E2E-001 "Worker chạy tests phù hợp") | Decided, deferred | The VPS is too small to run project tests. Until the system runs on a local machine, workers do **not** run tests. They push a PR; testing is delegated to an external tester (the ClickUp `@AI` agent, or CI checks), and Nexus-Hub reads and reports the result. A worker test sandbox returns when local hosting exists. This is a PCC exception to record at Gate A. |
+| D1 | How workers run project tests (E2E-001 "Worker chạy tests phù hợp") | Decided, resolved 2026-11-16 | Originally (2026-11-12): the VPS is too small, so workers do not run tests and testing is delegated to an external tester (ClickUp `@AI`, CI checks). Resolved by Phase 7a: workers run on the owner's laptop, which runs the repository's test command; CI and ClickUp `@AI` still count as extra evidence. No PCC exception needed for this point. |
 | D2 | Admin UI | Decided | A CLI only for now (setup and administration). Daily control goes through Telegram commands. EPIC 13 (UI-001–UI-030), FR-020, FR-117 (UI part) and Gate D "configure workflows through the UI" become a PCC exception, unless the owner later asks for a UI. |
 | D3 | Telegram inbound | Decided | Webhook, verified with the secret-token header, on the same public HTTPS endpoint as the ClickUp webhooks. Rationale: no idle polling connection, instant delivery; the VPS already has a public domain (D5). Long polling only wins behind NAT. |
 | D4 | Users ↔ workspaces | Decided (revised 2026-11-13) | One user can belong to many workspaces (owner, in chat: "1 user nhiều ws được"), through a user ↔ workspace membership table with a role per workspace. Only the owner uses the system for now; `users` and `external_identities` let other people be added later, when the owner opens the next stage of the product. Superseded: "one user owns one workspace". |
@@ -426,8 +473,8 @@ hosted. CI and correlation IDs are already done or built into each phase.
   - git network traffic is not behind netguard (P12);
   - no OS disk quota (P12);
   - the batch budget can hide older comments from the AI, and the report says
-    so (revisit in P7);
-  - a stale `origin/HEAD` may mis-tier a push (P8, when workspaces are
+    so (revisit in P7b);
+  - a stale `origin/HEAD` may mis-tier a push (P7a/P8, when workspaces are
     rebuilt).
 - **Telegram-specific outputs:** Phase 2 reports are one-way. P6 adds replies,
   and P9 adds approvals.

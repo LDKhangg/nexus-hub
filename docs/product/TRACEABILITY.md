@@ -4,6 +4,8 @@ Status of every PCC-001 requirement. Statuses follow PCC §10.1.2: `PENDING`, `I
 
 Snapshot: 2026-11-12. Phase 1 merged; Phase 2 under test and review. Nothing is `VERIFIED` against the PCC yet: Phase 1/2 work covers parts of the IDs marked `IN_PROGRESS`.
 
+Update 2026-11-16: roadmap Phase 7 split into 7a (local worker bridge, plan approved) and 7b (AI orchestrator, the former Phase 7 plan). Phase column: orchestrator IDs `7` → `7b`; IDs covered by the 7a plan gained `7a`. No status changed.
+
 Update 2026-11-15: Phase 5 (durable workflow engine + open Telegram assistant) merged into develop 65be4ac (CI 43631958237 green) after Test PASS and Review APPROVE on 2ac779b; its scoped IDs are VERIFIED. E2E-005 live part stays open (Phase 12/13).
 
 Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889383 green (664 tests). Open test debt: TD-6, TD3-2, TD3-3, TD3d-2, TD3d-3 (independent reviews of Phases 2/3/3d and live ClickUp payload facts). Per-ID statuses are updated per phase when the owner asks.
@@ -52,36 +54,36 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-040 | Hỗ trợ cancel, resume, status và list từ conversation. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
 | FR-041 | Không trộn context của hai workflow độc lập. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988; Phase 6b: Test PASS (CI 43823427615) + Review APPROVE on feature/phase6b 6b514c8: per-topic conversations and topic-aware follow-up resolution |
 | FR-042 | Có cơ chế giới hạn và tóm tắt context khi cần. | 2, 6, 6a | IN_PROGRESS | Phase 2: rolling summary + packet budget; Phase 6: persisted conversation summary ≤2,000 bytes, 8 KiB instruction block (52af5e0); Phase 6a: assistant history = summary + last N, cached (8bd07d9) |
-| FR-043 | Intent classification. | 2, 7, 6a | IN_PROGRESS | Phase 2: Tier-1 triage categories; Phase 6a: assistant router answer/work/deep (8bd07d9) |
-| FR-044 | Task type classification. | 7 | PENDING |  |
-| FR-045 | Task priority proposal. | 2, 7 | IN_PROGRESS | Phase 2: urgency in triage |
-| FR-046 | Complexity estimation. | 7 | PENDING |  |
-| FR-047 | Capability requirements. | 7 | PENDING |  |
-| FR-048 | Execution plan generation. | 7 | PENDING |  |
-| FR-049 | Worker selection recommendation. | 7 | PENDING |  |
-| FR-050 | Task decomposition. | 7 | PENDING |  |
-| FR-051 | Result evaluation. | 7 | PENDING |  |
-| FR-052 | Next-action recommendation. | 7 | PENDING |  |
-| FR-053 | Clarification request generation. | 7 | PENDING |  |
-| FR-054 | Plan revision. | 7 | PENDING |  |
-| FR-055 | Structured outputs và schema validation. | 2, 7 | IN_PROGRESS | Phase 2: triage JSON validated |
-| FR-056 | Configurable reasoning/iteration budget. | 2, 7, 6a | IN_PROGRESS | Phase 2: token budget, step limit; Phase 6a: fast/work/deep model settings, history turns (8bd07d9) |
-| FR-057 | Worker registry. | 8 | PENDING |  |
-| FR-058 | Worker capability profiles. | 8 | PENDING |  |
-| FR-059 | Worker availability tracking. | 8 | PENDING |  |
-| FR-060 | Worker task assignment. | 8 | PENDING |  |
-| FR-061 | Isolated working directories. | 8 | PENDING |  |
+| FR-043 | Intent classification. | 2, 7b, 6a | IN_PROGRESS | Phase 2: Tier-1 triage categories; Phase 6a: assistant router answer/work/deep (8bd07d9) |
+| FR-044 | Task type classification. | 7b | PENDING |  |
+| FR-045 | Task priority proposal. | 2, 7b | IN_PROGRESS | Phase 2: urgency in triage |
+| FR-046 | Complexity estimation. | 7b | PENDING |  |
+| FR-047 | Capability requirements. | 7b | PENDING |  |
+| FR-048 | Execution plan generation. | 7b | PENDING |  |
+| FR-049 | Worker selection recommendation. | 7b | PENDING |  |
+| FR-050 | Task decomposition. | 7b | PENDING |  |
+| FR-051 | Result evaluation. | 7b | PENDING |  |
+| FR-052 | Next-action recommendation. | 7b | PENDING |  |
+| FR-053 | Clarification request generation. | 7b | PENDING |  |
+| FR-054 | Plan revision. | 7b | PENDING |  |
+| FR-055 | Structured outputs và schema validation. | 2, 7b | IN_PROGRESS | Phase 2: triage JSON validated |
+| FR-056 | Configurable reasoning/iteration budget. | 2, 7b, 6a | IN_PROGRESS | Phase 2: token budget, step limit; Phase 6a: fast/work/deep model settings, history turns (8bd07d9) |
+| FR-057 | Worker registry. | 7a, 8 | PENDING |  |
+| FR-058 | Worker capability profiles. | 7a, 8 | PENDING |  |
+| FR-059 | Worker availability tracking. | 7a, 8 | PENDING |  |
+| FR-060 | Worker task assignment. | 7a, 8 | PENDING |  |
+| FR-061 | Isolated working directories. | 7a, 8 | PENDING |  |
 | FR-062 | Tool permission enforcement. | 2, 8 | IN_PROGRESS | Phase 2: tiered tool policy executor |
-| FR-063 | Execution timeout. | 2, 8 | IN_PROGRESS | Phase 2: tool timeouts |
-| FR-064 | Cancellation support. | 8 | PENDING |  |
+| FR-063 | Execution timeout. | 2, 7a, 8 | IN_PROGRESS | Phase 2: tool timeouts |
+| FR-064 | Cancellation support. | 7a, 8 | PENDING |  |
 | FR-065 | Captured tool results. | 2, 8 | IN_PROGRESS | Phase 2: tool_runs audit with summaries |
-| FR-066 | Task progress reporting. | 8 | PENDING |  |
-| FR-067 | Worker result contract. | 8 | PENDING |  |
-| FR-068 | Worker failure reporting. | 8 | PENDING |  |
+| FR-066 | Task progress reporting. | 7a, 8 | PENDING |  |
+| FR-067 | Worker result contract. | 7a, 8 | PENDING |  |
+| FR-068 | Worker failure reporting. | 7a, 8 | PENDING |  |
 | FR-069 | Worker execution iteration limit. | 2, 8 | IN_PROGRESS | Phase 2: Tier-2 step limit |
-| FR-070 | Artifact references. | 8 | PENDING |  |
-| FR-071 | Workspace cleanup và retention. | 8 | PENDING |  |
-| FR-072 | Ngăn concurrent write conflicts đối với cùng repository/branch. | 8 | PENDING |  |
+| FR-070 | Artifact references. | 7a, 8 | PENDING |  |
+| FR-071 | Workspace cleanup và retention. | 7a, 8 | PENDING |  |
+| FR-072 | Ngăn concurrent write conflicts đối với cùng repository/branch. | 7a, 8 | PENDING |  |
 | FR-073 | Create workflow definition. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-074 | Update draft workflow. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-075 | Validate workflow schema. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
@@ -106,20 +108,20 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-094 | Execution timeout. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-095 | Dead-letter hoặc failed-job inspection. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-096 | Dependency-aware task progression. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
-| FR-097 | Không giữ worker khi đang chờ user. | 8 | PENDING |  |
+| FR-097 | Không giữ worker khi đang chờ user. | 7a, 8 | PENDING |  |
 | FR-098 | Optimistic locking/leases để tránh nhiều scheduler cùng claim một job. | 2, 5 | IN_PROGRESS | Phase 2: agent job leases + thread lock; Phase 5: generic queue leases + fenced claims, merged develop 65be4ac |
 | FR-099 | Reconciliation sau process restart. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-100 | Persistent job queue. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-101 | Configurable per-user workflow concurrency. | 8 | PENDING |  |
 | FR-102 | Configurable worker pool size. | 8 | PENDING |  |
-| FR-103 | Worker capability matching. | 8 | PENDING |  |
+| FR-103 | Worker capability matching. | 7a, 8 | PENDING |  |
 | FR-104 | Priority scheduling. | 8 | PENDING |  |
 | FR-105 | Resource conflict handling. | 8 | PENDING |  |
 | FR-106 | Job leases và lease expiration. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
-| FR-107 | Worker heartbeat hoặc tương đương. | 8 | PENDING |  |
+| FR-107 | Worker heartbeat hoặc tương đương. | 7a, 8 | PENDING |  |
 | FR-108 | Queue visibility. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
-| FR-109 | Backpressure khi quá tải. | 8 | PENDING |  |
-| FR-110 | Worker allocation được audit. | 8 | PENDING |  |
+| FR-109 | Backpressure khi quá tải. | 7a, 8 | PENDING |  |
+| FR-110 | Worker allocation được audit. | 7a, 8 | PENDING |  |
 | FR-111 | Rule schema có version. | 9 | PENDING |  |
 | FR-112 | Rule validation. | 9 | PENDING |  |
 | FR-113 | Policy evaluation trước các privileged actions. | 2, 9 | IN_PROGRESS | Phase 2: policy before tool calls (tools only) |
@@ -201,7 +203,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | NFR-016 | Secrets encryption at rest và secret redaction. | 2 | IN_PROGRESS | Phase 2: encryption at rest + redactor |
 | NFR-017 | Least privilege cho integrations. | 12 | PENDING |  |
 | NFR-018 | Không expose management endpoints không xác thực. | 11 | PENDING |  |
-| NFR-019 | Sandboxed/restricted worker execution. | 2, 8, 12 | IN_PROGRESS | Phase 2: hardened git-only runner |
+| NFR-019 | Sandboxed/restricted worker execution. | 2, 7a, 8, 12 | IN_PROGRESS | Phase 2: hardened git-only runner |
 | NFR-020 | Chống path traversal và command injection tại tool boundaries. | 2, 12 | IN_PROGRESS | Phase 2: path/argument checks in tools |
 | NFR-021 | Audit privileged actions. | 2, 12 | IN_PROGRESS | Phase 2: tool_runs audit |
 | NFR-022 | Prompt-injection defenses và trust-boundary checks. | 2, 12 | IN_PROGRESS | Phase 2: sanitizer + policy boundary |
@@ -241,7 +243,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | E2E-004 | Approval from Phone | 9, 13 | PENDING |  |
 | E2E-005 | Server Restart Recovery | 5, 12, 13 | IN_PROGRESS | Phase 5: fake-provider crash/restart/reclaim tests pass on 2ac779b; live evidence is Phase 12/13 |
 | E2E-006 | Duplicate Webhook | 4, 13 | PENDING |  |
-| E2E-007 | Worker Failure | 8, 13 | PENDING |  |
+| E2E-007 | Worker Failure | 7a, 8, 13 | PENDING |  |
 | E2E-008 | Cross-Platform Response | 10, 13 | PENDING |  |
 | E2E-009 | Policy Violation | 9, 13 | PENDING |  |
 | E2E-010 | New Integration | 10, 13 | PENDING |  |
