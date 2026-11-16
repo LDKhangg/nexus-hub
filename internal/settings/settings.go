@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Settings is the effective configuration.
@@ -385,7 +386,7 @@ func parse(key string, raw json.RawMessage) (any, error) {
 }
 
 // validStatusList accepts 1-20 comma-separated status names of 1-40 printable
-// characters each, without control characters.
+// characters (runes) each, without control characters.
 func validStatusList(str string) bool {
 	parts := strings.Split(str, ",")
 	if len(parts) > 20 {
@@ -393,7 +394,7 @@ func validStatusList(str string) bool {
 	}
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
-		if p == "" || len(p) > 40 {
+		if p == "" || utf8.RuneCountInString(p) > 40 {
 			return false
 		}
 		for _, r := range p {

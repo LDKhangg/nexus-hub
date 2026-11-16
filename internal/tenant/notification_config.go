@@ -127,6 +127,20 @@ func TelegramOwnerChatID(m map[string]any) int64 {
 	return 0
 }
 
+// OwnerTargetConfig returns a copy of a Telegram control integration's
+// config whose chat_id is the owner chat (see TelegramOwnerChatID), ready for
+// ParseTelegramTargetConfig. The stored config is not changed.
+func OwnerTargetConfig(m map[string]any) map[string]any {
+	conf := make(map[string]any, len(m)+1)
+	for k, v := range m {
+		conf[k] = v
+	}
+	if chat := TelegramOwnerChatID(m); chat != 0 {
+		conf["chat_id"] = strconv.FormatInt(chat, 10)
+	}
+	return conf
+}
+
 // ValidateOwnerChatID checks an optional owner_chat_id value: absent or nil
 // is valid; otherwise it must be a non-zero integer (or numeric string).
 func ValidateOwnerChatID(m map[string]any) error {

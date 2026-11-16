@@ -163,7 +163,7 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 	if err := tenant.ValidateTelegramTarget(integration, target); err != nil {
 		return result, err
 	}
-	if _, err := tenant.ParseTelegramTargetConfig(target.Config); err != nil {
+	if _, err := tenant.ParseTelegramTargetConfig(tenant.OwnerTargetConfig(target.Config)); err != nil {
 		return result, err
 	}
 	agentEnabled := r.agentEnabledAtIngest(integration)
