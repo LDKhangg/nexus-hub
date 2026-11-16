@@ -1045,6 +1045,9 @@ func (e *Engine) deliver(ctx context.Context, chat ChatRef, m OutMessage) (int64
 		cancel()
 	}
 	id, err := send(chat)
+	if err == nil {
+		e.d.Topics.NoteSent(chat)
+	}
 	if err != nil && chat.ThreadID != 0 && e.d.Topics != nil {
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.s.RequestTimeout)
 		again, ok := e.d.Topics.Recover(rctx, chat, err)
@@ -1052,6 +1055,9 @@ func (e *Engine) deliver(ctx context.Context, chat ChatRef, m OutMessage) (int64
 		if ok {
 			chat = again
 			id, err = send(chat)
+			if err == nil {
+				e.d.Topics.NoteSent(chat)
+			}
 		}
 	}
 	return id, chat, err

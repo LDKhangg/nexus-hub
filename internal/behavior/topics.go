@@ -6,10 +6,13 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
 )
 
@@ -25,6 +28,24 @@ const (
 	topicCodeNotFound  = "thread_not_found"
 	resourceClickUpTsk = "clickup.task"
 )
+
+const (
+	// NonForumMemory is how long a chat that is not a forum, or where the bot
+	// lacks topic rights, skips the topic cycle.
+	NonForumMemory = 10 * time.Minute
+	// taskNameTimeout bounds the task title read for a topic name.
+	taskNameTimeout = 3 * time.Second
+)
+
+type chatKey struct {
+	ws, integration string
+	chat            int64
+}
+
+type chatBlock struct {
+	code  string
+	until time.Time
+}
 
 // TopicClient creates and reopens forum topics (the Telegram Messenger).
 type TopicClient interface {
@@ -68,6 +89,71 @@ type TopicRouterDeps struct {
 type TopicRouter struct {
 	d         TopicRouterDeps
 	fallbacks atomic.Int64
+
+	mu      sync.Mutex
+	blocked map[chatKey]chatBlock
+	now     func() time.Time
+}
+
+func (r *TopicRouter) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+// blockedCode returns the remembered code when the chat is in its window.
+func (r *TopicRouter) blockedCode(c ChatRef) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := chatKey{c.WorkspaceID, c.IntegrationID, c.ChatID}
+	b, ok := r.blocked[k]
+	if !ok {
+		return "", false
+	}
+	if !r.clock().Before(b.until) {
+		delete(r.blocked, k)
+		return "", false
+	}
+	return b.code, true
+}
+
+func (r *TopicRouter) block(c ChatRef, code string) {
+	if code != topicCodeNotForum && code != topicCodeNoRights {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.blocked == nil {
+		r.blocked = map[chatKey]chatBlock{}
+	}
+	r.blocked[chatKey{c.WorkspaceID, c.IntegrationID, c.ChatID}] = chatBlock{code: code, until: r.clock().Add(NonForumMemory)}
+}
+
+func (r *TopicRouter) unblock(c ChatRef) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.blocked, chatKey{c.WorkspaceID, c.IntegrationID, c.ChatID})
+}
+
+// NoteSent clears the non-forum memory after a send with a thread worked.
+func (r *TopicRouter) NoteSent(c ChatRef) {
+	if r != nil && c.ThreadID != 0 {
+		r.unblock(c)
+	}
+}
+
+// unclearOutcome reports whether a topic call may have taken effect:
+// timeouts, transport and server errors, bad responses.
+func unclearOutcome(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var de *relay.DeliveryError
+	if errors.As(err, &de) {
+		return de.Retryable && de.Code != "rate_limited"
+	}
+	return true
 }
 
 func NewTopicRouter(d TopicRouterDeps) (*TopicRouter, error) {
@@ -129,6 +215,10 @@ func (r *TopicRouter) Destination(ctx context.Context, base ChatRef, in TopicInt
 	if kind == "" {
 		return base
 	}
+	if code, ok := r.blockedCode(base); ok {
+		r.fallback(code)
+		return base
+	}
 	topic, claimed, err := r.d.Store.EnsureTopic(ctx, TopicKey{
 		WorkspaceID: base.WorkspaceID, IntegrationID: base.IntegrationID, ChatID: base.ChatID, SubjectKind: kind, SubjectKey: key,
 	})
@@ -153,9 +243,11 @@ func (r *TopicRouter) Destination(ctx context.Context, base ChatRef, in TopicInt
 			if sendCode(err) == topicCodeNotFound {
 				r.drop(ctx, base, topic)
 			}
+			r.block(base, sendCode(err))
 			r.fallback(sendCode(err))
 			return base
 		}
+		r.unblock(base)
 		if _, err := r.d.Store.SetTopicState(ctx, base.WorkspaceID, topic.ID, TopicOpen); err != nil {
 			log.Print("telegram topic: reopened, state not stored")
 		}
@@ -176,19 +268,26 @@ func (r *TopicRouter) create(ctx context.Context, base ChatRef, topic Topic, kin
 		r.fallback("topic_unavailable")
 		return base
 	}
-	threadID, err := r.d.Client.CreateTopic(ctx, base, r.name(ctx, base, kind, key, in))
+	name := r.name(ctx, base, kind, key, in)
+	threadID, err := r.d.Client.CreateTopic(ctx, base, name)
 	if err != nil || threadID <= 0 {
-		release()
 		code := "topic_create_failed"
 		if err != nil {
 			code = sendCode(err)
 		}
+		// An unclear outcome may have created the topic: keep the
+		// reservation so the lease expires before anyone retries.
+		if err != nil && !unclearOutcome(err) {
+			release()
+			r.block(base, code)
+		}
 		r.fallback(code)
 		return base
 	}
-	if _, err := r.d.Store.SetTopicThread(context.WithoutCancel(ctx), base.WorkspaceID, topic.ID, threadID); err != nil {
-		// The topic exists in Telegram; use it for this message. The
-		// binding is retried by a later send once the lease runs out.
+	r.unblock(base)
+	if _, err := r.d.Store.SetTopicThread(context.WithoutCancel(ctx), base.WorkspaceID, topic.ID, threadID, topic.ReservedAt); err != nil {
+		// The topic exists in Telegram; use it for this message. A stale
+		// holder (reservation taken over) does not overwrite the binding.
 		log.Print("telegram topic: created, thread id not stored")
 	}
 	base.ThreadID = threadID
@@ -204,7 +303,10 @@ func (r *TopicRouter) name(ctx context.Context, base ChatRef, kind, key string, 
 	case TopicSubjectClickUpTask:
 		if r.d.TaskName != nil {
 			src := in.TaskSource
-			if title, err := r.d.TaskName(ctx, base.WorkspaceID, src, key); err == nil {
+			nctx, cancel := context.WithTimeout(ctx, taskNameTimeout)
+			title, err := r.d.TaskName(nctx, base.WorkspaceID, src, key)
+			cancel()
+			if err == nil {
 				if t := sanitizeTopicName(title, MaxTopicNameBytes); t != "" {
 					return sanitizeTopicName(key+" · "+t, MaxTopicNameBytes)
 				}
@@ -267,6 +369,7 @@ func (r *TopicRouter) Recover(ctx context.Context, chat ChatRef, err error) (Cha
 		r.fallback(code)
 		return general, true
 	case topicCodeNotForum, topicCodeNoRights:
+		r.block(chat, code)
 		r.fallback(code)
 		return general, true
 	}

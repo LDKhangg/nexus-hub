@@ -18,10 +18,12 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND integration_id = sqlc.arg(integr
 RETURNING *;
 
 -- name: SetTelegramTopicThread :one
--- Succeeds once, for a reserved topic without a thread id.
+-- Succeeds once, for a reserved topic without a thread id, and only for the
+-- holder whose reservation (reserved_at) is still the current one.
 UPDATE public.telegram_topics
 SET thread_id = sqlc.arg(thread_id), updated_at = now()
 WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND thread_id IS NULL
+  AND reserved_at = sqlc.arg(reserved_at)
 RETURNING *;
 
 -- name: ReleaseTelegramTopicReservation :execrows

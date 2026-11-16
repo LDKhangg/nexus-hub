@@ -295,6 +295,7 @@ const setTelegramTopicThread = `-- name: SetTelegramTopicThread :one
 UPDATE public.telegram_topics
 SET thread_id = $1, updated_at = now()
 WHERE workspace_id = $2 AND id = $3 AND thread_id IS NULL
+  AND reserved_at = $4
 RETURNING id, workspace_id, integration_id, chat_id, thread_id, subject_kind, subject_key, state, reserved_at, created_at, updated_at, closed_at
 `
 
@@ -302,11 +303,18 @@ type SetTelegramTopicThreadParams struct {
 	ThreadID    pgtype.Int8
 	WorkspaceID pgtype.UUID
 	ID          int64
+	ReservedAt  pgtype.Timestamptz
 }
 
-// Succeeds once, for a reserved topic without a thread id.
+// Succeeds once, for a reserved topic without a thread id, and only for the
+// holder whose reservation (reserved_at) is still the current one.
 func (q *Queries) SetTelegramTopicThread(ctx context.Context, arg SetTelegramTopicThreadParams) (TelegramTopic, error) {
-	row := q.db.QueryRow(ctx, setTelegramTopicThread, arg.ThreadID, arg.WorkspaceID, arg.ID)
+	row := q.db.QueryRow(ctx, setTelegramTopicThread,
+		arg.ThreadID,
+		arg.WorkspaceID,
+		arg.ID,
+		arg.ReservedAt,
+	)
 	var i TelegramTopic
 	err := row.Scan(
 		&i.ID,

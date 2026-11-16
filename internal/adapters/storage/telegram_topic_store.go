@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
@@ -133,7 +134,7 @@ func (s *TelegramTopicStore) EnsureTopic(ctx context.Context, key behavior.Topic
 	return mapTopic(row), false, nil
 }
 
-func (s *TelegramTopicStore) SetTopicThread(ctx context.Context, workspaceID string, id, threadID int64) (behavior.Topic, error) {
+func (s *TelegramTopicStore) SetTopicThread(ctx context.Context, workspaceID string, id, threadID int64, reservedAt time.Time) (behavior.Topic, error) {
 	ws, err := parseDBID(workspaceID)
 	if err != nil {
 		return behavior.Topic{}, topicInvalid("workspace_id")
@@ -143,9 +144,11 @@ func (s *TelegramTopicStore) SetTopicThread(ctx context.Context, workspaceID str
 	}
 	row, err := s.q.SetTelegramTopicThread(ctx, sqlc.SetTelegramTopicThreadParams{
 		WorkspaceID: ws, ID: id, ThreadID: pgtype.Int8{Int64: threadID, Valid: true},
+		ReservedAt: pgtype.Timestamptz{Time: reservedAt, Valid: true},
 	})
 	if isNoRows(err) {
-		// Either missing/foreign, or a thread id is already set.
+		// Missing/foreign, a thread id is already set, or the reservation was
+		// taken over by another holder.
 		return behavior.Topic{}, behavior.ErrConflict
 	}
 	if err != nil {

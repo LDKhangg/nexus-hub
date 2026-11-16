@@ -58,9 +58,11 @@ type TopicStore interface {
 	// never gets two Telegram topics. A reservation that is still unset after
 	// TopicReservationLease can be taken over by the next caller.
 	EnsureTopic(ctx context.Context, key TopicKey) (topic Topic, claimed bool, err error)
-	// SetTopicThread records the created thread id once; ErrConflict when
+	// SetTopicThread records the created thread id once, for the holder whose
+	// reservation (Topic.ReservedAt as EnsureTopic returned it) is still
+	// current; ErrConflict when a stale holder calls it, when
 	// the topic already has one or does not exist in the workspace.
-	SetTopicThread(ctx context.Context, workspaceID string, id, threadID int64) (Topic, error)
+	SetTopicThread(ctx context.Context, workspaceID string, id, threadID int64, reservedAt time.Time) (Topic, error)
 	// ReleaseTopic drops a reservation that has no thread id yet.
 	ReleaseTopic(ctx context.Context, workspaceID string, id int64) error
 	TopicBySubject(ctx context.Context, key TopicKey) (Topic, error)
