@@ -23,6 +23,7 @@ import (
 
 const telegramUsage = `usage: telegram webhook set|status|delete --workspace-id <uuid> --integration-id <uuid>
        telegram topics --workspace-id <uuid>
+       telegram send --workspace-id <uuid> [--topic general|<fixed name>]
        telegram group set|show --workspace-id <uuid> --integration-id <uuid> [--chat-id <id>]
   set     generate a new secret, store it encrypted and register
           <public_base_url>/webhook/telegram/<integration-id> with Telegram
@@ -30,6 +31,9 @@ const telegramUsage = `usage: telegram webhook set|status|delete --workspace-id 
   delete  remove the webhook and its stored secret
 The integration is the workspace's Telegram integration that holds the bot
 token. The secret is never printed.
+send    read a plain-text message from stdin (1-4000 characters, never argv)
+        and send it to the workspace's owner chat: General, or the fixed-name
+        topic given by --topic. Prints {"status":"sent","message_id":n}.
 topics  list the workspace's forum topics: subject kind and key, thread id,
         state and times (topic and task names are never stored or shown)
 group   set  store the workspace's forum group chat id (owner_chat_id) on the
@@ -50,6 +54,8 @@ func telegramCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 			return telegramTopics(ctx, pool, args[1:], out)
 		case "group":
 			return telegramGroup(ctx, pool, args[1:], out)
+		case "send":
+			return telegramSend(ctx, pool, args[1:], out, lookup)
 		}
 	}
 	if len(args) < 2 || args[0] != "webhook" {

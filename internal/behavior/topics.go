@@ -81,6 +81,8 @@ type TopicRouterDeps struct {
 	Client    TopicClient
 	TaskName  TopicNamer
 	Resources workflow.ResourceLister
+	// ResolveTask turns a custom task ID into the canonical ID; optional.
+	ResolveTask func(ctx context.Context, workspaceID string, ref TaskRef) (string, error)
 }
 
 // TopicRouter resolves the Telegram topic of an execution's messages and

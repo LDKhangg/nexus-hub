@@ -40,6 +40,7 @@ const (
 	toolWorkflowHistory = "workflow_history"
 	toolWorkflowJobs    = "workflow_jobs"
 	toolWorkflowNote    = "workflow_note"
+	toolOpenTaskTopic   = "open_task_topic"
 
 	toolContactAlias   = "contact_alias"
 	toolReportStyle    = "report_style"
@@ -115,6 +116,73 @@ var assistantTools = []assistantTool{
 		InputSchema: toolSchema(`"id":{"type":"integer","minimum":1}`, "id")}},
 	{workflow: true, def: domain.ToolDef{Name: toolWorkflowRetry, Description: "Propose retrying a FAILED workflow execution as a new linked execution (never resends a known side effect). Sends a Làm/Huỷ confirmation.",
 		InputSchema: toolSchema(`"id":{"type":"integer","minimum":1}`, "id")}},
+}
+
+// openTaskTopicTool opens the Telegram topic of a ClickUp task in the
+// owner's group. It is offered only where a topic link can exist.
+var openTaskTopicTool = domain.ToolDef{Name: toolOpenTaskTopic,
+	Description: "Create or reopen the Telegram topic of a ClickUp task in this group and send the owner a button that opens it. " +
+		"Use it when the owner asks to open, create or follow a task in a topic, for example \"tạo topic cho task này <link>\" or \"mở topic FC-6583\". " +
+		"The task is a task ID, a custom task ID such as FC-6583, or a ClickUp task URL. The result only says whether the button was sent. It is safe: it changes nothing but this group's topics.",
+	InputSchema: toolSchema(`"task":{"type":"string","description":"task ID, custom task ID or ClickUp task URL"}`, "task")}
+
+// topicToolAvailable reports whether open_task_topic is offered for u: the
+// topics feature is wired and the chat is a forum-capable supergroup.
+func (w *InboxWorker) topicToolAvailable(u InboundUpdate) bool {
+	return w.d.Links != nil && w.jumpAvailable(u)
+}
+
+// assistantToolDefsFor is assistantToolDefs plus the tools that depend on
+// the chat of u.
+func (w *InboxWorker) assistantToolDefsFor(u InboundUpdate) []domain.ToolDef {
+	out := w.assistantToolDefs()
+	if w.topicToolAvailable(u) {
+		out = append(out, openTaskTopicTool)
+	}
+	return out
+}
+
+// toolOpenTaskTopic opens the task's topic and sends the owner the "Mở topic"
+// button. The model gets status codes only, never a name or the link.
+func (w *InboxWorker) toolOpenTaskTopic(ctx context.Context, tt *assistantToolTurn, args toolArgs) (string, bool) {
+	raw, err := args.str("task")
+	if err != nil || raw == "" {
+		return toolErr(errToolArgs)
+	}
+	ref, ok := taskURLTaskRef(raw)
+	if !ok {
+		ref, ok = ParseTaskRefTeam(raw)
+	}
+	if !ok {
+		return toolErr(errToolArgs)
+	}
+	if !w.topicToolAvailable(tt.u) {
+		return toolJSON(map[string]any{"status": "not_available", "link_sent": false})
+	}
+	taskID, err := w.resolveTask(ctx, tt.u.WorkspaceID, ref)
+	var link string
+	if err == nil {
+		link, err = w.d.Links.TaskTopicLink(ctx, ChatRef{WorkspaceID: tt.u.WorkspaceID, IntegrationID: tt.u.IntegrationID, ChatID: tt.u.ChatID}, taskID)
+	}
+	switch {
+	case errors.Is(err, ErrTaskUnreadable):
+		return toolJSON(map[string]any{"status": "task_unreadable", "link_sent": false})
+	case err != nil:
+		return toolJSON(map[string]any{"status": "topic_unavailable", "link_sent": false})
+	}
+	key := toolOpenTaskTopic + "|" + taskID
+	if tt.proposed[key] {
+		return toolJSON(map[string]any{"status": "already_sent", "link_sent": true})
+	}
+	tt.proposed[key] = true
+	out := w.replyMessage(ctx, tt.to, OutMessage{
+		Text:    "Task " + taskID + ": nhấn nút để mở topic.",
+		Buttons: [][]Button{{{Text: btnOpenTopic, URL: link}}},
+	}, "")
+	if out.code != "" {
+		return toolJSON(map[string]any{"status": "send_failed", "link_sent": false})
+	}
+	return toolJSON(map[string]any{"status": "sent", "link_sent": true})
 }
 
 // assistantToolDefs lists the tools this hub can run.
@@ -244,6 +312,8 @@ func (w *InboxWorker) runAssistantTool(ctx context.Context, tt *assistantToolTur
 		text, isErr = w.toolWorkflowJobs(hctx, ws, args)
 	case toolWorkflowNote:
 		text, isErr = w.toolWorkflowNote(hctx, tt, args)
+	case toolOpenTaskTopic:
+		text, isErr = w.toolOpenTaskTopic(hctx, tt, args)
 	case toolContactAlias, toolReportStyle, toolWorkflowCancel, toolWorkflowResume, toolWorkflowRetry:
 		// The confirmation is sent with the turn's context, not the
 		// handler timeout, like a reply.

@@ -306,6 +306,24 @@ func buildTopicRouter(pool *pgxpool.Pool, s settings.Settings, integrations *sto
 			st, err := reader.ReadTask(ctx, workspaceID, cfg.ClickUpTokenRef, taskID)
 			return st.Name, err
 		},
+		// A custom task ID (FC-6583) is read with the team of the task URL or,
+		// without one, of the workspace's ClickUp source; both must agree.
+		ResolveTask: func(ctx context.Context, workspaceID string, ref behavior.TaskRef) (string, error) {
+			cfg, err := policies.RunPolicy(ctx, workspaceID, "")
+			if err != nil {
+				return "", err
+			}
+			team := ref.TeamID
+			if team == "" {
+				team = cfg.ClickUpTeamID
+			} else if cfg.ClickUpTeamID != "" && cfg.ClickUpTeamID != team {
+				return "", errors.New("task team does not match the workspace")
+			}
+			if team == "" {
+				return "", errors.New("no ClickUp team for custom task ID")
+			}
+			return reader.ResolveCustomID(ctx, workspaceID, cfg.ClickUpTokenRef, ref.ID, team)
+		},
 	}
 	if lister, ok := ag.conversations.(workflow.ResourceLister); ok {
 		deps.Resources = lister

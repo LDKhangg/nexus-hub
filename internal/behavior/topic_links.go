@@ -32,11 +32,56 @@ var (
 // taskURLRef returns the task id of text when it is exactly one ClickUp
 // task URL (free text with more words is a normal message).
 func taskURLRef(text string) (string, bool) {
+	ref, ok := taskURLTaskRef(text)
+	return ref.ID, ok
+}
+
+// taskURLTaskRef is taskURLRef that keeps the URL's team ID.
+func taskURLTaskRef(text string) (TaskRef, bool) {
 	text = strings.Trim(strings.TrimSpace(text), "<>")
 	if !strings.HasPrefix(text, "https://") || strings.ContainsAny(text, " \t\r\n") {
-		return "", false
+		return TaskRef{}, false
 	}
-	return ParseTaskRef(text)
+	return ParseTaskRefTeam(text)
+}
+
+// TaskResolver turns a task reference into the canonical task ID. Custom
+// IDs are read from ClickUp; a canonical ID is returned unchanged.
+type TaskResolver interface {
+	// ResolveTask returns the canonical ID, or ErrTaskUnreadable.
+	ResolveTask(ctx context.Context, workspaceID string, ref TaskRef) (string, error)
+}
+
+var _ TaskResolver = (*TopicRouter)(nil)
+
+// ResolveTask implements TaskResolver. Without a resolver wired, the ID is
+// used as written.
+func (r *TopicRouter) ResolveTask(ctx context.Context, workspaceID string, ref TaskRef) (string, error) {
+	if r == nil || !taskIDRe.MatchString(ref.ID) {
+		return "", ErrTaskUnreadable
+	}
+	if !ref.Custom() || r.d.ResolveTask == nil {
+		return ref.ID, nil
+	}
+	nctx, cancel := context.WithTimeout(ctx, taskNameTimeout)
+	defer cancel()
+	id, err := r.d.ResolveTask(nctx, workspaceID, ref)
+	if err != nil || !taskIDRe.MatchString(id) {
+		return "", ErrTaskUnreadable
+	}
+	return id, nil
+}
+
+// resolveTask returns the canonical ID of ref through the Links value.
+func (w *InboxWorker) resolveTask(ctx context.Context, workspaceID string, ref TaskRef) (string, error) {
+	if !ref.Custom() {
+		return ref.ID, nil
+	}
+	rs, ok := w.d.Links.(TaskResolver)
+	if !ok {
+		return ref.ID, nil
+	}
+	return rs.ResolveTask(ctx, workspaceID, ref)
 }
 
 // TopicDeepLink is the t.me link of a topic of a supergroup: chat ids of
@@ -132,11 +177,11 @@ func withJumpButton(m OutMessage, b Button) OutMessage {
 
 // topicCommand answers "/topic <id or link>".
 func (w *InboxWorker) topicCommand(ctx context.Context, u InboundUpdate, to ChatRef) outcome {
-	id, ok := ParseTaskRef(u.Args)
+	ref, ok := ParseTaskRefTeam(u.Args)
 	if !ok {
 		return w.reply(ctx, to, msgTopicUsage, "usage")
 	}
-	return w.topicJump(ctx, u, to, id)
+	return w.topicJumpRef(ctx, u, to, ref)
 }
 
 // jumpAvailable reports whether a lone task link may take the jump path: the
@@ -155,11 +200,21 @@ func (w *InboxWorker) jumpAvailable(u InboundUpdate) bool {
 // topicJump replies with the "Mở topic" button of the task's topic. It is
 // for General only: inside a topic the owner is already in one.
 func (w *InboxWorker) topicJump(ctx context.Context, u InboundUpdate, to ChatRef, taskID string) outcome {
+	return w.topicJumpRef(ctx, u, to, TaskRef{ID: taskID})
+}
+
+// topicJumpRef is topicJump for a reference that may be a custom task ID;
+// the topic is always keyed by the canonical ID.
+func (w *InboxWorker) topicJumpRef(ctx context.Context, u InboundUpdate, to ChatRef, ref TaskRef) outcome {
 	if w.d.Links == nil {
 		return w.reply(ctx, to, msgTopicNotAvail, "not_available")
 	}
 	hctx, cancel := context.WithTimeout(ctx, w.settings.HandlerTimeout)
-	link, err := w.d.Links.TaskTopicLink(hctx, ChatRef{WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID}, taskID)
+	taskID, err := w.resolveTask(hctx, u.WorkspaceID, ref)
+	var link string
+	if err == nil {
+		link, err = w.d.Links.TaskTopicLink(hctx, ChatRef{WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID}, taskID)
+	}
 	cancel()
 	switch {
 	case errors.Is(err, ErrTaskUnreadable):
