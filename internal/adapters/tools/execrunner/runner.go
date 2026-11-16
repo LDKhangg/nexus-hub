@@ -217,7 +217,7 @@ func (r *Runner) Run(ctx context.Context, c Command) (Result, error) {
 	stderr := &capWriter{max: MaxStreamBytes}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	// No Pdeathsig: it fires when the forking OS thread exits, which Go may do.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return Result{}, fmt.Errorf("start git: %w", err)
@@ -264,8 +264,6 @@ func signalOf(ee *exec.ExitError) syscall.Signal {
 	}
 	return 0
 }
-
-func killGroup(pid int) { _ = syscall.Kill(-pid, syscall.SIGKILL) }
 
 // capWriter keeps the first max bytes and discards the rest.
 type capWriter struct {
