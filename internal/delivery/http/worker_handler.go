@@ -39,6 +39,8 @@ type WorkerHandler struct {
 	instructions  behavior.WorkerInstructionSource // nil: no instructions
 	pollWait      time.Duration                    // long-poll cap (W6)
 	pollRecheck   time.Duration                    // re-check interval while waiting
+	stopping      chan struct{}                    // closed on server shutdown: polls end with 204
+	stopOnce      sync.Once
 }
 
 func NewWorkerHandler(enroller behavior.WorkerEnroller, auth behavior.WorkerAuthenticator) *WorkerHandler {
@@ -49,6 +51,7 @@ func NewWorkerHandler(enroller behavior.WorkerEnroller, auth behavior.WorkerAuth
 		authFailures:  newTokenBuckets(30, 1, time.Now),
 		pollWait:      behavior.WorkerPollMaxWait,
 		pollRecheck:   3 * time.Second,
+		stopping:      make(chan struct{}),
 	}
 }
 
@@ -59,9 +62,19 @@ func (h *WorkerHandler) WithLeases(leases behavior.WorkerLeases, instructions be
 	return h
 }
 
+// Shutdown ends every waiting poll with 204 so the worker reconnects and
+// the HTTP server can drain (R-2). It is safe to call more than once.
+func (h *WorkerHandler) Shutdown() {
+	h.stopOnce.Do(func() { close(h.stopping) })
+}
+
 // Register mounts the worker routes. Every route except enroll, including
-// unknown paths below /worker/v1, requires a valid device token.
+// unknown paths below /worker/v1, requires a valid device token. Waiting
+// polls end when e's HTTP server shuts down.
 func (h *WorkerHandler) Register(e *echo.Echo) {
+	if e.Server != nil {
+		e.Server.RegisterOnShutdown(h.Shutdown)
+	}
 	e.POST("/worker/v1/enroll", h.Enroll, middleware.BodyLimit(workerBodyLimit))
 	g := e.Group("/worker/v1", middleware.BodyLimit(workerBodyLimit), h.authenticate)
 	g.POST("/poll", h.Poll)

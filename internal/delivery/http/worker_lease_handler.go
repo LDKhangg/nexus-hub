@@ -155,6 +155,8 @@ func (h *WorkerHandler) Poll(c echo.Context) error {
 			return nil // client went away
 		case <-deadline.C:
 			return c.NoContent(http.StatusNoContent)
+		case <-h.stopping:
+			return c.NoContent(http.StatusNoContent) // server shutting down
 		case <-changed:
 		case <-recheck.C:
 		}
