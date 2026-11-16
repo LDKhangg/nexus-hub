@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -100,6 +101,27 @@ func (c commentParts) taggedUserIDs() []string {
 		}
 	}
 	return out
+}
+
+// groupPartTypes are comment part types that tag a group of people (for
+// example everyone, the followers or the assignees) instead of one user.
+var groupPartTypes = map[string]bool{
+	"everyone": true, "group_tag": true, "group_mention": true, "team_tag": true,
+	"followers": true, "followers_tag": true, "assignees": true, "assignees_tag": true,
+}
+
+// groupMentionRe finds a group mention in the comment's plain text.
+var groupMentionRe = regexp.MustCompile(`(?i)(^|[^\w@])@(everyone|all|channel|here|followers|assignees|watchers)\b`)
+
+// tagsGroup reports whether the comment tags a group of people, from its
+// parts or, when ClickUp sent another part shape, from its plain text.
+func (c commentParts) tagsGroup(text string) bool {
+	for _, part := range c {
+		if groupPartTypes[strings.ToLower(part.Type)] {
+			return true
+		}
+	}
+	return groupMentionRe.MatchString(text)
 }
 
 func validUserID(id string) bool {
@@ -238,6 +260,9 @@ func (p *ClickUpParser) Parser(raw []byte) ([]domain.NormalizedEvent, error) {
 			actor, content, messageID = item.Comment.User, item.Comment.TextContent, "comment:"+item.Comment.ID
 			if tagged := item.Comment.Parts.taggedUserIDs(); len(tagged) > 0 {
 				extra["tagged_user_ids"] = strings.Join(tagged, ",")
+			}
+			if item.Comment.Parts.tagsGroup(content) {
+				extra["tagged_group"] = "true"
 			}
 		default:
 			if item.After == nil || item.After.Status == "" {
