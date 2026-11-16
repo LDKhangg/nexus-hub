@@ -41,7 +41,7 @@
 ### 1.2 Out of scope (later phases)
 
 - Plan/evaluate orchestration and DELEGATE decisions (Phase 7b, the former Phase 7 plan).
-- Several laptops, scheduling priorities, per-user concurrency, backpressure (Phase 8 remainder).
+- Switching between several Claude accounts on one device; several laptops, scheduling priorities, per-user concurrency, backpressure (Phase 8 remainder).
 - Policy engine and auto-approval rules (Phase 9); GitHub/ClickUp comment replies (Phase 10).
 
 ### 1.3 Decisions
@@ -87,6 +87,8 @@ Owner decisions taken 2026-11-16 (second round):
 | REQ-15 | Durable local outbox: every progress event and result is first written to a journal under the worker's state directory (fsync) and then sent in order with its idempotency key; on network loss or hub downtime it retries with backoff until accepted. The hub accepts late events and results for an `INTERRUPTED` job from the same device within the W7 resume window and moves the job on; later or foreign ones are rejected and recorded. | FR-068, FR-107, NFR-001 | W-2, W-3 |
 | REQ-16 | Crash and restart recovery on the laptop: on start the worker reads its journal, re-attaches to a job whose lease it still holds (resume in the same worktree) or reports it `failed` with reason `worker_restarted`; an executor crash or non-zero exit becomes a result with a fixed reason code, never a silent stop. | FR-068, E2E-007 | W-3 |
 | REQ-17 | Sleep inhibition: while a job runs the worker holds a system sleep/idle inhibitor (logind on Linux, the platform equivalent elsewhere, best effort) and releases it when the job ends; with no job the machine sleeps normally. The worker never changes system power settings. | FR-063 | W-3 |
+| REQ-18 | Worker telemetry: every heartbeat (busy) or every 60 s (idle) carries a bounded metrics snapshot — state (idle/busy/offline), CPU load and cores, RAM used/total, disk used/total of `repos_dir`, executor and its version, Claude subscription limits left (5-hour session and weekly, with reset times) when the local CLI exposes them (else "unknown"), and counters (jobs, failures, executor tokens, busy hours). The hub keeps the latest snapshot per device plus hourly rollups for 30 days; no process lists, paths, hostnames beyond the device name, or file contents. `/worker` in Telegram shows one card per device like the owner's mock-up (state, CPU, RAM, disk, Claude limits, tokens, jobs, failures, hours, last seen); `nh worker devices --json` prints the same. The local IP is not collected. | FR-059, FR-066, NFR-030 | W-2, W-3, W-4 |
+| REQ-19 | Telemetry-aware assignment: a job is not leased to a device whose Claude session or weekly limit left is below `worker_min_claude_left` (default 10 %), whose disk free is below `worker_min_disk_free` (default 5 GB), or whose RAM in use is above `worker_max_ram_used` (default 90 %); the job waits and the topic says why ("máy local sắp hết hạn mức Claude, chờ reset lúc …"). Unknown limits do not block. Thresholds are settings. | FR-103, FR-109 | W-2, W-4 |
 
 ## 3. Interfaces (summary)
 
@@ -100,9 +102,9 @@ Owner decisions taken 2026-11-16 (second round):
 | Task | Difficulty | Agent | Content |
 |---|---|---|---|
 | W-1 enrollment, devices, auth, audit, migration 00026 | Medium | Claude Sonnet (implementer limits) | REQ-1, REQ-12, REQ-13 |
-| W-2 lease protocol, presence, capability match, cancellation | Hard | Claude Opus (implementer limits) | REQ-2, REQ-3, REQ-4, REQ-7, REQ-9 |
-| W-3 laptop worker: executor, worktree, push, draft PR, progress, hygiene, outbox, recovery, sleep inhibit | Hard | Claude Opus (implementer limits) | REQ-5, REQ-6, REQ-8, REQ-10, REQ-15, REQ-16, REQ-17 |
-| W-4 `/task`, `local-task` workflow, topic messages, runbook | Medium | Claude Sonnet (implementer limits) | REQ-4, REQ-8, REQ-11, REQ-14 |
+| W-2 lease protocol, presence, capability match, cancellation, telemetry intake, telemetry-aware assignment | Hard | Claude Opus (implementer limits) | REQ-2, REQ-3, REQ-4, REQ-7, REQ-9, REQ-18, REQ-19 |
+| W-3 laptop worker: executor, worktree, push, draft PR, progress, hygiene, outbox, recovery, sleep inhibit | Hard | Claude Opus (implementer limits) | REQ-5, REQ-6, REQ-8, REQ-10, REQ-15, REQ-16, REQ-17, REQ-18 (collection) |
+| W-4 `/task`, `local-task` workflow, topic messages, runbook | Medium | Claude Sonnet (implementer limits) | REQ-4, REQ-8, REQ-11, REQ-14, REQ-18 (`/worker` card) |
 | Batch A tests (W-1, W-2) / Batch B tests (W-3, W-4) | — | Claude Sonnet (tester limits) | fake worker client, fake executor, real handlers + throwaway PostgreSQL |
 | Reviews | — | Claude Opus (reviewer limits) | read-only |
 
@@ -117,7 +119,7 @@ Dispatch: W-1 → W-2 → Batch A test → review → fixes → W-3 → W-4 → 
 
 ## 6. Phase completion gate
 
-- [ ] All REQ-1–17 cases have CI evidence on the final head; no skip, race or panic.
+- [ ] All REQ-1–19 cases have CI evidence on the final head; no skip, race or panic.
 - [ ] Reviewer APPROVE on the same head; Critical/Important findings resolved.
 - [ ] Live check: the owner's laptop enrolls, takes a `/task` from a task topic, opens a draft PR; offline → waiting message; lid closed mid-job → interrupted/resume path.
 - [ ] Lead updates `docs/product/TRACEABILITY.md`, writes `docs/product/reports/<date>-phase7a-report.md`, sends the report to Telegram; merge after the owner's `/merge`.
