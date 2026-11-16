@@ -292,6 +292,7 @@ type assistantTurnResult struct {
 	route          string       // the usage log's route label (assistant_router.go)
 	routerModel    string       // set when a router call ran before the final model
 	routerUsage    domain.Usage // that router call's usage; not in usage
+	routerError    string       // fixed router failure code, "" on success
 	usage          domain.Usage
 	cut            bool // the model stopped at its output limit
 	steps          int  // model calls
@@ -396,6 +397,7 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 		routerUsage domain.Usage
 		routerSteps int
 		routerRan   bool
+		routerErr   string
 		answered    bool
 	)
 	if job.tier != assistantTierDeep && job.workflowID <= 0 && a.FastModel != "" {
@@ -406,7 +408,7 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 			routerUsage, routerSteps, routerRan = usage, 1, true
 			switch {
 			case rerr != nil:
-				route = routeWorkFallback
+				route, routerErr = routeWorkFallback, routerErrorCode(rerr)
 			case d.route == routeAnswer:
 				// The fast call is the final answer: its usage is the
 				// turn's, not a separate router line.
@@ -427,6 +429,7 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 		}
 	}
 	res.route = route
+	res.routerError = routerErr
 	if routerRan {
 		res.routerModel, res.routerUsage = a.FastModel, routerUsage
 	}
@@ -691,6 +694,7 @@ func (w *InboxWorker) assistantJob(ctx context.Context, job assistantJob) outcom
 		"router_output_tokens", res.routerUsage.Output,
 		"router_cache_read_tokens", res.routerUsage.CacheRead,
 		"router_cache_write_tokens", res.routerUsage.CacheWrite,
+		"router_error", res.routerError,
 		"latency_ms", time.Since(started).Milliseconds(),
 	)
 	if ctx.Err() != nil {

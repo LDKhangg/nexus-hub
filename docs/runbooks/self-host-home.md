@@ -970,8 +970,12 @@ The models take the same Claude model ids as `assistant_model`.
 Routing rules:
 
 - The router sees the stored summary, the last `assistant_history_turns`
-  exchanges and your message, has no tools, and returns either a short reply
-  or an escalation to `work` or `deep`.
+  exchanges and your message, has no tools, and returns one JSON object with
+  all three fields `route`, `reply` and `tier`:
+  `{"route":"answer","reply":"…","tier":"none"}` (a short reply) or
+  `{"route":"escalate","reply":"","tier":"work"|"deep"}`. `route` decides:
+  an answer needs a non-empty reply of at most 2,000 characters (its tier is
+  ignored); an escalation needs tier `work` or `deep` (its reply is ignored).
 - It may answer itself only greetings, thanks, acknowledgements and general
   questions that need no workspace data. Anything about tasks, PRs,
   workflows, runs, people, reports, status or settings, any request to do or
@@ -997,7 +1001,7 @@ conversation history sent back to the model.
 Each finished turn logs one metadata line, never text:
 
 ```text
-msg="assistant turn" route=work model=claude-sonnet-5-5 steps=3 input_tokens=… output_tokens=… cache_read_tokens=… cache_write_tokens=… router_model=claude-haiku-5-5 router_input_tokens=… router_output_tokens=… router_cache_read_tokens=… router_cache_write_tokens=… latency_ms=…
+msg="assistant turn" route=work model=claude-sonnet-5-5 steps=3 input_tokens=… output_tokens=… cache_read_tokens=… cache_write_tokens=… router_model=claude-haiku-5-5 router_input_tokens=… router_output_tokens=… router_cache_read_tokens=… router_cache_write_tokens=… router_error= latency_ms=…
 ```
 
 `route` is `answer` (fast reply), `work`, `deep` (router or `/deep`),
@@ -1015,6 +1019,14 @@ tokens at the cache-write price, cache-read tokens at the much lower
 cache-read price, and output tokens at the output price. A high
 `cache_read_tokens` share means the cached prefix (system prompt, tools and
 history) is working.
+
+`router_error` is empty unless the router failed (`route=work_fallback`); then
+it holds one fixed code, never text: `provider_error`, `timeout`,
+`nil_response`, `stop_refusal`, `stop_max_tokens`, `stop_other` (the call
+stopped for another reason), `decode` (not one JSON object with only the
+known fields), `trailing_data`, `missing_field`, `bad_route`, `empty_reply`,
+`reply_too_long` or `bad_tier`. Many `work_fallback` lines with the same
+code point at the fast model or the router prompt, not at your messages.
 
 ## Upkeep
 
