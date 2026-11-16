@@ -15,7 +15,7 @@
 ## Global Constraints
 
 - Code, documentation and commits are English; owner-facing discussion is Vietnamese.
-- Baseline: `develop` at `69ab530`. Branch `feature/phase6b`. Next migration number is `00025` (Phase 7 then starts at `00026`).
+- Baseline: `develop` after the Phase 6a merge. Branch `feature/phase6b`. Carry-in from Phase 6a: R-4 (a fast router reply ending with a question pushes the next owner message to the work model) — fix in P3 by making the router end its own replies without a question or by recording which tier answered each exchange. Next migration number is `00025` (Phase 7 then starts at `00026`).
 - One handoff at a time per shared working tree. Implementer changes production only; Tester changes tests only; Reviewer is read-only.
 - Lead/Implementer never run `go test`. Checks: `go build ./...`, `go vet ./...`, `gofmt -l cmd internal`, `make generate` (second run clean), `goose -dir db/migrations validate`. The suite runs only in CI.
 - Never edit old migrations or hand-edit sqlc output. New tables are workspace-scoped with composite foreign keys and RLS like their precedents.
