@@ -416,6 +416,16 @@ func TestWorker7a_OneActiveJobPerDeviceFIFO(t *testing.T) {
 	if l1.Job.ID != first.ID || l1.Job.Attempt != 1 {
 		t.Fatalf("not FIFO / attempt: %+v", l1.Job)
 	}
+	// Fix Brief A1 (R-1): a poll while the job is only LEASED re-issues the
+	// same job with a new token; it never hands out the second job.
+	re := e.mustLease(t, d)
+	if re.Job.ID != first.ID || re.Job.Attempt != 1 || re.LeaseToken == l1.LeaseToken {
+		t.Fatalf("busy device did not get its own job re-issued: %+v", re.Job)
+	}
+	l1 = re
+	if _, err := e.s.Heartbeat(e.ctx, d, first.ID, l1.LeaseToken); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := e.lease(t, d); ok {
 		t.Fatal("device leased a second job while busy")
 	}

@@ -314,12 +314,19 @@ func TestWorkerHTTP7a_JourneyPollHeartbeat(t *testing.T) {
 	if r := h.poll(t, tokOther, 0, nil); r.code != 204 {
 		t.Fatalf("second device polled the leased job: %d", r.code)
 	}
-	if r := h.poll(t, tok, 0, nil); r.code != 204 {
-		t.Fatalf("busy device got another job: %d", r.code)
+	// Fix Brief A1 (R-1): while still LEASED the holder gets the same job
+	// again with a new lease token; the old token is dead.
+	re := h.poll(t, tok, 0, nil)
+	if re.code != 200 || re.body["job_id"] != j.ID || re.body["lease_token"] == lt {
+		t.Fatalf("leased device poll: %d %s", re.code, re.raw)
 	}
+	lt = re.body["lease_token"].(string)
 	hb := h.do(t, base+"/heartbeat", tok, map[string]any{"lease_token": lt})
 	if hb.code != 200 || hb.body["cancel"] != false || hb.body["instructions"] == nil {
 		t.Fatalf("heartbeat: %d %s", hb.code, hb.raw)
+	}
+	if r := h.poll(t, tok, 0, nil); r.code != 204 {
+		t.Fatalf("running device got another job: %d", r.code)
 	}
 	if r := h.do(t, base+"/heartbeat", tok, map[string]any{"lease_token": "nhl_stale"}); r.code != 409 {
 		t.Fatalf("stale heartbeat: %d", r.code)
