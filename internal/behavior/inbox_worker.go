@@ -206,7 +206,7 @@ func (w *InboxWorker) dispatch(ctx context.Context, u InboundUpdate, corr string
 	if u.IntegrationID == "" || u.ChatID == 0 {
 		return outcome{code: "no_integration"}
 	}
-	to := ChatRef{WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID}
+	to := ChatRef{WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, ThreadID: u.ThreadID}
 	ctx = w.recordInboundConversation(ctx, u, to)
 	actor := "telegram:" + strconv.FormatInt(u.ChatID, 10)
 	switch u.Kind {

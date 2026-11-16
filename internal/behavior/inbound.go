@@ -230,6 +230,9 @@ type ChatRef struct {
 	WorkspaceID   string
 	IntegrationID string
 	ChatID        int64
+	// ThreadID is the Telegram forum topic (message_thread_id); 0 is the
+	// chat itself (General).
+	ThreadID int64
 }
 
 // Button is one inline button; Data comes from CallbackData.Encode.

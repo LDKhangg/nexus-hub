@@ -39,7 +39,7 @@ func (w *InboxWorker) ensureConversation(ctx context.Context, to ChatRef) (workf
 		return workflow.Conversation{}, nil
 	}
 	return w.d.Conversations.EnsureConversation(ctx, workflow.Conversation{
-		WorkspaceID: to.WorkspaceID, IntegrationID: to.IntegrationID, ChatID: to.ChatID,
+		WorkspaceID: to.WorkspaceID, IntegrationID: to.IntegrationID, ChatID: to.ChatID, ThreadID: to.ThreadID,
 	})
 }
 

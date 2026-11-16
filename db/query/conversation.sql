@@ -1,9 +1,9 @@
 -- Workspace-scoped conversation, binding and instruction persistence.
 
 -- name: EnsureConversation :one
-INSERT INTO public.conversations (workspace_id, integration_id, chat_id, user_id)
-VALUES (sqlc.arg(workspace_id), sqlc.arg(integration_id), sqlc.arg(chat_id), sqlc.narg(user_id))
-ON CONFLICT (workspace_id, integration_id, chat_id) DO UPDATE SET updated_at = public.conversations.updated_at
+INSERT INTO public.conversations (workspace_id, integration_id, chat_id, thread_id, user_id)
+VALUES (sqlc.arg(workspace_id), sqlc.arg(integration_id), sqlc.arg(chat_id), sqlc.arg(thread_id), sqlc.narg(user_id))
+ON CONFLICT (workspace_id, integration_id, chat_id, thread_id) DO UPDATE SET updated_at = public.conversations.updated_at
 RETURNING *;
 
 -- name: InsertConversationMessage :one

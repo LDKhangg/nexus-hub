@@ -263,12 +263,20 @@ func (o ownerChats) OwnerChat(ctx context.Context, workspaceID string, t behavio
 			return behavior.ChatRef{WorkspaceID: workspaceID, IntegrationID: in.ID, ChatID: t.TelegramChatID}, nil
 		}
 	}
-	if o.ownerChatID == 0 {
-		return behavior.ChatRef{}, errors.New("owner_telegram_chat_id is not set")
-	}
 	list, err := o.integrations.List(ctx, workspaceID, 100, 0)
 	if err != nil {
 		return behavior.ChatRef{}, err
+	}
+	// The workspace's own group wins; owner_telegram_chat_id is the fallback.
+	for _, in := range list {
+		if telegramControl(in) {
+			if chat := tenant.TelegramOwnerChatID(in.Config); chat != 0 {
+				return behavior.ChatRef{WorkspaceID: workspaceID, IntegrationID: in.ID, ChatID: chat}, nil
+			}
+		}
+	}
+	if o.ownerChatID == 0 {
+		return behavior.ChatRef{}, errors.New("owner_telegram_chat_id is not set")
 	}
 	for _, in := range list {
 		if telegramControl(in) {

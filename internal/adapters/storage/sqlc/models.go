@@ -244,6 +244,8 @@ type Conversation struct {
 	SummaryUpdatedAt pgtype.Timestamptz
 	CreatedAt        pgtype.Timestamptz
 	UpdatedAt        pgtype.Timestamptz
+	// Telegram message_thread_id; 0 is the chat itself (General).
+	ThreadID int64
 }
 
 // Message identifiers and routing metadata only; message bodies are never stored.
@@ -509,6 +511,23 @@ type RunItem struct {
 	UpdatedAt    pgtype.Timestamptz
 }
 
+// Workspace-scoped binding of a Telegram forum topic to one subject; topic names, task names and message text are never stored.
+type TelegramTopic struct {
+	ID            int64
+	WorkspaceID   pgtype.UUID
+	IntegrationID pgtype.UUID
+	ChatID        int64
+	// Telegram message_thread_id; NULL while the topic is only reserved.
+	ThreadID    pgtype.Int8
+	SubjectKind string
+	SubjectKey  string
+	State       string
+	ReservedAt  pgtype.Timestamptz
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+	ClosedAt    pgtype.Timestamptz
+}
+
 // Inbound update dedupe and work queue; holds a short command and its arguments, never full message text.
 type TelegramUpdate struct {
 	ID            int64
@@ -531,6 +550,8 @@ type TelegramUpdate struct {
 	TelegramMessageID pgtype.Int8
 	// Telegram replied-to message identifier only; no message body is stored.
 	ReplyToMessageID pgtype.Int8
+	// Telegram topic identifier only; no message body is stored.
+	MessageThreadID pgtype.Int8
 }
 
 // Explicit same-workspace related-to links. A link neither authorizes access nor automatically merges context. Metadata may record the confirmed URL or human decision.

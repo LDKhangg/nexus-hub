@@ -66,7 +66,7 @@ func optionalUUID(value, field string) (pgtype.UUID, error) {
 func mapConversation(row sqlc.Conversation) workflow.Conversation {
 	return workflow.Conversation{
 		ID: row.ID, WorkspaceID: uuidString(row.WorkspaceID), IntegrationID: uuidString(row.IntegrationID),
-		ChatID: row.ChatID, UserID: uuidString(row.UserID), Summary: row.Summary,
+		ChatID: row.ChatID, ThreadID: row.ThreadID, UserID: uuidString(row.UserID), Summary: row.Summary,
 		SummaryUpdatedAt: tsPtr(row.SummaryUpdatedAt), CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time,
 	}
 }
@@ -123,8 +123,11 @@ func (s *ConversationStore) EnsureConversation(ctx context.Context, conversation
 	if conversation.ChatID == 0 {
 		return workflow.Conversation{}, workflowInvalid("chat_id")
 	}
+	if conversation.ThreadID < 0 {
+		return workflow.Conversation{}, workflowInvalid("thread_id")
+	}
 	row, err := s.q.EnsureConversation(ctx, sqlc.EnsureConversationParams{
-		WorkspaceID: ws, IntegrationID: integration, ChatID: conversation.ChatID, UserID: user,
+		WorkspaceID: ws, IntegrationID: integration, ChatID: conversation.ChatID, ThreadID: conversation.ThreadID, UserID: user,
 	})
 	if err != nil {
 		return workflow.Conversation{}, conversationError(err)

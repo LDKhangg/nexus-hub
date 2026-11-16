@@ -12,6 +12,7 @@ type Conversation struct {
 	WorkspaceID      string
 	IntegrationID    string
 	ChatID           int64
+	ThreadID         int64 // Telegram topic; 0 is the chat itself (General)
 	UserID           string
 	Summary          string
 	SummaryUpdatedAt *time.Time

@@ -337,6 +337,7 @@ type InboundUpdate struct {
 	IntegrationID    string // the Telegram integration (bot) it came through
 	UpdateID         int64
 	ChatID           int64
+	ThreadID         int64 // Telegram topic (message_thread_id); 0 is the chat itself
 	MessageID        int64 // Telegram message identifier; never message content
 	ReplyToMessageID int64
 	Kind             UpdateKind

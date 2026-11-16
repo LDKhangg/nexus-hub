@@ -89,11 +89,12 @@ type tgChat struct {
 }
 
 type tgMessage struct {
-	MessageID int64   `json:"message_id"`
-	Chat      tgChat  `json:"chat"`
-	From      *tgUser `json:"from"`
-	Text      *string `json:"text"`
-	ReplyTo   *struct {
+	MessageID       int64   `json:"message_id"`
+	MessageThreadID int64   `json:"message_thread_id"`
+	Chat            tgChat  `json:"chat"`
+	From            *tgUser `json:"from"`
+	Text            *string `json:"text"`
+	ReplyTo         *struct {
 		MessageID int64 `json:"message_id"`
 	} `json:"reply_to_message"`
 }
@@ -102,8 +103,9 @@ type tgCallback struct {
 	ID      string `json:"id"`
 	From    tgUser `json:"from"`
 	Message *struct {
-		MessageID int64  `json:"message_id"`
-		Chat      tgChat `json:"chat"`
+		MessageID       int64  `json:"message_id"`
+		MessageThreadID int64  `json:"message_thread_id"`
+		Chat            tgChat `json:"chat"`
 	} `json:"message"`
 	Data *string `json:"data"`
 }
@@ -222,7 +224,7 @@ func (h *TelegramHandler) process(ctx context.Context, integration tenant.Webhoo
 	if json.Unmarshal(raw, &upd) != nil || upd.UpdateID <= 0 {
 		return UpdateInvalid, nil
 	}
-	u, owner, err := h.normalize(ctx, integration.WorkspaceID, upd)
+	u, owner, err := h.normalize(ctx, integration, upd)
 	if err != nil {
 		return "", ErrUpdateUnavailable
 	}
@@ -303,27 +305,38 @@ func (h *TelegramHandler) stageDeep(workspaceID string, u behavior.InboundUpdate
 }
 
 // isOwner applies the owner rule (see TelegramHandler).
-func (h *TelegramHandler) isOwner(chatID, fromID int64) bool {
-	owner := h.ownerChatID
+//
+// The owner chat is the integration's own group (owner_chat_id or chat_id in
+// its config) when it has one, otherwise the global ownerChatID. The sender
+// must be the owner user ID, or the chat ID itself (a private chat) when no
+// owner user is set; a group chat ID never equals a sender, so a group needs
+// owner_telegram_user_id.
+func (h *TelegramHandler) isOwner(integration tenant.WebhookIntegration, chatID, fromID int64) bool {
+	chat := tenant.TelegramOwnerChatID(integration.Config)
+	if chat == 0 {
+		chat = h.ownerChatID
+	}
+	owner := chat
 	if h.ownerUserID != 0 {
 		owner = h.ownerUserID
 	}
-	return h.ownerChatID != 0 && chatID == h.ownerChatID && fromID == owner
+	return chat != 0 && chatID == chat && fromID == owner
 }
 
 // normalize keeps only the fields the worker needs. It returns false for an
 // update that must have no effect (not the owner's). An update of another
 // type carries no owner to check; it is kept as UpdateOther, which the
 // worker finishes without any effect, so its update_id is deduplicated.
-func (h *TelegramHandler) normalize(ctx context.Context, workspaceID string, upd tgUpdate) (behavior.InboundUpdate, bool, error) {
+func (h *TelegramHandler) normalize(ctx context.Context, integration tenant.WebhookIntegration, upd tgUpdate) (behavior.InboundUpdate, bool, error) {
+	workspaceID := integration.WorkspaceID
 	switch {
 	case upd.CallbackQuery != nil:
 		q := upd.CallbackQuery
 		if q.Message == nil {
 			return behavior.InboundUpdate{}, false, nil // inline-mode presses are not ours
 		}
-		u := behavior.InboundUpdate{ChatID: q.Message.Chat.ID, MessageID: q.Message.MessageID, Kind: behavior.UpdateCallback}
-		if !h.isOwner(q.Message.Chat.ID, q.From.ID) {
+		u := behavior.InboundUpdate{ChatID: q.Message.Chat.ID, ThreadID: max(q.Message.MessageThreadID, 0), MessageID: q.Message.MessageID, Kind: behavior.UpdateCallback}
+		if !h.isOwner(integration, q.Message.Chat.ID, q.From.ID) {
 			return u, false, nil
 		}
 		if !callbackIDRe.MatchString(q.ID) {
@@ -339,8 +352,8 @@ func (h *TelegramHandler) normalize(ctx context.Context, workspaceID string, upd
 		return u, true, nil
 	case upd.Message != nil:
 		m := upd.Message
-		u := behavior.InboundUpdate{ChatID: m.Chat.ID, MessageID: m.MessageID, Kind: behavior.UpdateOther}
-		if m.From == nil || !h.isOwner(m.Chat.ID, m.From.ID) {
+		u := behavior.InboundUpdate{ChatID: m.Chat.ID, ThreadID: max(m.MessageThreadID, 0), MessageID: m.MessageID, Kind: behavior.UpdateOther}
+		if m.From == nil || !h.isOwner(integration, m.Chat.ID, m.From.ID) {
 			return u, false, nil
 		}
 		if m.Text == nil {
