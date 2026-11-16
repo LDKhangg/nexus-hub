@@ -42,14 +42,32 @@ COMMENT ON COLUMN public.telegram_updates.message_thread_id IS 'Telegram topic i
 -- +goose Down
 ALTER TABLE public.telegram_updates
     DROP COLUMN message_thread_id;
-DELETE FROM public.workflow_instructions
-WHERE conversation_id IN (SELECT id FROM public.conversations WHERE thread_id <> 0);
-DELETE FROM public.conversation_workflows
-WHERE conversation_id IN (SELECT id FROM public.conversations WHERE thread_id <> 0);
-DELETE FROM public.conversation_messages
-WHERE conversation_id IN (SELECT id FROM public.conversations WHERE thread_id <> 0);
-DELETE FROM public.conversations
-WHERE thread_id <> 0;
+-- Keep owner data: fold topic conversations into the chat's thread-0 one.
+INSERT INTO public.conversations (workspace_id, integration_id, chat_id, user_id, summary, summary_updated_at)
+SELECT DISTINCT ON (workspace_id, integration_id, chat_id) workspace_id, integration_id, chat_id, user_id, '', NULL
+FROM public.conversations t
+WHERE t.thread_id <> 0
+ORDER BY workspace_id, integration_id, chat_id, id
+ON CONFLICT (workspace_id, integration_id, chat_id, thread_id) DO NOTHING;
+CREATE TEMP TABLE conversation_fold ON COMMIT DROP AS
+SELECT t.id AS old_id, g.id AS new_id, t.workspace_id
+FROM public.conversations t
+JOIN public.conversations g ON g.workspace_id = t.workspace_id AND g.integration_id = t.integration_id
+    AND g.chat_id = t.chat_id AND g.thread_id = 0
+WHERE t.thread_id <> 0;
+UPDATE public.workflow_instructions w SET conversation_id = f.new_id
+FROM conversation_fold f WHERE w.workspace_id = f.workspace_id AND w.conversation_id = f.old_id;
+UPDATE public.conversation_messages m SET conversation_id = f.new_id
+FROM conversation_fold f WHERE m.workspace_id = f.workspace_id AND m.conversation_id = f.old_id;
+INSERT INTO public.conversation_workflows (workspace_id, conversation_id, execution_id, source, created_at)
+SELECT w.workspace_id, f.new_id, w.execution_id, w.source, w.created_at
+FROM public.conversation_workflows w
+JOIN conversation_fold f ON w.workspace_id = f.workspace_id AND w.conversation_id = f.old_id
+ON CONFLICT (workspace_id, conversation_id, execution_id) DO NOTHING;
+DELETE FROM public.conversation_workflows w
+USING conversation_fold f WHERE w.workspace_id = f.workspace_id AND w.conversation_id = f.old_id;
+DELETE FROM public.conversations c
+USING conversation_fold f WHERE c.workspace_id = f.workspace_id AND c.id = f.old_id;
 ALTER TABLE public.conversations
     DROP CONSTRAINT conversations_workspace_integration_chat_thread_key;
 ALTER TABLE public.conversations

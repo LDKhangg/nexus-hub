@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
@@ -84,7 +85,17 @@ func (s *ActionStore) ResolveTarget(ctx context.Context, a relay.OutboundAction)
 		(target.Role != tenant.IntegrationRoleControl && target.Role != tenant.IntegrationRoleBoth) {
 		return tenant.TelegramTargetConfig{}, invalid
 	}
-	cfg, err := tenant.ParseTelegramTargetConfig(target.Config)
+	// One owner chat per workspace: owner_chat_id, else chat_id (see
+	// tenant.TelegramOwnerChatID), the same chat inbound updates and behavior
+	// messages use. A static message_thread_id is kept as configured.
+	conf := make(map[string]any, len(target.Config)+1)
+	for k, v := range target.Config {
+		conf[k] = v
+	}
+	if chat := tenant.TelegramOwnerChatID(target.Config); chat != 0 {
+		conf["chat_id"] = strconv.FormatInt(chat, 10)
+	}
+	cfg, err := tenant.ParseTelegramTargetConfig(conf)
 	if err != nil {
 		return tenant.TelegramTargetConfig{}, invalid
 	}

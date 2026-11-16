@@ -91,6 +91,7 @@ type tgChat struct {
 type tgMessage struct {
 	MessageID       int64   `json:"message_id"`
 	MessageThreadID int64   `json:"message_thread_id"`
+	IsTopicMessage  bool    `json:"is_topic_message"`
 	Chat            tgChat  `json:"chat"`
 	From            *tgUser `json:"from"`
 	Text            *string `json:"text"`
@@ -105,6 +106,7 @@ type tgCallback struct {
 	Message *struct {
 		MessageID       int64  `json:"message_id"`
 		MessageThreadID int64  `json:"message_thread_id"`
+		IsTopicMessage  bool   `json:"is_topic_message"`
 		Chat            tgChat `json:"chat"`
 	} `json:"message"`
 	Data *string `json:"data"`
@@ -335,7 +337,7 @@ func (h *TelegramHandler) normalize(ctx context.Context, integration tenant.Webh
 		if q.Message == nil {
 			return behavior.InboundUpdate{}, false, nil // inline-mode presses are not ours
 		}
-		u := behavior.InboundUpdate{ChatID: q.Message.Chat.ID, ThreadID: max(q.Message.MessageThreadID, 0), MessageID: q.Message.MessageID, Kind: behavior.UpdateCallback}
+		u := behavior.InboundUpdate{ChatID: q.Message.Chat.ID, ThreadID: topicThread(q.Message.IsTopicMessage, q.Message.MessageThreadID), MessageID: q.Message.MessageID, Kind: behavior.UpdateCallback}
 		if !h.isOwner(integration, q.Message.Chat.ID, q.From.ID) {
 			return u, false, nil
 		}
@@ -352,7 +354,7 @@ func (h *TelegramHandler) normalize(ctx context.Context, integration tenant.Webh
 		return u, true, nil
 	case upd.Message != nil:
 		m := upd.Message
-		u := behavior.InboundUpdate{ChatID: m.Chat.ID, ThreadID: max(m.MessageThreadID, 0), MessageID: m.MessageID, Kind: behavior.UpdateOther}
+		u := behavior.InboundUpdate{ChatID: m.Chat.ID, ThreadID: topicThread(m.IsTopicMessage, m.MessageThreadID), MessageID: m.MessageID, Kind: behavior.UpdateOther}
 		if m.From == nil || !h.isOwner(integration, m.Chat.ID, m.From.ID) {
 			return u, false, nil
 		}
@@ -434,4 +436,15 @@ func (h *TelegramHandler) normalize(ctx context.Context, integration tenant.Webh
 		return u, true, nil
 	}
 	return behavior.InboundUpdate{Kind: behavior.UpdateOther}, true, nil
+}
+
+// topicThread returns the forum topic of a message. In the Bot API,
+// message_thread_id names a topic only when is_topic_message is true; a reply
+// in a non-forum supergroup also carries a thread id (the reply-chain root),
+// which must not open a conversation.
+func topicThread(isTopic bool, threadID int64) int64 {
+	if !isTopic || threadID <= 0 {
+		return 0
+	}
+	return threadID
 }
