@@ -366,7 +366,7 @@ func (w *InboxWorker) command(ctx context.Context, u InboundUpdate, to ChatRef, 
 		return w.workflowControlCommand(hctx, u, to, actor, corr)
 	default:
 		reply, err = w.d.Commands.TriggerCommand(hctx, CommandRequest{
-			WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, UpdateID: u.UpdateID,
+			WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, ThreadID: u.ThreadID, UpdateID: u.UpdateID,
 			Command: u.Command, Args: args, Actor: actor, CorrelationID: corr,
 		})
 	}
@@ -497,7 +497,7 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 	hctx, cancel := context.WithTimeout(ctx, w.settings.HandlerTimeout)
 	defer cancel()
 	res, err := w.d.Callbacks.HandleCallback(hctx, CallbackAction{
-		WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, MessageID: msgID,
+		WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, ThreadID: u.ThreadID, MessageID: msgID,
 		Data: data, Approval: a, Actor: actor, CorrelationID: corr,
 	})
 	if err != nil {
@@ -539,7 +539,7 @@ func (w *InboxWorker) freeText(ctx context.Context, u InboundUpdate, to ChatRef,
 	}
 	hctx, cancel := context.WithTimeout(ctx, w.settings.HandlerTimeout)
 	reply, err := w.d.Callbacks.HandleFreeText(hctx, FreeTextAnswer{
-		WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID,
+		WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, ThreadID: u.ThreadID,
 		Approval: a, Answer: a.PendingAnswer, Actor: actor, CorrelationID: corr,
 	})
 	cancel()

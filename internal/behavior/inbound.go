@@ -35,6 +35,7 @@ type CommandRequest struct {
 	WorkspaceID   string
 	IntegrationID string
 	ChatID        int64
+	ThreadID      int64  // the topic the command was written in; 0: General
 	UpdateID      int64  // the Telegram update_id; each update is one run revision
 	Command       string // "/name", lower case
 	Args          string // trimmed, at most 512 characters
@@ -188,6 +189,7 @@ type CallbackAction struct {
 	WorkspaceID   string
 	IntegrationID string
 	ChatID        int64
+	ThreadID      int64 // the topic of the pressed message; 0: General
 	MessageID     int64 // the message that carries the buttons
 	Data          CallbackData
 	// Approval is the approval the nonce names, as read before the call.
@@ -211,6 +213,7 @@ type FreeTextAnswer struct {
 	WorkspaceID   string
 	IntegrationID string
 	ChatID        int64
+	ThreadID      int64    // the topic of the reply; 0: General
 	Approval      Approval // open and unexpired when read
 	Answer        string   // at most 4000 characters
 	Actor         string
@@ -233,6 +236,9 @@ type ChatRef struct {
 	// ThreadID is the Telegram forum topic (message_thread_id); 0 is the
 	// chat itself (General).
 	ThreadID int64
+	// topic asks the engine to resolve a topic lazily at send time; set
+	// only by the engine, never stored.
+	topic *TopicIntent
 }
 
 // Button is one inline button; Data comes from CallbackData.Encode.

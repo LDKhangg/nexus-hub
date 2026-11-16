@@ -233,3 +233,17 @@ func (s *TelegramTopicStore) ListTopics(ctx context.Context, workspaceID string)
 	}
 	return out, nil
 }
+
+// DeleteTopic forgets a topic binding whose Telegram thread no longer
+// exists, so the next send creates a new topic.
+func (s *TelegramTopicStore) DeleteTopic(ctx context.Context, workspaceID string, id int64) error {
+	ws, err := parseDBID(workspaceID)
+	if err != nil {
+		return topicInvalid("workspace_id")
+	}
+	if id <= 0 {
+		return topicInvalid("id")
+	}
+	_, err = s.q.DeleteTelegramTopic(ctx, sqlc.DeleteTelegramTopicParams{WorkspaceID: ws, ID: id})
+	return topicError(err)
+}

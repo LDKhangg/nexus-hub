@@ -80,6 +80,7 @@ type TaskState struct {
 	ID          string
 	Status      string
 	AssigneeIDs []string
+	Name        string // the task title; used only to name a Telegram topic, never stored or logged
 	Description string // ClickUp's plain-text description
 	Markdown    string // the markdown description blocks are written into
 }
@@ -179,6 +180,9 @@ type ActionDeps struct {
 	// Conversations receives metadata-only links after a durable workflow
 	// message is sent. Nil keeps legacy behavior unchanged.
 	Conversations workflow.ConversationStore
+	// Topics routes an execution's owner messages to Telegram forum
+	// topics; nil sends everything to the resolved chat as before.
+	Topics *TopicRouter
 }
 
 // ActionSettings tune the action library.
@@ -197,6 +201,10 @@ type Engine struct {
 	s   ActionSettings
 	now func() time.Time
 }
+
+// SetTopics turns on topic routing of the engine's owner messages. Call it
+// before the engine runs.
+func (e *Engine) SetTopics(t *TopicRouter) { e.d.Topics = t }
 
 var (
 	_ Dispatcher      = (*Engine)(nil)
@@ -972,9 +980,7 @@ func (e *Engine) sendOnce(ctx context.Context, run Run, key string, chat ChatRef
 	if err != nil || !claimed {
 		return id, err
 	}
-	sctx, cancel := context.WithTimeout(ctx, e.s.RequestTimeout)
-	id, err = e.d.Messenger.SendMessage(sctx, chat, m)
-	cancel()
+	id, chat, err = e.deliver(ctx, chat, m)
 	if err != nil {
 		log.Printf("behavior run %d corr=%s: message %s not sent (%s)", runID, run.CorrelationID, key, sendCode(err))
 		if rerr := e.d.Store.ReleaseMessage(context.WithoutCancel(ctx), ws, runID, key); rerr != nil {
@@ -993,12 +999,70 @@ func (e *Engine) sendOnce(ctx context.Context, run Run, key string, chat ChatRef
 	return id, nil
 }
 
+// routed marks chat so the engine resolves the topic of rc's execution when
+// a message is sent (lazily: a run that sends nothing creates no topic).
+// A reply to a Telegram command keeps the command's own thread.
+func (e *Engine) routed(ctx context.Context, rc RunContext, chat ChatRef) ChatRef {
+	chat.topic = nil
+	if rc.Trigger.TelegramChatID != 0 {
+		if chat.ThreadID == 0 {
+			chat.ThreadID = rc.Trigger.TelegramThreadID
+		}
+		return chat
+	}
+	if e.d.Topics == nil || chat.ThreadID != 0 {
+		return chat
+	}
+	taskID := rc.Trigger.TaskID
+	if taskID == "" {
+		taskID = runTaskID(rc.Run)
+	}
+	name := rc.Doc.Name
+	if name == "" {
+		name = rc.Run.BehaviorName
+	}
+	chat.topic = &TopicIntent{
+		Mode: rc.Doc.ReportTopic, ExecutionID: workflowExecutionID(ctx), TaskID: taskID,
+		TaskSource: rc.Trigger.IntegrationID, BehaviorName: name,
+	}
+	return chat
+}
+
+// deliver sends m to chat through the Messenger. A marked chat first gets
+// its topic; a send the topic made fail is retried once, in the topic after
+// a reopen or in General (the rejected send delivered nothing). It returns
+// the chat the message went to, for the message binding.
+func (e *Engine) deliver(ctx context.Context, chat ChatRef, m OutMessage) (int64, ChatRef, error) {
+	send := func(to ChatRef) (int64, error) {
+		sctx, cancel := context.WithTimeout(ctx, e.s.RequestTimeout)
+		defer cancel()
+		return e.d.Messenger.SendMessage(sctx, to, m)
+	}
+	if chat.topic != nil {
+		in := *chat.topic
+		tctx, cancel := context.WithTimeout(ctx, e.s.RequestTimeout)
+		chat = e.d.Topics.Destination(tctx, chat, in)
+		cancel()
+	}
+	id, err := send(chat)
+	if err != nil && chat.ThreadID != 0 && e.d.Topics != nil {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.s.RequestTimeout)
+		again, ok := e.d.Topics.Recover(rctx, chat, err)
+		cancel()
+		if ok {
+			chat = again
+			id, err = send(chat)
+		}
+	}
+	return id, chat, err
+}
+
 func (e *Engine) bindWorkflowMessage(ctx context.Context, chat ChatRef, messageID, executionID int64, key string) {
 	if e.d.Conversations == nil || executionID <= 0 || messageID <= 0 {
 		return
 	}
 	conversation, err := e.d.Conversations.EnsureConversation(ctx, workflow.Conversation{
-		WorkspaceID: chat.WorkspaceID, IntegrationID: chat.IntegrationID, ChatID: chat.ChatID,
+		WorkspaceID: chat.WorkspaceID, IntegrationID: chat.IntegrationID, ChatID: chat.ChatID, ThreadID: chat.ThreadID,
 	})
 	if err != nil {
 		log.Print("behavior workflow message binding failed (ensure_conversation)")
@@ -1206,6 +1270,7 @@ func (e *Engine) Dispatch(ctx context.Context, rc RunContext, items []Item) erro
 	if err != nil {
 		return err
 	}
+	chat = e.routed(ctx, rc, chat)
 	var env writeEnv
 	if needsClickUp(rc.Doc, items) {
 		if env, err = e.env(ctx, rc); err != nil {
@@ -1300,6 +1365,7 @@ func (e *Engine) RunFailed(ctx context.Context, rc RunContext, code string) erro
 	if err != nil {
 		return err
 	}
+	chat = e.routed(ctx, rc, chat)
 	name := rc.Doc.Name
 	if name == "" {
 		name = rc.Run.BehaviorName

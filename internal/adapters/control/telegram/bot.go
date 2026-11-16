@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -262,6 +263,7 @@ func (c *Client) doLimit(ctx context.Context, token, method string, payload any,
 	var envelope struct {
 		OK         bool            `json:"ok"`
 		ErrorCode  int             `json:"error_code"`
+		Desc       string          `json:"description"`
 		Result     json.RawMessage `json:"result"`
 		Parameters struct {
 			RetryAfter int64 `json:"retry_after"`
@@ -283,6 +285,8 @@ func (c *Client) doLimit(ctx context.Context, token, method string, payload any,
 		return fail("server", true, 0)
 	case code == http.StatusConflict && method == "getUpdates":
 		return fail("conflict", true, 0)
+	case (code == http.StatusBadRequest || code == http.StatusForbidden) && topicCode(envelope.Desc) != "":
+		return fail(topicCode(envelope.Desc), false, 0)
 	case code < 200 || code >= 300:
 		return fail("rejected", false, 0)
 	case decodeErr != nil:
@@ -296,6 +300,78 @@ func (c *Client) doLimit(ctx context.Context, token, method string, payload any,
 		}
 	}
 	return nil
+}
+
+// Fixed codes for the Bot API failures a forum topic step can hit. They are
+// derived from Telegram's description text, which is never kept or returned.
+const (
+	CodeTopicNotForum   = "topic_not_forum"
+	CodeTopicNoRights   = "topic_no_rights"
+	CodeTopicClosed     = "topic_closed"
+	CodeThreadNotFound  = "thread_not_found"
+	CodeTopicNotChanged = "topic_not_modified"
+)
+
+// topicCode maps a Bot API error description to a fixed topic code, or "".
+func topicCode(desc string) string {
+	d := strings.ToLower(desc)
+	switch {
+	case strings.Contains(d, "not a forum"):
+		return CodeTopicNotForum
+	case strings.Contains(d, "not enough rights"):
+		return CodeTopicNoRights
+	case strings.Contains(d, "topic_closed"):
+		return CodeTopicClosed
+	case strings.Contains(d, "topic_not_modified"):
+		return CodeTopicNotChanged
+	case strings.Contains(d, "message thread not found"), strings.Contains(d, "topic_id_invalid"):
+		return CodeThreadNotFound
+	}
+	return ""
+}
+
+// CreateForumTopic creates a topic in a forum chat and returns its thread
+// ID. The name is never logged.
+func (c *Client) CreateForumTopic(ctx context.Context, workspaceID, tokenRef, chatID, name string) (int64, error) {
+	token, err := c.token(ctx, workspaceID, tokenRef)
+	if err != nil {
+		return 0, err
+	}
+	if units(name) > 128 {
+		name = clip(name, 128)
+	}
+	var result struct {
+		ThreadID int64 `json:"message_thread_id"`
+	}
+	if err := c.do(ctx, token, "createForumTopic", map[string]any{"chat_id": chatID, "name": name}, &result); err != nil {
+		return 0, err
+	}
+	if result.ThreadID <= 0 {
+		return 0, &relay.DeliveryError{Code: "invalid_response"}
+	}
+	return result.ThreadID, nil
+}
+
+// CloseForumTopic closes a topic; closing a closed topic succeeds.
+func (c *Client) CloseForumTopic(ctx context.Context, workspaceID, tokenRef, chatID string, threadID int64) error {
+	return c.topicState(ctx, workspaceID, tokenRef, "closeForumTopic", chatID, threadID)
+}
+
+// ReopenForumTopic reopens a topic; reopening an open topic succeeds.
+func (c *Client) ReopenForumTopic(ctx context.Context, workspaceID, tokenRef, chatID string, threadID int64) error {
+	return c.topicState(ctx, workspaceID, tokenRef, "reopenForumTopic", chatID, threadID)
+}
+
+func (c *Client) topicState(ctx context.Context, workspaceID, tokenRef, method, chatID string, threadID int64) error {
+	token, err := c.token(ctx, workspaceID, tokenRef)
+	if err != nil {
+		return err
+	}
+	err = c.do(ctx, token, method, map[string]any{"chat_id": chatID, "message_thread_id": threadID}, nil)
+	if ErrorCode(err) == CodeTopicNotChanged {
+		return nil
+	}
+	return err
 }
 
 // ErrorCode returns the safe code of a client error, or "unknown".

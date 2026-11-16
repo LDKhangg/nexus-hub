@@ -252,6 +252,7 @@ func (e *Engine) ApplyDecision(ctx context.Context, ap Approval) error {
 	if err != nil {
 		return err
 	}
+	chat = e.routed(ctx, rc, chat)
 	var reply string
 	ok := true
 	switch {

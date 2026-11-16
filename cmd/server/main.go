@@ -110,6 +110,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Topics: execution messages go to per-task forum topics; any topic
+	// failure sends to General instead.
+	topics, err := buildTopicRouter(pool, s, integrations, ag, resolver, messenger)
+	if err != nil {
+		return err
+	}
+	engine.SetTopics(topics)
+	ag.actions.SetThreadRouter(topics)
 	workspaces, err := storage.NewWorkspaceRepository(pool)
 	if err != nil {
 		return errors.New("workspace repository startup failed")

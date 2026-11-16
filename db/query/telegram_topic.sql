@@ -50,3 +50,8 @@ RETURNING *;
 SELECT * FROM public.telegram_topics
 WHERE workspace_id = sqlc.arg(workspace_id)
 ORDER BY id;
+
+-- name: DeleteTelegramTopic :execrows
+-- Forgets a binding whose Telegram thread no longer exists.
+DELETE FROM public.telegram_topics
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id);

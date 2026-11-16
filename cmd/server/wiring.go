@@ -242,7 +242,7 @@ func (t taskReader) ReadTask(ctx context.Context, workspaceID, tokenRef, taskID 
 	if err != nil {
 		return behavior.TaskState{}, err
 	}
-	return behavior.TaskState{ID: st.ID, Status: st.Status, AssigneeIDs: st.AssigneeIDs, Description: st.Description, Markdown: st.Markdown}, nil
+	return behavior.TaskState{ID: st.ID, Name: st.Name, Status: st.Status, AssigneeIDs: st.AssigneeIDs, Description: st.Description, Markdown: st.Markdown}, nil
 }
 
 // ownerChats reaches the owner: through the bot and chat a Telegram command
@@ -260,7 +260,7 @@ func telegramControl(in tenant.Integration) bool {
 func (o ownerChats) OwnerChat(ctx context.Context, workspaceID string, t behavior.TriggerData) (behavior.ChatRef, error) {
 	if t.TelegramChatID != 0 && t.IntegrationID != "" {
 		if in, err := o.integrations.Get(ctx, workspaceID, t.IntegrationID); err == nil && telegramControl(in) {
-			return behavior.ChatRef{WorkspaceID: workspaceID, IntegrationID: in.ID, ChatID: t.TelegramChatID}, nil
+			return behavior.ChatRef{WorkspaceID: workspaceID, IntegrationID: in.ID, ChatID: t.TelegramChatID, ThreadID: t.TelegramThreadID}, nil
 		}
 	}
 	list, err := o.integrations.List(ctx, workspaceID, 100, 0)
@@ -284,6 +284,33 @@ func (o ownerChats) OwnerChat(ctx context.Context, workspaceID string, t behavio
 		}
 	}
 	return behavior.ChatRef{}, errors.New("no Telegram control integration in workspace")
+}
+
+// buildTopicRouter wires the Telegram topic router: the topic store, the bot
+// for forum calls, the ClickUp task title for topic names and the
+// execution's resource bindings. The title is read only to name a topic.
+func buildTopicRouter(pool *pgxpool.Pool, s settings.Settings, integrations *storage.IntegrationRepository, ag agentServices, resolver *secrets.Resolver, messenger behavior.TopicClient) (*behavior.TopicRouter, error) {
+	store, err := storage.NewTelegramTopicStore(pool)
+	if err != nil {
+		return nil, errors.New("telegram topic store startup failed")
+	}
+	policies := behaviorPolicies{integrations: integrations, known: ag.known}
+	reader := clickuptools.NewTaskReader(netguard.Client(s.ToolTimeout, netguard.DefaultHosts), resolver)
+	deps := behavior.TopicRouterDeps{
+		Store: store, Client: messenger,
+		TaskName: func(ctx context.Context, workspaceID, integrationID, taskID string) (string, error) {
+			cfg, err := policies.RunPolicy(ctx, workspaceID, integrationID)
+			if err != nil {
+				return "", err
+			}
+			st, err := reader.ReadTask(ctx, workspaceID, cfg.ClickUpTokenRef, taskID)
+			return st.Name, err
+		},
+	}
+	if lister, ok := ag.conversations.(workflow.ResourceLister); ok {
+		deps.Resources = lister
+	}
+	return behavior.NewTopicRouter(deps)
 }
 
 // behaviorPolicies finds a run's grants: the agent config of the ClickUp

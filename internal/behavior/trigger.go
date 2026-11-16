@@ -136,12 +136,14 @@ type TriggerData struct {
 	AssigneeCheck      string `json:"assignee_check,omitempty"`
 	// NeedsListCheck: the event did not carry the task's list. The
 	// executor must confirm the task is in one of ListCheck first.
-	NeedsListCheck   bool     `json:"needs_list_check,omitempty"`
-	ListCheck        []string `json:"list_check,omitempty"`
-	Command          string   `json:"command,omitempty"`
-	TelegramChatID   int64    `json:"telegram_chat_id,omitempty"`
-	TelegramUpdateID int64    `json:"telegram_update_id,omitempty"`
-	Actor            string   `json:"actor,omitempty"`
+	NeedsListCheck bool     `json:"needs_list_check,omitempty"`
+	ListCheck      []string `json:"list_check,omitempty"`
+	Command        string   `json:"command,omitempty"`
+	TelegramChatID int64    `json:"telegram_chat_id,omitempty"`
+	// TelegramThreadID is the topic the command was written in (0: General).
+	TelegramThreadID int64  `json:"telegram_thread_id,omitempty"`
+	TelegramUpdateID int64  `json:"telegram_update_id,omitempty"`
+	Actor            string `json:"actor,omitempty"`
 	// Chat message fields (TriggerChatMessage). SenderID above is the
 	// message's ClickUp user. The message text is never stored here.
 	MessageID   string  `json:"message_id,omitempty"`

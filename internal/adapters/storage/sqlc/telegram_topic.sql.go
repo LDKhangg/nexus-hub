@@ -11,6 +11,25 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const deleteTelegramTopic = `-- name: DeleteTelegramTopic :execrows
+DELETE FROM public.telegram_topics
+WHERE workspace_id = $1 AND id = $2
+`
+
+type DeleteTelegramTopicParams struct {
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+// Forgets a binding whose Telegram thread no longer exists.
+func (q *Queries) DeleteTelegramTopic(ctx context.Context, arg DeleteTelegramTopicParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteTelegramTopic, arg.WorkspaceID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getTelegramTopicBySubject = `-- name: GetTelegramTopicBySubject :one
 SELECT id, workspace_id, integration_id, chat_id, thread_id, subject_kind, subject_key, state, reserved_at, created_at, updated_at, closed_at FROM public.telegram_topics
 WHERE workspace_id = $1 AND integration_id = $2

@@ -40,6 +40,16 @@ type TextSender interface {
 	SendText(ctx context.Context, workspaceID, tokenRef, chatID string, threadID *int64, text string) (int64, error)
 }
 
+// ThreadRouter picks the Telegram topic of an execution's report. Nil
+// keeps the integration's static message_thread_id behavior.
+type ThreadRouter interface {
+	// ActionThread returns the topic thread for the action, or 0 (General).
+	ActionThread(ctx context.Context, workspaceID, integrationID string, chatID int64, executionID int64) int64
+	// ActionThreadRejected handles a send the topic made fail: it returns
+	// the thread to resend to once (0: General) and whether to resend.
+	ActionThreadRejected(ctx context.Context, workspaceID, integrationID string, chatID, threadID int64, err error) (int64, bool)
+}
+
 // ActionWorker delivers outbound actions with the notice retry policy.
 type ActionWorker struct {
 	store    ActionStore
@@ -48,7 +58,12 @@ type ActionWorker struct {
 	now      func() time.Time
 
 	conversations workflow.ConversationStore
+	threads       ThreadRouter
 }
+
+// SetThreadRouter routes reports of executions to topics. An integration
+// with a fixed message_thread_id keeps it.
+func (w *ActionWorker) SetThreadRouter(t ThreadRouter) { w.threads = t }
 
 func NewActionWorker(store ActionStore, sender TextSender, settings WorkerSettings, conversations ...workflow.ConversationStore) *ActionWorker {
 	if settings.PollInterval <= 0 {
@@ -89,15 +104,42 @@ func (w *ActionWorker) processNext(ctx context.Context) error {
 		}
 		return err
 	}
-	sendCtx, cancel := context.WithTimeout(ctx, w.settings.RequestTimeout)
-	id, err := w.sender.SendText(sendCtx, a.WorkspaceID, target.BotTokenRef, target.ChatID, target.MessageThreadID, a.Text)
-	cancel()
+	thread := target.MessageThreadID
+	var routed int64
+	if chat, perr := strconv.ParseInt(target.ChatID, 10, 64); w.threads != nil && thread == nil && a.ExecutionID > 0 && perr == nil && chat != 0 {
+		rctx, rcancel := context.WithTimeout(ctx, w.settings.RequestTimeout)
+		if routed = w.threads.ActionThread(rctx, a.WorkspaceID, a.IntegrationID, chat, a.ExecutionID); routed > 0 {
+			thread = &routed
+		}
+		rcancel()
+	}
+	send := func(thread *int64) (int64, error) {
+		sendCtx, cancel := context.WithTimeout(ctx, w.settings.RequestTimeout)
+		defer cancel()
+		return w.sender.SendText(sendCtx, a.WorkspaceID, target.BotTokenRef, target.ChatID, thread, a.Text)
+	}
+	id, err := send(thread)
+	if err != nil && routed > 0 && ctx.Err() == nil {
+		// The topic made the send fail (rejected, so nothing was delivered):
+		// resend once, in the reopened topic or in General.
+		chat, _ := strconv.ParseInt(target.ChatID, 10, 64)
+		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), w.settings.RequestTimeout)
+		next, ok := w.threads.ActionThreadRejected(rctx, a.WorkspaceID, a.IntegrationID, chat, routed, err)
+		rcancel()
+		if ok {
+			routed, thread = next, nil
+			if next > 0 {
+				thread = &next
+			}
+			id, err = send(thread)
+		}
+	}
 	if err == nil {
 		if err := w.store.MarkSent(ctx, *a, id); err != nil {
 			return err
 		}
 		bindCtx, bindCancel := context.WithTimeout(context.WithoutCancel(ctx), w.settings.RequestTimeout)
-		w.bindWorkflowMessage(bindCtx, *a, target.ChatID, id)
+		w.bindWorkflowMessage(bindCtx, *a, target.ChatID, routed, id)
 		bindCancel()
 		return nil
 	}
@@ -121,7 +163,7 @@ func (w *ActionWorker) processNext(ctx context.Context) error {
 	return w.store.MarkRetry(ctx, *a, w.now().Add(delay), code)
 }
 
-func (w *ActionWorker) bindWorkflowMessage(ctx context.Context, a OutboundAction, chatID string, messageID int64) {
+func (w *ActionWorker) bindWorkflowMessage(ctx context.Context, a OutboundAction, chatID string, threadID, messageID int64) {
 	if w.conversations == nil || a.ExecutionID <= 0 || messageID <= 0 {
 		return
 	}
@@ -131,7 +173,7 @@ func (w *ActionWorker) bindWorkflowMessage(ctx context.Context, a OutboundAction
 		return
 	}
 	conversation, err := w.conversations.EnsureConversation(ctx, workflow.Conversation{
-		WorkspaceID: a.WorkspaceID, IntegrationID: a.IntegrationID, ChatID: chat,
+		WorkspaceID: a.WorkspaceID, IntegrationID: a.IntegrationID, ChatID: chat, ThreadID: threadID,
 	})
 	if err != nil {
 		log.Print("action worker workflow binding failed (ensure_conversation)")
