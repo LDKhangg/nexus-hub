@@ -42,7 +42,7 @@ func TestPhase6aFix1_FollowupToAssistantQuestion(t *testing.T) {
 		{"empty answer", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := &p6aModel{json: []p6aJSONStep{{resp: p6aRouter(`{"route":"answer","reply":"FAST-REPLY"}`)}}}
+			m := &p6aModel{json: []p6aJSONStep{{resp: p6aRouter(`{"route":"answer","reply":"FAST-REPLY","tier":"none"}`)}}}
 			e := p6aEnv(m)
 			p6aSeed(e, "câu trước", tc.answer)
 			res, err := e.w.converse(context.Background(), p6aJob("ok", 0, ""))
@@ -171,11 +171,11 @@ func TestPhase6aFix1_RouterUsageFields(t *testing.T) {
 		setup func(e *p4Env)
 		want  want
 	}{
-		"work":     {step: p6aJSONStep{resp: p6aRouter(`{"route":"escalate","tier":"work"}`)}, want: want{routeWork, p6aWork, p6aFast, 100, 10}},
-		"deep":     {step: p6aJSONStep{resp: p6aRouter(`{"route":"escalate","tier":"deep"}`)}, want: want{routeDeep, p6aDeep, p6aFast, 100, 10}},
+		"work":     {step: p6aJSONStep{resp: p6aRouter(`{"route":"escalate","reply":"","tier":"work"}`)}, want: want{routeWork, p6aWork, p6aFast, 100, 10}},
+		"deep":     {step: p6aJSONStep{resp: p6aRouter(`{"route":"escalate","reply":"","tier":"deep"}`)}, want: want{routeDeep, p6aDeep, p6aFast, 100, 10}},
 		"error":    {step: p6aJSONStep{err: errors.New("BIMAT-ERR")}, want: want{routeWorkFallback, p6aWork, p6aFast, 100, 0}},
 		"refusal":  {step: p6aJSONStep{resp: &domain.JSONResponse{Stop: domain.StopRefusal, Usage: domain.Usage{Input: 7}}}, want: want{routeWorkFallback, p6aWork, p6aFast, 100, 7}},
-		"answer":   {step: p6aJSONStep{resp: p6aRouter(`{"route":"answer","reply":"BIMAT-REPLY"}`)}, want: want{routeAnswer, p6aFast, "", 10, 0}},
+		"answer":   {step: p6aJSONStep{resp: p6aRouter(`{"route":"answer","reply":"BIMAT-REPLY","tier":"none"}`)}, want: want{routeAnswer, p6aFast, "", 10, 0}},
 		"skip":     {setup: func(e *p4Env) { e.assistant.FastModel = "" }, want: want{routeSkip, p6aWork, "", 100, 0}},
 		"followup": {setup: p6aSeedSay, want: want{routeWorkFollowup, p6aWork, "", 100, 0}},
 	}
@@ -201,6 +201,10 @@ func TestPhase6aFix1_RouterUsageFields(t *testing.T) {
 						t.Fatalf("%s=%v on a turn without router line", k, line[k])
 					}
 				}
+			}
+			wantErr := map[string]string{"error": "provider_error", "refusal": "stop_refusal"}[name]
+			if line["router_error"] != wantErr {
+				t.Fatalf("router_error=%v, want %q", line["router_error"], wantErr)
 			}
 			if strings.Contains(logs.String(), "BIMAT") {
 				t.Fatal("text in the log")
