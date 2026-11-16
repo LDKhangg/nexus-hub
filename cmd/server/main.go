@@ -131,7 +131,8 @@ func run() error {
 	var assistant *behavior.Assistant
 	if s.TelegramAssistant {
 		assistant = &behavior.Assistant{
-			Models: ag.provider, Model: s.AssistantModel, Runs: behaviors, Inbox: behavior.NewAssistantInbox(),
+			Models: ag.provider, Model: s.AssistantModel, FastModel: s.AssistantFastModel, DeepModel: s.AssistantDeepModel,
+			HistoryTurns: int(s.AssistantHistoryTurns), Runs: behaviors, Inbox: behavior.NewAssistantInbox(),
 			Workflows: workflows.store, WorkflowCommands: workflows.commands, Redact: redactor.RedactSecrets,
 			Conversations: ag.conversations, SummaryModel: s.TriageModel,
 			SummarySanitize: func(text string) string {
