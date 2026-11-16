@@ -19,7 +19,12 @@ type TelegramTargetConfig struct {
 }
 
 // ClickUpNoticeConfig: WebhookSecretRef follows the same convention.
-type ClickUpNoticeConfig struct{ ClickUpTeamID, WebhookID, WebhookSecretRef, TargetIntegrationID, OwnSenderID string }
+// MentionsOnly (config key notice_mentions_only, a literal true) limits
+// Telegram notices to comments that tag the owner.
+type ClickUpNoticeConfig struct {
+	ClickUpTeamID, WebhookID, WebhookSecretRef, TargetIntegrationID, OwnSenderID string
+	MentionsOnly                                                                 bool
+}
 
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -48,6 +53,7 @@ func ParseClickUpNoticeConfig(m map[string]any) (ClickUpNoticeConfig, error) {
 			return c, errors.New("invalid own sender ID")
 		}
 	}
+	c.MentionsOnly, _ = m["notice_mentions_only"].(bool)
 	return c, nil
 }
 func ParseTelegramTargetConfig(m map[string]any) (TelegramTargetConfig, error) {

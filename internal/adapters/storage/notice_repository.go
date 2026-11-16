@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -168,6 +169,7 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 	}
 	agentEnabled := r.agentEnabledAtIngest(integration)
 	triggers := newIngestTriggers(q, workspace)
+	owner, ownerRead := "", false
 	ordered := append([]domain.NormalizedEvent(nil), events...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		if ordered[i].ExternalID == ordered[j].ExternalID {
@@ -194,6 +196,23 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 			}
 			continue
 		}
+		toAgent := agentEnabled && e.EventType == domain.EventCommandPosted
+		if !toAgent && config.MentionsOnly {
+			if !ownerRead {
+				if owner, err = triggers.ownerClickUpID(ctx); err != nil {
+					return result, err
+				}
+				ownerRead = true
+			}
+			if !noticeWanted(e, owner, started) {
+				if started > 0 {
+					result.Accepted++
+				} else {
+					result.Ignored++
+				}
+				continue
+			}
+		}
 		id, err := r.newID()
 		if err != nil {
 			return result, err
@@ -207,7 +226,7 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 		if err != nil {
 			return result, err
 		}
-		if agentEnabled && e.EventType == domain.EventCommandPosted {
+		if toAgent {
 			accepted, err := r.acceptAgentComment(ctx, q, e, workspace, source, thread.ID, config.OwnSenderID)
 			if err != nil {
 				return result, err
@@ -264,6 +283,28 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 		}
 	}
 	return result, nil
+}
+
+// noticeWanted reports, for a source with notice_mentions_only, whether an
+// event becomes a Telegram notice. Only a
+// ClickUp comment from someone else that tags the owner, directly or
+// through a group mention (everyone, followers, assignees), does; status
+// changes and untagged comments never do. A comment that already started
+// a behavior run (for example mention-report) is reported by that run, so
+// it gets no second notice. With no owner set, nothing is noticed.
+func noticeWanted(e domain.NormalizedEvent, owner string, started int) bool {
+	if e.EventType != domain.EventCommandPosted || started > 0 || owner == "" || e.SenderID == owner {
+		return false
+	}
+	if e.Metadata["tagged_group"] == "true" {
+		return true
+	}
+	for _, id := range strings.Split(e.Metadata["tagged_user_ids"], ",") {
+		if id == owner {
+			return true
+		}
+	}
+	return false
 }
 
 // agentEnabledAtIngest decides whether comments go to the agent. A source
