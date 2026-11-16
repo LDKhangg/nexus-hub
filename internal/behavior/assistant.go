@@ -289,7 +289,9 @@ Hub tools:
 type assistantTurnResult struct {
 	text           string
 	model          string
-	route          string // the usage log's route label (assistant_router.go)
+	route          string       // the usage log's route label (assistant_router.go)
+	routerModel    string       // set when a router call ran before the final model
+	routerUsage    domain.Usage // that router call's usage; not in usage
 	usage          domain.Usage
 	cut            bool // the model stopped at its output limit
 	steps          int  // model calls
@@ -386,23 +388,30 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 	// structured output (the CLI providers) or an unset fast model skips the
 	// router and keeps today's path on assistant_model. Otherwise the router
 	// answers simple messages itself or escalates; any router failure falls
-	// back to assistant_model (fail upward, never a fast answer).
+	// back to assistant_model (fail upward, never a fast answer). A reply
+	// to a question the assistant just asked skips the router too, so a
+	// short "ok" to an offer reaches the tools on assistant_model.
 	model, route := res.model, res.route
 	var (
 		routerUsage domain.Usage
 		routerSteps int
+		routerRan   bool
 		answered    bool
 	)
 	if job.tier != assistantTierDeep && job.workflowID <= 0 && a.FastModel != "" {
-		if jp, ok := p.(domain.JSONProvider); ok {
+		if jp, ok := p.(domain.JSONProvider); ok && lastAssistantAsked(prior) {
+			route = routeWorkFollowup
+		} else if ok {
 			d, usage, rerr := a.route(ctx, jp, prior, ownerText)
-			routerUsage, routerSteps = usage, 1
+			routerUsage, routerSteps, routerRan = usage, 1, true
 			switch {
 			case rerr != nil:
 				route = routeWorkFallback
 			case d.route == routeAnswer:
-				res = assistantTurnResult{text: d.reply, model: a.FastModel}
-				route, answered = routeAnswer, true
+				// The fast call is the final answer: its usage is the
+				// turn's, not a separate router line.
+				res = assistantTurnResult{text: d.reply, model: a.FastModel, usage: usage}
+				route, answered, routerRan = routeAnswer, true, false
 			case d.route == routeDeep:
 				model, route = a.deepModel(), routeDeep
 			default:
@@ -418,7 +427,9 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 		}
 	}
 	res.route = route
-	res.usage.Add(routerUsage)
+	if routerRan {
+		res.routerModel, res.routerUsage = a.FastModel, routerUsage
+	}
 	res.steps += routerSteps
 	if err != nil {
 		return res, err
@@ -675,6 +686,11 @@ func (w *InboxWorker) assistantJob(ctx context.Context, job assistantJob) outcom
 		"output_tokens", res.usage.Output,
 		"cache_read_tokens", res.usage.CacheRead,
 		"cache_write_tokens", res.usage.CacheWrite,
+		"router_model", res.routerModel,
+		"router_input_tokens", res.routerUsage.Input,
+		"router_output_tokens", res.routerUsage.Output,
+		"router_cache_read_tokens", res.routerUsage.CacheRead,
+		"router_cache_write_tokens", res.routerUsage.CacheWrite,
 		"latency_ms", time.Since(started).Milliseconds(),
 	)
 	if ctx.Err() != nil {

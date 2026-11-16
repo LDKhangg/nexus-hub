@@ -982,6 +982,9 @@ Routing rules:
   providers (Claude Code, opencode), which have no native structured-output
   API call, skip the router and keep the single path on `assistant_model`.
   Write changes still only run after you press **Làm**.
+- Follow-ups: when the assistant's previous answer ends with a question (its
+  last line ends in `?`), your next message skips the router and runs on
+  `assistant_model`, so a short "ok" or "ừ" to an offer reaches the tools.
 - `/deep <câu hỏi>` skips the router and runs the turn on
   `assistant_deep_model`, through the same queue and rate limit. `/deep`
   alone replies with a usage hint. Like plain text, its text is held only in
@@ -994,18 +997,24 @@ conversation history sent back to the model.
 Each finished turn logs one metadata line, never text:
 
 ```text
-msg="assistant turn" route=answer model=claude-haiku-5-5 steps=1 input_tokens=… output_tokens=… cache_read_tokens=… cache_write_tokens=… latency_ms=…
+msg="assistant turn" route=work model=claude-sonnet-5-5 steps=3 input_tokens=… output_tokens=… cache_read_tokens=… cache_write_tokens=… router_model=claude-haiku-5-5 router_input_tokens=… router_output_tokens=… router_cache_read_tokens=… router_cache_write_tokens=… latency_ms=…
 ```
 
 `route` is `answer` (fast reply), `work`, `deep` (router or `/deep`),
-`work_fallback` (the router failed) or `skip` (router not run). Token counts
-include the router call. To estimate cost, sum the tokens per `model` from
-the service log (for example `journalctl --user -u nexus-hub | grep
-'assistant turn'`) and multiply by that model's prices: `input_tokens` at the
-input price, `cache_write_tokens` at the cache-write price,
-`cache_read_tokens` at the much lower cache-read price, and `output_tokens`
-at the output price. A high `cache_read_tokens` share means the cached
-prefix (system prompt, tools and history) is working.
+`work_fallback` (the router failed), `work_followup` (a reply to the
+assistant's question; router not run) or `skip` (router not run). The token
+fields count only the final `model`'s calls. The `router_*` fields count the
+router call that ran before a `work`, `deep` or `work_fallback` turn; they are
+empty or zero when the router did not run and on `answer` turns, where the
+fast call is itself the final answer (counted under `model`). `steps`
+includes the router call. To estimate cost, sum the token fields per `model`
+and the `router_*` fields per `router_model` from the service log (for
+example `journalctl --user -u nexus-hub | grep 'assistant turn'`), then
+multiply by that model's prices: input tokens at the input price, cache-write
+tokens at the cache-write price, cache-read tokens at the much lower
+cache-read price, and output tokens at the output price. A high
+`cache_read_tokens` share means the cached prefix (system prompt, tools and
+history) is working.
 
 ## Upkeep
 
