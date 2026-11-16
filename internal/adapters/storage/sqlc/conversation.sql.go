@@ -59,16 +59,17 @@ func (q *Queries) BindWorkflowResource(ctx context.Context, arg BindWorkflowReso
 
 const ensureConversation = `-- name: EnsureConversation :one
 
-INSERT INTO public.conversations (workspace_id, integration_id, chat_id, user_id)
-VALUES ($1, $2, $3, $4)
-ON CONFLICT (workspace_id, integration_id, chat_id) DO UPDATE SET updated_at = public.conversations.updated_at
-RETURNING id, workspace_id, integration_id, chat_id, user_id, summary, summary_updated_at, created_at, updated_at
+INSERT INTO public.conversations (workspace_id, integration_id, chat_id, thread_id, user_id)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (workspace_id, integration_id, chat_id, thread_id) DO UPDATE SET updated_at = public.conversations.updated_at
+RETURNING id, workspace_id, integration_id, chat_id, user_id, summary, summary_updated_at, created_at, updated_at, thread_id
 `
 
 type EnsureConversationParams struct {
 	WorkspaceID   pgtype.UUID
 	IntegrationID pgtype.UUID
 	ChatID        int64
+	ThreadID      int64
 	UserID        pgtype.UUID
 }
 
@@ -78,6 +79,7 @@ func (q *Queries) EnsureConversation(ctx context.Context, arg EnsureConversation
 		arg.WorkspaceID,
 		arg.IntegrationID,
 		arg.ChatID,
+		arg.ThreadID,
 		arg.UserID,
 	)
 	var i Conversation
@@ -91,6 +93,7 @@ func (q *Queries) EnsureConversation(ctx context.Context, arg EnsureConversation
 		&i.SummaryUpdatedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ThreadID,
 	)
 	return i, err
 }

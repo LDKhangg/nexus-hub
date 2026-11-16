@@ -66,6 +66,12 @@ type InboxDeps struct {
 	// even when the conversational assistant is disabled.
 	Workflows        workflow.Reader
 	WorkflowCommands workflow.Engine
+	// Topics finds the subject of a forum topic for follow-up resolution.
+	// Nil keeps the Phase 6 rules in every thread.
+	Topics TopicLookup
+	// Links makes "Mở topic" jump links (a pasted task link, /topic, /list).
+	// Nil turns them off.
+	Links TopicLinks
 }
 
 // InboxWorker processes stored Telegram updates: built-in commands,
@@ -206,7 +212,7 @@ func (w *InboxWorker) dispatch(ctx context.Context, u InboundUpdate, corr string
 	if u.IntegrationID == "" || u.ChatID == 0 {
 		return outcome{code: "no_integration"}
 	}
-	to := ChatRef{WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID}
+	to := ChatRef{WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, ThreadID: u.ThreadID}
 	ctx = w.recordInboundConversation(ctx, u, to)
 	actor := "telegram:" + strconv.FormatInt(u.ChatID, 10)
 	switch u.Kind {
@@ -362,11 +368,13 @@ func (w *InboxWorker) command(ctx context.Context, u InboundUpdate, to ChatRef, 
 		return w.reportCommand(hctx, u, to)
 	case "/deep":
 		return w.deepCommand(ctx, u, to, actor, corr)
+	case "/topic":
+		return w.topicCommand(ctx, u, to)
 	case "/status", "/list", "/cancel", "/resume", "/note":
 		return w.workflowControlCommand(hctx, u, to, actor, corr)
 	default:
 		reply, err = w.d.Commands.TriggerCommand(hctx, CommandRequest{
-			WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, UpdateID: u.UpdateID,
+			WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, ThreadID: u.ThreadID, UpdateID: u.UpdateID,
 			Command: u.Command, Args: args, Actor: actor, CorrelationID: corr,
 		})
 	}
@@ -380,6 +388,7 @@ func (w *InboxWorker) helpText(ctx context.Context, workspaceID string) string {
 	b.WriteString("Lệnh có sẵn:\n")
 	b.WriteString("/help: danh sách lệnh\n")
 	b.WriteString("/deep <câu hỏi>: hỏi trợ lý bằng mô hình mạnh nhất\n")
+	b.WriteString("/topic <task id hoặc link ClickUp>: nút mở topic của task\n")
 	b.WriteString("/trace <run id hoặc task> [item]: xem một lần chạy\n")
 	b.WriteString("/prefs [short|normal|detailed]: tùy chọn báo cáo\n")
 	b.WriteString("/template <kind> [reset]: mẫu báo cáo\n")
@@ -497,7 +506,7 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 	hctx, cancel := context.WithTimeout(ctx, w.settings.HandlerTimeout)
 	defer cancel()
 	res, err := w.d.Callbacks.HandleCallback(hctx, CallbackAction{
-		WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, MessageID: msgID,
+		WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, ThreadID: u.ThreadID, MessageID: msgID,
 		Data: data, Approval: a, Actor: actor, CorrelationID: corr,
 	})
 	if err != nil {
@@ -539,7 +548,7 @@ func (w *InboxWorker) freeText(ctx context.Context, u InboundUpdate, to ChatRef,
 	}
 	hctx, cancel := context.WithTimeout(ctx, w.settings.HandlerTimeout)
 	reply, err := w.d.Callbacks.HandleFreeText(hctx, FreeTextAnswer{
-		WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID,
+		WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, ThreadID: u.ThreadID,
 		Approval: a, Answer: a.PendingAnswer, Actor: actor, CorrelationID: corr,
 	})
 	cancel()

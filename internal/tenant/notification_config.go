@@ -113,3 +113,71 @@ func ValidateTelegramControl(i WebhookIntegration) error {
 	}
 	return nil
 }
+
+// TelegramOwnerChatID returns the workspace's owner group chat of a Telegram
+// control integration: the optional owner_chat_id, else the chat_id the
+// config already carries. It returns 0 when neither is a valid chat id, so
+// the caller falls back to the global owner_telegram_chat_id setting.
+func TelegramOwnerChatID(m map[string]any) int64 {
+	for _, key := range []string{"owner_chat_id", "chat_id"} {
+		if n, ok := chatIDField(m, key); ok {
+			return n
+		}
+	}
+	return 0
+}
+
+// OwnerTargetConfig returns a copy of a Telegram control integration's
+// config whose chat_id is the owner chat (see TelegramOwnerChatID), ready for
+// ParseTelegramTargetConfig. The stored config is not changed.
+func OwnerTargetConfig(m map[string]any) map[string]any {
+	conf := make(map[string]any, len(m)+1)
+	for k, v := range m {
+		conf[k] = v
+	}
+	if chat := TelegramOwnerChatID(m); chat != 0 {
+		if old, _ := chatIDField(m, "chat_id"); old != chat {
+			// The thread belongs to the old chat, not the owner chat.
+			delete(conf, "message_thread_id")
+		}
+		conf["chat_id"] = strconv.FormatInt(chat, 10)
+	}
+	return conf
+}
+
+// ValidateOwnerChatID checks an optional owner_chat_id value: absent or nil
+// is valid; otherwise it must be a non-zero integer (or numeric string).
+func ValidateOwnerChatID(m map[string]any) error {
+	v, ok := m["owner_chat_id"]
+	if !ok || v == nil {
+		return nil
+	}
+	if _, ok := chatIDField(m, "owner_chat_id"); !ok {
+		return errors.New("invalid owner chat ID")
+	}
+	return nil
+}
+
+func chatIDField(m map[string]any, key string) (int64, bool) {
+	var n int64
+	switch value := m[key].(type) {
+	case string:
+		parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		n = parsed
+	case int64:
+		n = value
+	case int:
+		n = int64(value)
+	case float64:
+		if value >= float64(math.MaxInt64) || value <= float64(math.MinInt64) || value != math.Trunc(value) {
+			return 0, false
+		}
+		n = int64(value)
+	default:
+		return 0, false
+	}
+	return n, n != 0
+}

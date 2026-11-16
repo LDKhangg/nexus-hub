@@ -515,6 +515,7 @@ func (e *Engine) runTelegram(ctx context.Context, rc RunContext, env runActionEn
 		}
 		return RunActionOutcome{}, true, nil
 	}
+	chat = e.routed(ctx, rc, chat)
 	text, err := e.runActionsReport(ctx, rc, res)
 	if err != nil {
 		return RunActionOutcome{}, true, nil

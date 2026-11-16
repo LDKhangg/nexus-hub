@@ -84,6 +84,11 @@ actions:
 
 dry_run: true
 
+# Reports of this behavior go to one fixed Telegram topic (when the owner
+# group is a forum with topics on); the default is one topic per ClickUp task.
+report:
+  topic: "PR approve"
+
 profile:
   language: "vi"
 

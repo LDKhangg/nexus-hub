@@ -61,6 +61,13 @@ func (w *InboxWorker) workflowOrAssistant(ctx context.Context, u InboundUpdate, 
 		return w.reply(ctx, to, msgAssistantGone, "assistant_text_gone")
 	}
 	trimmed := strings.TrimSpace(text)
+	// A message that is only a ClickUp task link, written in General, gets
+	// the "Mở topic" button of that task's topic.
+	if u.ThreadID == 0 && w.d.Links != nil {
+		if taskID, ok := taskURLRef(trimmed); ok && w.jumpAvailable(u) {
+			return w.topicJump(ctx, u, to, taskID)
+		}
+	}
 	// Target order: exactly one explicit WF-n anywhere in the text, then the
 	// reply target, then a clarification. Several references never store.
 	refs := workflow.FindRefs(trimmed)
@@ -78,6 +85,16 @@ func (w *InboxWorker) workflowOrAssistant(ctx context.Context, u InboundUpdate, 
 		}
 		if resolved {
 			return w.queueAssistantTextForWorkflow(ctx, u, to, actor, corr, text, id)
+		}
+		if len(refs) == 0 {
+			// Inside a topic, the subject's single active execution is the
+			// context; otherwise the subject itself is.
+			if t := w.topicTarget(ctx, u); t.has() {
+				if id, ok := t.single(); ok {
+					return w.queueAssistantTextForWorkflow(ctx, u, to, actor, corr, text, id)
+				}
+				return w.queueAssistantTopic(ctx, u, to, actor, corr, text, t)
+			}
 		}
 		return w.queueAssistantText(ctx, u, to, actor, corr, text)
 	}
@@ -102,6 +119,21 @@ func (w *InboxWorker) workflowOrAssistant(ctx context.Context, u InboundUpdate, 
 			return w.handleWorkflowRequest(ctx, u, to, actor, corr, "note", trimmed, refs[0])
 		default:
 			return w.clarifyWorkflowTarget(ctx, u, to, "note", trimmed)
+		}
+	}
+	// Inside a topic, text without a WF reference and without a bound reply
+	// target goes to the topic subject: one active execution gets the
+	// instruction, several ask, none ask the assistant with the subject as
+	// context. A fixed topic, General and unknown threads keep Phase 6.
+	if len(refs) == 0 && trimmed != "" && !strings.HasPrefix(trimmed, "/") {
+		if t := w.topicTarget(ctx, u); t.has() {
+			if id, ok := t.single(); ok {
+				return w.executeWorkflowRequest(ctx, u, to, actor, corr, "note", trimmed, id)
+			}
+			if len(t.active) > 0 {
+				return w.clarifyWorkflowTarget(ctx, u, to, "note", trimmed)
+			}
+			return w.queueAssistantTopic(ctx, u, to, actor, corr, text, t)
 		}
 	}
 	return w.queueAssistantText(ctx, u, to, actor, corr, text)
@@ -140,6 +172,9 @@ func (w *InboxWorker) workflowControlCommand(ctx context.Context, u InboundUpdat
 	case "/list":
 		if args != "" {
 			return w.reply(ctx, to, "Cú pháp: /list", "usage")
+		}
+		if out, ok := w.topicWorkflowList(ctx, u, to); ok {
+			return out
 		}
 		return w.workflowList(ctx, u, to)
 	case "/note":
@@ -209,6 +244,13 @@ func (w *InboxWorker) handleWorkflowRequest(ctx context.Context, u InboundUpdate
 	if id, ok := w.resolveWorkflowTarget(ctx, u, explicitID); ok {
 		return w.executeWorkflowRequest(ctx, u, to, actor, corr, kind, text, id)
 	}
+	if explicitID <= 0 {
+		// No explicit id and no bound reply target: inside a topic, the
+		// subject's single active execution is the target.
+		if id, ok := w.topicTarget(ctx, u).single(); ok {
+			return w.executeWorkflowRequest(ctx, u, to, actor, corr, kind, text, id)
+		}
+	}
 	return w.clarifyWorkflowTarget(ctx, u, to, kind, text)
 }
 
@@ -236,7 +278,16 @@ func (w *InboxWorker) activeBoundWorkflows(ctx context.Context, ws string, conve
 
 func (w *InboxWorker) clarifyWorkflowTarget(ctx context.Context, u InboundUpdate, to ChatRef, kind, text string) outcome {
 	state := conversationFromContext(ctx)
-	items := w.activeBoundWorkflows(ctx, u.WorkspaceID, state.id)
+	var items []workflow.ExecutionDetail
+	if t := w.topicTarget(ctx, u); t.has() {
+		// Inside a topic, the buttons list only the subject's executions.
+		items = t.active
+		if len(items) > 5 {
+			items = items[:5]
+		}
+	} else {
+		items = w.activeBoundWorkflows(ctx, u.WorkspaceID, state.id)
+	}
 	if len(items) == 0 || w.d.Approvals == nil {
 		return w.reply(ctx, to, "Không tìm thấy workflow đang hoạt động phù hợp. Hãy ghi rõ mã WF-id, ví dụ: WF-123 <nội dung>.", "workflow_target_not_found")
 	}
@@ -411,6 +462,7 @@ func (w *InboxWorker) workflowList(ctx context.Context, u InboundUpdate, to Chat
 		maxPages  = 10
 	)
 	lines := make([]string, 0, listLimit)
+	var listed []int64
 	var before int64
 	for page := 0; page < maxPages && len(lines) < listLimit; page++ {
 		items, next, err := r.ListExecutions(ctx, workflow.ExecutionQuery{WorkspaceID: u.WorkspaceID, BeforeID: before, Limit: listLimit})
@@ -420,6 +472,7 @@ func (w *InboxWorker) workflowList(ctx context.Context, u InboundUpdate, to Chat
 		for _, item := range items {
 			if !item.State.IsTerminal() {
 				lines = append(lines, fmt.Sprintf("%s · %s · %s", workflow.FormatRef(item.ID), oneLine(item.BehaviorName, 60), item.State))
+				listed = append(listed, item.ID)
 				if len(lines) == listLimit {
 					break
 				}
@@ -432,6 +485,9 @@ func (w *InboxWorker) workflowList(ctx context.Context, u InboundUpdate, to Chat
 	}
 	if len(lines) == 0 {
 		return w.reply(ctx, to, "Không có workflow đang hoạt động.", "")
+	}
+	if rows := w.listJumpRows(ctx, u, listed); len(rows) > 0 {
+		return w.replyMessage(ctx, to, OutMessage{Text: strings.Join(lines, "\n"), Buttons: rows}, "")
 	}
 	return w.reply(ctx, to, strings.Join(lines, "\n"), "")
 }
@@ -567,6 +623,12 @@ func (w *InboxWorker) toolWorkflowNote(ctx context.Context, tt *assistantToolTur
 	case tt.workflowID > 0:
 		targetID = tt.workflowID
 	default:
+		if t := w.topicTarget(ctx, tt.u); t.has() {
+			// Inside a topic only the subject's single active execution is a
+			// default target, never another task's workflow bound here.
+			targetID, _ = t.single()
+			break
+		}
 		bound := w.activeBoundWorkflows(ctx, tt.u.WorkspaceID, conversation.ID)
 		if len(bound) == 1 {
 			targetID = bound[0].ID

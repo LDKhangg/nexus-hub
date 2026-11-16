@@ -110,6 +110,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Topics: execution messages go to per-task forum topics; any topic
+	// failure sends to General instead.
+	topics, err := buildTopicRouter(pool, s, integrations, ag, resolver, messenger)
+	if err != nil {
+		return err
+	}
+	engine.SetTopics(topics)
+	ag.actions.SetThreadRouter(topics)
 	workspaces, err := storage.NewWorkspaceRepository(pool)
 	if err != nil {
 		return errors.New("workspace repository startup failed")
@@ -152,8 +160,18 @@ func run() error {
 		Conversations:    ag.conversations,
 		Workflows:        workflows.store,
 		WorkflowCommands: workflows.commands,
+		Topics:           topics,
+		Links:            topics,
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
-	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows}
+	// A done/closed ClickUp task closes its topic once no execution of it is
+	// active (status events and a periodic sweep).
+	lifecycle, err := buildTopicLifecycle(pool, s, integrations, ag, resolver, messenger, workflows.store, workspaces)
+	if err != nil {
+		return err
+	}
+	notices.SetStatusObserver(lifecycle.StatusChanged)
+	topics.OnTaskTopicOpen(lifecycle.TopicReopened)
+	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows, lifecycle}
 	// Telegram updates arrive by webhook, or by long polling when the hub
 	// has no public URL (telegram_mode, see settings.TelegramPolling). Both
 	// paths end in the same handler.

@@ -82,7 +82,7 @@ func (c *CommandRunner) TriggerCommand(ctx context.Context, r CommandRequest) (s
 			}
 			m.Trigger = TriggerData{
 				Type: TriggerTelegramCommand, IntegrationID: r.IntegrationID, TaskID: taskID, Command: r.Command,
-				TelegramChatID: r.ChatID, TelegramUpdateID: r.UpdateID, Actor: r.Actor,
+				TelegramChatID: r.ChatID, TelegramThreadID: r.ThreadID, TelegramUpdateID: r.UpdateID, Actor: r.Actor,
 			}
 			plans = append(plans, planned{m: m, taskID: taskID})
 			break

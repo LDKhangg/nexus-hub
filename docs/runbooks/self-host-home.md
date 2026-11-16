@@ -1028,6 +1028,125 @@ known fields), `trailing_data`, `missing_field`, `bad_route`, `empty_reply`,
 `reply_too_long` or `bad_tier`. Many `work_fallback` lines with the same
 code point at the fast model or the router prompt, not at your messages.
 
+## Telegram topics (Phase 6b)
+
+Each workspace can have its own Telegram forum group. Inside it, every ClickUp
+task you are involved in gets its own topic, a fixed topic can hold one kind of
+notice (for example "PR approve"), and General stays for free chat, `/list` and
+system alerts. Telegram only; topics in private bot chats are not supported.
+
+### Turn it on
+
+1. In the group, turn on **Topics** (Group settings, then Topics). Telegram
+   converts the group to a supergroup, and its chat id changes to `-100…`.
+2. Make the bot an admin with the **Manage topics** right.
+3. Tell the hub the group's chat id for the workspace. It is stored as
+   `owner_chat_id` on the workspace's Telegram control integration:
+
+```sh
+nh telegram group set  --workspace-id $WS --integration-id $TG --chat-id -1001234567890
+nh telegram group show --workspace-id $WS --integration-id $TG
+```
+
+4. Set your Telegram user id, so the hub accepts your messages from the group
+   (with `owner_telegram_user_id` at 0, group messages are ignored; `group set`
+   prints a `warning` in that case):
+
+```sh
+nh settings set owner_telegram_user_id '<your Telegram user id>'
+```
+
+Run `set` again whenever the chat id changes, in particular right after the
+conversion in step 1 (the old id stops working). A running server picks the
+value up within a short while. Without `owner_chat_id` the hub keeps using the
+integration's `chat_id`, then the global `owner_telegram_chat_id`. Inbound
+messages are accepted only from that group and your Telegram user id
+(`owner_telegram_user_id`).
+
+### Where messages go (`report.topic`)
+
+A behavior YAML chooses the topic of its reports with `report.topic`:
+
+| Value | Destination |
+|---|---|
+| `task` (default) | the topic of the ClickUp task bound to the run; without a task, the `workflow` topic |
+| `workflow` | a topic for the run (`WF-<id> · <behavior name>`) |
+| `general` | the General chat |
+| any other text (1-64 bytes) | a fixed topic of that name, for example `"PR approve"` |
+
+Topic names are built when the topic is created (`<task id> · <task title>`,
+at most 128 bytes) and are never stored or logged; the database keeps only
+subject keys, thread ids, state and times. Reports, approval prompts,
+clarifications and failure notices of a run all follow the same rule.
+
+### Fallback
+
+A message is never lost because of a topic. If the chat is not a forum, the bot
+lacks **Manage topics**, or a topic call fails, the same message goes to
+General, the topic is retried on a later send, and the log carries a fixed code
+(`telegram topic: sent to General (<code>)`). A chat without topics is
+remembered for 10 minutes so every send does not retry. A message that fell
+back to General while its topic exists carries an **Mở topic** button.
+
+### Jump links
+
+- Paste a ClickUp task link (`https://app.clickup.com/t/<id>` or
+  `https://app.clickup.com/t/<team>/<id>`) alone in General, or send
+  `/topic <task id or link>`. The bot replies with an **Mở topic** button to
+  that task's topic and creates the topic if needed. A task the workspace's
+  ClickUp source cannot read gets a short "Không đọc được task" reply.
+- `/list` in General adds one **WF-n · Mở topic** button for each active
+  workflow whose task has a topic.
+- Inside a topic, text without a `WF-n` goes to the task's single active
+  workflow, asks you to pick when there are several, or asks the assistant
+  with the task as context.
+
+### Lifecycle
+
+A topic closes (never deleted; history stays) when its ClickUp task reaches a
+done or closed status and no workflow bound to the task is active. A task counts as done
+when ClickUp's status type is done or closed, or the status name (trimmed, case
+does not matter) is listed in the setting `topic_close_statuses` (comma separated, default
+`complete,closed,done`):
+
+```sh
+nh settings set topic_close_statuses "complete,closed,done,shipped"
+```
+
+If a workflow of the task is still running when the status changes, the topic
+closes after the last one ends (checked every 30 seconds; the task status is
+then read from ClickUp if no status event was seen since the last restart). Any
+new message for a closed topic reopens it first.
+
+### Inspect
+
+```sh
+nh telegram topics --workspace-id $WS
+```
+
+Prints one JSON object with, per topic, the subject kind and key
+(`clickup_task:<id>`, `workflow:<id>`, `fixed:<name>`), thread id, state
+(`open`, `closed`, or `reserved` while being created), chat and integration
+ids and times. It never prints topic or task names.
+
+### Check the router (route-eval)
+
+```sh
+nh assistant route-eval --workspace-id $WS
+nh assistant route-eval --workspace-id $WS --thread-history task
+nh assistant route-eval --workspace-id $WS --file cases.txt --thread-history general
+```
+
+Runs the Phase 6a router prompt, on the fast model, over a built-in set of
+owner messages (greetings, thanks, general questions, task and status
+questions, action requests, follow-ups, design requests) or over `--file`
+(one `<expected>|<message>` per line; expected is `answer`, `work`, `deep` or
+`escalate`; lines starting with `#` are comments). `--thread-history` adds a
+small synthetic earlier exchange (`general` or `task`). Per case it prints
+the expected and got route, tier, `router_error` and token counts, never the
+reply or the message text. The exit status is not 0 when any case does not
+match or the router fails. It needs `llm_provider` `anthropic`.
+
 ## Upkeep
 
 - Updates: `git pull`, rebuild both binaries, run `goose … up`, then

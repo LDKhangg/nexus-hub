@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/LDKhangg/nexus-hub/internal/agent"
@@ -51,7 +52,7 @@ var (
 )
 
 // Engine-reserved command names that a behavior may not take.
-var reservedCommands = map[string]bool{"/help": true, "/trace": true, "/undo": true, "/start": true, "/deep": true}
+var reservedCommands = map[string]bool{"/help": true, "/trace": true, "/undo": true, "/start": true, "/deep": true, "/topic": true}
 
 var triggerTypes = map[string]bool{
 	TriggerTaskStatusChanged: true, TriggerTaskAssigned: true, TriggerCommentAdded: true, TriggerTelegramCommand: true,
@@ -260,6 +261,11 @@ func validate(doc Doc, vars map[string]string, allowed map[string]bool, env *val
 		}
 		if v := b.MaxSteps; v != nil && (*v < 1 || *v > 20) {
 			c.add("budgets.max_steps", "must be between 1 and 20")
+		}
+	}
+	if r := doc.Report; r != nil && r.Topic != "" {
+		if !validReportTopic(r.Topic) {
+			c.add("report.topic", "must be task, workflow, general or a name of 1-%d bytes without control characters", MaxReportTopicBytes)
 		}
 	}
 	if doc.Model != "" && !validModelID(doc.Model) {
@@ -778,4 +784,27 @@ func sortedBoolKeys(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// validReportTopic accepts a report topic mode or a fixed topic name of
+// 1-64 valid UTF-8 bytes without control characters.
+func validReportTopic(v string) bool {
+	if v == "" || len(v) > MaxReportTopicBytes || !utf8.ValidString(v) || strings.TrimSpace(v) == "" {
+		return false
+	}
+	for _, r := range v {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// reportTopic returns the resolved topic mode or fixed name; the default
+// is task.
+func reportTopic(r *ReportDoc) string {
+	if r == nil || strings.TrimSpace(r.Topic) == "" {
+		return ReportTopicTask
+	}
+	return r.Topic
 }

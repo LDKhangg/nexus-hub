@@ -374,7 +374,7 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 	if conversationErr != nil {
 		log.Print("telegram assistant: conversation ensure failed")
 	}
-	hist, created := a.chatHistoryFor(job.u.WorkspaceID, job.u.IntegrationID, job.u.ChatID)
+	hist, created := a.threadHistoryFor(job.u.WorkspaceID, job.u.IntegrationID, job.u.ChatID, job.u.ThreadID)
 	if created && conversation.ID > 0 {
 		if summary, summaryErr := a.Conversations.GetSummary(ctx, job.u.WorkspaceID, conversation.ID); summaryErr == nil {
 			hist.setSummary(summary)
@@ -384,12 +384,17 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 	}
 	prior := hist.messagesForTurns(a.historyTurns())
 	ownerText := assistantOwnerText(job.text, job.workflowID)
+	if job.workflowID <= 0 && job.topicContext != "" {
+		ownerText = job.topicContext + "\n" + job.text
+	}
 	// Pick the model. /deep runs on the deep model without the router. A
 	// turn with a resolved workflow target, a provider without native
 	// structured output (the CLI providers) or an unset fast model skips the
 	// router and keeps today's path on assistant_model. Otherwise the router
 	// answers simple messages itself or escalates; any router failure falls
-	// back to assistant_model (fail upward, never a fast answer). A reply
+	// back to assistant_model (fail upward, never a fast answer). A turn in
+	// a topic with the topic subject as context skips the router like a
+	// resolved workflow target. A reply
 	// to a question the assistant just asked skips the router too, so a
 	// short "ok" to an offer reaches the tools on assistant_model.
 	model, route := res.model, res.route
@@ -400,7 +405,7 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 		routerErr   string
 		answered    bool
 	)
-	if job.tier != assistantTierDeep && job.workflowID <= 0 && a.FastModel != "" {
+	if job.tier != assistantTierDeep && job.workflowID <= 0 && job.topicContext == "" && a.FastModel != "" {
 		if jp, ok := p.(domain.JSONProvider); ok && lastAssistantAsked(prior) {
 			route = routeWorkFollowup
 		} else if ok {
@@ -571,8 +576,11 @@ type assistantJob struct {
 	corr       string
 	text       string
 	workflowID int64
-	tier       string // "" lets the router decide; assistantTierDeep is /deep
-	queued     time.Time
+	// topicContext is the fixed "[Context] ..." line naming the subject of
+	// the topic the text was written in, when no workflow was resolved.
+	topicContext string
+	tier         string // "" lets the router decide; assistantTierDeep is /deep
+	queued       time.Time
 }
 
 // assistant takes the staged text of one plain free-text message, checks

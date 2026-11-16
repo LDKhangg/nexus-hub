@@ -38,7 +38,20 @@ type NoticeRepository struct {
 
 	mu    sync.RWMutex
 	known map[string]tenant.Tier
+
+	// onStatus is told, after a callback commits, of every ClickUp status
+	// change in it (identifiers and status words only). Set before serving.
+	onStatus StatusObserver
 }
+
+// StatusObserver receives a committed ClickUp status change: the workspace,
+// the task id, the new status name and its type (empty when ClickUp sent
+// none). It must not block.
+type StatusObserver func(workspaceID, taskID, status, statusType string)
+
+// SetStatusObserver sets the observer of committed status changes. Call it
+// before the repository serves requests.
+func (r *NoticeRepository) SetStatusObserver(o StatusObserver) { r.onStatus = o }
 
 func NewNoticeRepository(pool *pgxpool.Pool, newID func() (string, error), debounce DebounceSettings) (*NoticeRepository, error) {
 	if pool == nil || newID == nil {
@@ -150,7 +163,7 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 	if err := tenant.ValidateTelegramTarget(integration, target); err != nil {
 		return result, err
 	}
-	if _, err := tenant.ParseTelegramTargetConfig(target.Config); err != nil {
+	if _, err := tenant.ParseTelegramTargetConfig(tenant.OwnerTargetConfig(target.Config)); err != nil {
 		return result, err
 	}
 	agentEnabled := r.agentEnabledAtIngest(integration)
@@ -242,6 +255,13 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 	}
 	for _, sighting := range sightings {
 		_ = r.people.Sighting(ctx, sighting)
+	}
+	if r.onStatus != nil {
+		for _, e := range ordered {
+			if e.EventType == domain.EventStatusChanged && e.Metadata["status_to"] != "" {
+				r.onStatus(e.WorkspaceID, e.ExternalID, e.Metadata["status_to"], e.Metadata["status_type"])
+			}
+		}
 	}
 	return result, nil
 }

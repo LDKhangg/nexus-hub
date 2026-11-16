@@ -21,7 +21,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-009 | Các sensitive actions yêu cầu quyền hoặc approval phù hợp. | 4 | PENDING |  |
 | FR-010 | Platform Adapter Registry. | 4 | PENDING |  |
 | FR-011 | Capability discovery. | 4 | PENDING |  |
-| FR-012 | Inbound event normalization. | 4 | PENDING |  |
+| FR-012 | Inbound event normalization. | 4, 6b | IN_PROGRESS | Phase 6b: Test PASS (CI 43823427615) + Review APPROVE on feature/phase6b 6b514c8: Telegram inbound carries the forum thread id; full gateway Phase 4b |
 | FR-013 | Outbound action execution. | 10 | PENDING |  |
 | FR-014 | Connection lifecycle management. | 10 | PENDING |  |
 | FR-015 | Credentials được mã hóa khi lưu. | 2 | IN_PROGRESS | Phase 2: AES-256-GCM credentials table (awaiting Test/Review PASS) |
@@ -42,15 +42,15 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-030 | Persistent conversations. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
 | FR-031 | Conversation-to-user binding. | 6 | IN_PROGRESS | Phase 6: bound to workspace + owner chat (Q3a, nullable user_id seam); users table later (Phase 4b) |
 | FR-032 | Conversation-to-workflow binding. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
-| FR-033 | Một conversation hỗ trợ nhiều workflows. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
-| FR-034 | Một workflow liên kết được với nhiều external resources. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
-| FR-035 | Context resolution cho follow-up messages. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
+| FR-033 | Một conversation hỗ trợ nhiều workflows. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988; Phase 6b: Test PASS (CI 43823427615) + Review APPROVE on feature/phase6b 6b514c8: per-topic conversations and topic-aware follow-up resolution |
+| FR-034 | Một workflow liên kết được với nhiều external resources. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988; Phase 6b: Test PASS (CI 43823427615) + Review APPROVE on feature/phase6b 6b514c8: per-topic conversations and topic-aware follow-up resolution |
+| FR-035 | Context resolution cho follow-up messages. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988; Phase 6b: Test PASS (CI 43823427615) + Review APPROVE on feature/phase6b 6b514c8: per-topic conversations and topic-aware follow-up resolution |
 | FR-036 | Có workflow reference ID để định danh tường minh. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
 | FR-037 | Nếu không rõ workflow đích, hệ thống phải hỏi lại. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
 | FR-038 | Hỗ trợ bổ sung instructions khi workflow đang chạy. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
 | FR-039 | Version hóa instruction updates. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
 | FR-040 | Hỗ trợ cancel, resume, status và list từ conversation. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
-| FR-041 | Không trộn context của hai workflow độc lập. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
+| FR-041 | Không trộn context của hai workflow độc lập. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988; Phase 6b: Test PASS (CI 43823427615) + Review APPROVE on feature/phase6b 6b514c8: per-topic conversations and topic-aware follow-up resolution |
 | FR-042 | Có cơ chế giới hạn và tóm tắt context khi cần. | 2, 6, 6a | IN_PROGRESS | Phase 2: rolling summary + packet budget; Phase 6: persisted conversation summary ≤2,000 bytes, 8 KiB instruction block (52af5e0); Phase 6a: assistant history = summary + last N, cached (8bd07d9) |
 | FR-043 | Intent classification. | 2, 7, 6a | IN_PROGRESS | Phase 2: Tier-1 triage categories; Phase 6a: assistant router answer/work/deep (8bd07d9) |
 | FR-044 | Task type classification. | 7 | PENDING |  |
@@ -140,8 +140,8 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-128 | Resume workflow sau approval. | 9 | PENDING |  |
 | FR-129 | Ghi lại actor và thời gian quyết định. | 9 | PENDING |  |
 | FR-130 | Revalidate policy/action context trước khi thực thi sau approval. | 9 | PENDING |  |
-| FR-131 | Destination resolution. | 10 | PENDING |  |
-| FR-132 | Original thread replies. | 10 | PENDING |  |
+| FR-131 | Destination resolution. | 6b, 10 | IN_PROGRESS | Phase 6b: Test PASS (CI 43823427615) + Review APPROVE on feature/phase6b 6b514c8: Telegram task/workflow/fixed topics with General fallback; other platforms Phase 10 |
+| FR-132 | Original thread replies. | 6b, 10 | IN_PROGRESS | Phase 6b: Test PASS (CI 43823427615) + Review APPROVE on feature/phase6b 6b514c8: Telegram replies stay in the inbound forum topic (is_topic_message); GitHub/ClickUp Phase 10 |
 | FR-133 | Cross-platform notifications. | 10 | PENDING |  |
 | FR-134 | On-started notification policy. | 10 | PENDING |  |
 | FR-135 | On-completed notification policy. | 10 | PENDING |  |
@@ -237,7 +237,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | DEP-012 | Có fresh-install test trên môi trường sạch. | 13 | PENDING |  |
 | E2E-001 | Mobile Prompt to Pull Request | 10, 13 | PENDING |  |
 | E2E-002 | Multiple Concurrent Workflows | 8, 13 | PENDING |  |
-| E2E-003 | Update Running Workflow | 6, 8, 13 | IN_PROGRESS | Phase 6: fake-provider journey (reply → v1 → next model/investigate step → /status) on 52af5e0; worker-delivery part Phase 8, live part Phase 13 |
+| E2E-003 | Update Running Workflow | 6, 8, 13 | IN_PROGRESS | Phase 6: fake-provider journey (reply → v1 → next model/investigate step → /status) on 52af5e0; worker-delivery part Phase 8, live part Phase 13; Phase 6b: Test PASS (CI 43823427615) + Review APPROVE on feature/phase6b 6b514c8: follow-up inside a task topic resolves to that task's workflow |
 | E2E-004 | Approval from Phone | 9, 13 | PENDING |  |
 | E2E-005 | Server Restart Recovery | 5, 12, 13 | IN_PROGRESS | Phase 5: fake-provider crash/restart/reclaim tests pass on 2ac779b; live evidence is Phase 12/13 |
 | E2E-006 | Duplicate Webhook | 4, 13 | PENDING |  |

@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Settings is the effective configuration.
@@ -50,6 +51,7 @@ type Settings struct {
 	OpencodeCLIConcurrency                int64         // opencode calls at once
 	TelegramAssistant                     bool          // owner free text goes to the LLM assistant
 	TelegramMode                          string        // auto | webhook | poll: how Telegram updates arrive
+	TopicCloseStatuses                    string        // comma-separated ClickUp status names that close a task topic
 	AssistantModel                        string        // the Telegram assistant's default Claude model id
 	AssistantFastModel                    string        // the Telegram assistant's fast Claude model id
 	AssistantDeepModel                    string        // the Telegram assistant's deep Claude model id
@@ -80,6 +82,7 @@ const (
 	kEnum
 	kExecPath
 	kClaudeModel
+	kStatusList
 )
 
 type spec struct {
@@ -149,6 +152,7 @@ var specs = map[string]spec{
 	"assistant_history_turns":    {kind: kInt, def: int64(6), min: 1, max: 20, set: func(s *Settings, v any) { s.AssistantHistoryTurns = v.(int64) }},
 	"assistant_timeout":          {kind: kDuration, def: 180 * time.Second, min: 10, max: 900, set: func(s *Settings, v any) { s.AssistantTimeout = v.(time.Duration) }},
 	"assistant_rate_per_minute":  {kind: kInt, def: int64(30), min: 1, max: 120, set: func(s *Settings, v any) { s.AssistantRatePerMinute = v.(int64) }},
+	"topic_close_statuses":       {kind: kStatusList, def: "complete,closed,done", set: func(s *Settings, v any) { s.TopicCloseStatuses = v.(string) }},
 	"telegram_mode":              {kind: kEnum, def: TelegramModeAuto, enum: []string{TelegramModeAuto, TelegramModeWebhook, TelegramModePoll}, set: func(s *Settings, v any) { s.TelegramMode = v.(string) }},
 }
 
@@ -369,12 +373,37 @@ func parse(key string, raw json.RawMessage) (any, error) {
 		if !ok {
 			return nil, bad
 		}
+	case kStatusList:
+		if !validStatusList(str) {
+			return nil, bad
+		}
 	case kExecPath:
 		if str != "" && (!filepath.IsAbs(str) || filepath.Clean(str) != str || str == "/" || strings.ContainsRune(str, 0)) {
 			return nil, bad
 		}
 	}
 	return str, nil
+}
+
+// validStatusList accepts 1-20 comma-separated status names of 1-40 printable
+// characters (runes) each, without control characters.
+func validStatusList(str string) bool {
+	parts := strings.Split(str, ",")
+	if len(parts) > 20 {
+		return false
+	}
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" || utf8.RuneCountInString(p) > 40 {
+			return false
+		}
+		for _, r := range p {
+			if r < 0x20 || r == 0x7f {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // validPublicURL accepts an absolute https URL with a host, an optional

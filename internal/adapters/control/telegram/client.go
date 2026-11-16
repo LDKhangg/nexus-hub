@@ -72,8 +72,9 @@ func (c *Client) call(ctx context.Context, token, chatID string, topic *int64, t
 	}
 	defer resp.Body.Close()
 	var envelope struct {
-		OK        bool `json:"ok"`
-		ErrorCode int  `json:"error_code"`
+		OK        bool   `json:"ok"`
+		ErrorCode int    `json:"error_code"`
+		Desc      string `json:"description"`
 		Result    struct {
 			MessageID int64 `json:"message_id"`
 		} `json:"result"`
@@ -99,6 +100,9 @@ func (c *Client) call(ctx context.Context, token, chatID string, topic *int64, t
 	}
 	if envelope.Parameters.MigrateToChatID != 0 {
 		return fail("chat_migrated", false, 0)
+	}
+	if (code == 400 || code == 403) && topicCode(envelope.Desc) != "" {
+		return fail(topicCode(envelope.Desc), false, 0)
 	}
 	if code >= 400 || code < 200 || code >= 300 {
 		return fail("rejected", false, 0)

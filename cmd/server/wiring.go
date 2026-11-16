@@ -242,7 +242,7 @@ func (t taskReader) ReadTask(ctx context.Context, workspaceID, tokenRef, taskID 
 	if err != nil {
 		return behavior.TaskState{}, err
 	}
-	return behavior.TaskState{ID: st.ID, Status: st.Status, AssigneeIDs: st.AssigneeIDs, Description: st.Description, Markdown: st.Markdown}, nil
+	return behavior.TaskState{ID: st.ID, Name: st.Name, Status: st.Status, StatusType: st.StatusType, AssigneeIDs: st.AssigneeIDs, Description: st.Description, Markdown: st.Markdown}, nil
 }
 
 // ownerChats reaches the owner: through the bot and chat a Telegram command
@@ -260,15 +260,23 @@ func telegramControl(in tenant.Integration) bool {
 func (o ownerChats) OwnerChat(ctx context.Context, workspaceID string, t behavior.TriggerData) (behavior.ChatRef, error) {
 	if t.TelegramChatID != 0 && t.IntegrationID != "" {
 		if in, err := o.integrations.Get(ctx, workspaceID, t.IntegrationID); err == nil && telegramControl(in) {
-			return behavior.ChatRef{WorkspaceID: workspaceID, IntegrationID: in.ID, ChatID: t.TelegramChatID}, nil
+			return behavior.ChatRef{WorkspaceID: workspaceID, IntegrationID: in.ID, ChatID: t.TelegramChatID, ThreadID: t.TelegramThreadID}, nil
 		}
-	}
-	if o.ownerChatID == 0 {
-		return behavior.ChatRef{}, errors.New("owner_telegram_chat_id is not set")
 	}
 	list, err := o.integrations.List(ctx, workspaceID, 100, 0)
 	if err != nil {
 		return behavior.ChatRef{}, err
+	}
+	// The workspace's own group wins; owner_telegram_chat_id is the fallback.
+	for _, in := range list {
+		if telegramControl(in) {
+			if chat := tenant.TelegramOwnerChatID(in.Config); chat != 0 {
+				return behavior.ChatRef{WorkspaceID: workspaceID, IntegrationID: in.ID, ChatID: chat}, nil
+			}
+		}
+	}
+	if o.ownerChatID == 0 {
+		return behavior.ChatRef{}, errors.New("owner_telegram_chat_id is not set")
 	}
 	for _, in := range list {
 		if telegramControl(in) {
@@ -276,6 +284,72 @@ func (o ownerChats) OwnerChat(ctx context.Context, workspaceID string, t behavio
 		}
 	}
 	return behavior.ChatRef{}, errors.New("no Telegram control integration in workspace")
+}
+
+// buildTopicRouter wires the Telegram topic router: the topic store, the bot
+// for forum calls, the ClickUp task title for topic names and the
+// execution's resource bindings. The title is read only to name a topic.
+func buildTopicRouter(pool *pgxpool.Pool, s settings.Settings, integrations *storage.IntegrationRepository, ag agentServices, resolver *secrets.Resolver, messenger behavior.TopicClient) (*behavior.TopicRouter, error) {
+	store, err := storage.NewTelegramTopicStore(pool)
+	if err != nil {
+		return nil, errors.New("telegram topic store startup failed")
+	}
+	policies := behaviorPolicies{integrations: integrations, known: ag.known}
+	reader := clickuptools.NewTaskReader(netguard.Client(s.ToolTimeout, netguard.DefaultHosts), resolver)
+	deps := behavior.TopicRouterDeps{
+		Store: store, Client: messenger,
+		TaskName: func(ctx context.Context, workspaceID, integrationID, taskID string) (string, error) {
+			cfg, err := policies.RunPolicy(ctx, workspaceID, integrationID)
+			if err != nil {
+				return "", err
+			}
+			st, err := reader.ReadTask(ctx, workspaceID, cfg.ClickUpTokenRef, taskID)
+			return st.Name, err
+		},
+	}
+	if lister, ok := ag.conversations.(workflow.ResourceLister); ok {
+		deps.Resources = lister
+	}
+	return behavior.NewTopicRouter(deps)
+}
+
+// buildTopicLifecycle wires the topic lifecycle: it closes the topic of a
+// done/closed ClickUp task once no execution of the task is active. Task
+// status is read only to learn whether the task is done.
+func buildTopicLifecycle(pool *pgxpool.Pool, s settings.Settings, integrations *storage.IntegrationRepository, ag agentServices, resolver *secrets.Resolver, closer behavior.TopicCloser, reader workflow.Reader, workspaces *storage.WorkspaceRepository) (*behavior.TopicLifecycle, error) {
+	store, err := storage.NewTelegramTopicStore(pool)
+	if err != nil {
+		return nil, errors.New("telegram topic store startup failed")
+	}
+	policies := behaviorPolicies{integrations: integrations, known: ag.known}
+	tasks := clickuptools.NewTaskReader(netguard.Client(s.ToolTimeout, netguard.DefaultHosts), resolver)
+	return behavior.NewTopicLifecycle(behavior.TopicLifecycleDeps{
+		Store: store, Closer: closer, Executions: ag.conversations, Reader: reader,
+		CloseStatuses: s.TopicCloseStatuses,
+		Workspaces: func(ctx context.Context) ([]string, error) {
+			var ids []string
+			for offset := int32(0); ; offset += 100 {
+				page, err := workspaces.List(ctx, 100, offset)
+				if err != nil {
+					return nil, err
+				}
+				for _, w := range page {
+					ids = append(ids, w.ID)
+				}
+				if len(page) < 100 {
+					return ids, nil
+				}
+			}
+		},
+		ReadTask: func(ctx context.Context, workspaceID, taskID string) (string, string, error) {
+			cfg, err := policies.RunPolicy(ctx, workspaceID, "")
+			if err != nil {
+				return "", "", err
+			}
+			st, err := tasks.ReadTask(ctx, workspaceID, cfg.ClickUpTokenRef, taskID)
+			return st.Status, st.StatusType, err
+		},
+	})
 }
 
 // behaviorPolicies finds a run's grants: the agent config of the ClickUp
@@ -427,7 +501,7 @@ func (c telegramPollTargets) TelegramPollTargets(ctx context.Context) ([]telegra
 					if !telegramControl(in) {
 						continue
 					}
-					cfg, err := tenant.ParseTelegramTargetConfig(in.Config)
+					cfg, err := tenant.ParseTelegramTargetConfig(tenant.OwnerTargetConfig(in.Config))
 					if err != nil {
 						continue
 					}

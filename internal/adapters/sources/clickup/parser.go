@@ -118,6 +118,7 @@ func validUserID(id string) bool {
 // status changes, a user object for assignee changes.
 type historyValue struct {
 	Status string `json:"status"`
+	Type   string `json:"type"`
 	ID     flexID `json:"id"`
 }
 
@@ -233,6 +234,9 @@ func (p *ClickUpParser) Parser(raw []byte) ([]domain.NormalizedEvent, error) {
 			}
 			content = before + " → " + item.After.Status
 			extra["status_to"] = item.After.Status
+			if t := strings.ToLower(strings.TrimSpace(item.After.Type)); t != "" && len(t) <= 32 {
+				extra["status_type"] = t
+			}
 			if item.Before != nil && item.Before.Status != "" {
 				extra["status_from"] = item.Before.Status
 			}

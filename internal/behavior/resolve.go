@@ -37,6 +37,8 @@ type ResolvedDoc struct {
 	// when the behavior declares none.
 	Verdict  *VerdictSpec
 	Workflow *WorkflowDoc
+	// ReportTopic is task, workflow, general or a fixed topic name.
+	ReportTopic string
 }
 
 // VerdictSpec is a resolved verdict block: the closed list of labels the
@@ -144,7 +146,7 @@ func Resolve(doc Doc, vars map[string]string) (ResolvedDoc, error) {
 	}
 
 	out := ResolvedDoc{
-		Schema: doc.Schema, Name: doc.Name, Description: doc.Description, Instructions: r(doc.Instructions), Workflow: doc.Workflow,
+		Schema: doc.Schema, Name: doc.Name, Description: doc.Description, Instructions: r(doc.Instructions), Workflow: doc.Workflow, ReportTopic: reportTopic(doc.Report),
 		Autonomy: AutonomyRules{
 			ConfidenceThreshold: DefaultConfidenceThreshold, RequireCitations: true, NotifyWhenInformational: true,
 		},

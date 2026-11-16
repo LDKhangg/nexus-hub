@@ -40,7 +40,7 @@ func ControlTokenRef(ctx context.Context, lookup IntegrationLookup, workspaceID,
 	if in.WorkspaceID != workspaceID || tenant.ValidateTelegramControl(in) != nil {
 		return "", &relay.DeliveryError{Code: "invalid_integration"}
 	}
-	cfg, err := tenant.ParseTelegramTargetConfig(in.Config)
+	cfg, err := tenant.ParseTelegramTargetConfig(tenant.OwnerTargetConfig(in.Config))
 	if err != nil {
 		return "", &relay.DeliveryError{Code: "invalid_integration"}
 	}
@@ -52,9 +52,39 @@ func (m *Messenger) SendMessage(ctx context.Context, to behavior.ChatRef, msg be
 	if err != nil {
 		return 0, err
 	}
-	return m.client.SendMessage(ctx, to.WorkspaceID, ref, chatIDString(to.ChatID), msg.Text, MessageOptions{
-		Buttons: buttons(msg.Buttons), ReplyTo: msg.ReplyTo, ForceReply: msg.ForceReply,
-	})
+	opts := MessageOptions{Buttons: buttons(msg.Buttons), ReplyTo: msg.ReplyTo, ForceReply: msg.ForceReply}
+	if to.ThreadID > 0 {
+		thread := to.ThreadID
+		opts.ThreadID = &thread
+	}
+	return m.client.SendMessage(ctx, to.WorkspaceID, ref, chatIDString(to.ChatID), msg.Text, opts)
+}
+
+// CreateTopic creates a forum topic in the chat and returns its thread ID.
+func (m *Messenger) CreateTopic(ctx context.Context, to behavior.ChatRef, name string) (int64, error) {
+	ref, err := ControlTokenRef(ctx, m.integrations, to.WorkspaceID, to.IntegrationID)
+	if err != nil {
+		return 0, err
+	}
+	return m.client.CreateForumTopic(ctx, to.WorkspaceID, ref, chatIDString(to.ChatID), name)
+}
+
+// CloseTopic closes a forum topic.
+func (m *Messenger) CloseTopic(ctx context.Context, to behavior.ChatRef, threadID int64) error {
+	ref, err := ControlTokenRef(ctx, m.integrations, to.WorkspaceID, to.IntegrationID)
+	if err != nil {
+		return err
+	}
+	return m.client.CloseForumTopic(ctx, to.WorkspaceID, ref, chatIDString(to.ChatID), threadID)
+}
+
+// ReopenTopic reopens a forum topic.
+func (m *Messenger) ReopenTopic(ctx context.Context, to behavior.ChatRef, threadID int64) error {
+	ref, err := ControlTokenRef(ctx, m.integrations, to.WorkspaceID, to.IntegrationID)
+	if err != nil {
+		return err
+	}
+	return m.client.ReopenForumTopic(ctx, to.WorkspaceID, ref, chatIDString(to.ChatID), threadID)
 }
 
 func (m *Messenger) RemoveButtons(ctx context.Context, to behavior.ChatRef, messageID int64) error {
@@ -81,7 +111,7 @@ func buttons(rows [][]behavior.Button) [][]Button {
 	for i, row := range rows {
 		out[i] = make([]Button, len(row))
 		for j, b := range row {
-			out[i][j] = Button{Text: b.Text, Data: b.Data}
+			out[i][j] = Button{Text: b.Text, Data: b.Data, URL: b.URL}
 		}
 	}
 	return out

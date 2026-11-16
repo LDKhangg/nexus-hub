@@ -67,7 +67,9 @@ func (r *NoticeRepository) ResolveTarget(ctx context.Context, job relay.NoticeJo
 	if row.WorkspaceID.String() != job.WorkspaceID || source.WorkspaceID != row.WorkspaceID.String() || tenant.ValidateClickUpSource(source) != nil || tenant.ValidateTelegramTarget(source, target) != nil {
 		return invalid()
 	}
-	config, err := tenant.ParseTelegramTargetConfig(target.Config)
+	// One owner chat per workspace: owner_chat_id, else chat_id.
+	conf := tenant.OwnerTargetConfig(target.Config)
+	config, err := tenant.ParseTelegramTargetConfig(conf)
 	if err != nil {
 		return invalid()
 	}

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `executing-plans` for an assigned task. The role boundaries and sequential handoff process in `AGENTS.md` override generic implementation/TDD instructions. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** DRAFT 2026-11-16. Owner decisions W1–W4 approved (§1.2); waiting for the owner's approval of this plan.
+**Status:** APPROVED by the owner on 2026-11-16 (rev 3; W1–W4). Run end to end with Claude subagents (model chosen per task to save cost, see §6); the Lead self-approves Test Plans and reports when PASS + APPROVE so the owner can merge. Start only after the owner says the other session is done.
 
 **Goal:** The owner's Telegram stops being one mixed stream. Each workspace has its own forum group; inside it every ClickUp task the owner is involved in gets its own topic, a fixed topic holds PR-approve notices, and General holds free chat. Whatever the owner writes inside a topic reaches that task's workflows without typing a workspace or `WF-n` code, and every notice carries a button that jumps to the right topic.
 
@@ -15,7 +15,7 @@
 ## Global Constraints
 
 - Code, documentation and commits are English; owner-facing discussion is Vietnamese.
-- Baseline: `develop` after the Phase 6a merge. Branch `feature/phase6b`. Carry-in from Phase 6a: R-4 (a fast router reply ending with a question pushes the next owner message to the work model) — fix in P3 by making the router end its own replies without a question or by recording which tier answered each exchange. Next migration number is `00025` (Phase 7 then starts at `00026`).
+- Baseline: `develop` at `e08c76f` (Phase 6a + router schema hotfix). Branch `feature/phase6b`. Carry-ins from Phase 6a: test debt `docs/product/test-debt/hotfix-router-schema.md` (TD-RS-1/2, paid by the Batch A Reviewer). Owner decision 2026-11-16: the live finding that the router escalates a plain greeting when chat history is present (VPS log: `route=work router_error=""` for "hi em") and R-4 are **not** fixed in this phase; they are retested after topics give General its own clean conversation (REQ-11), and tuned in a follow-up task only if the retest still fails. Next migration number is `00025` (Phase 7 then starts at `00026`).
 - One handoff at a time per shared working tree. Implementer changes production only; Tester changes tests only; Reviewer is read-only.
 - Lead/Implementer never run `go test`. Checks: `go build ./...`, `go vet ./...`, `gofmt -l cmd internal`, `make generate` (second run clean), `goose -dir db/migrations validate`. The suite runs only in CI.
 - Never edit old migrations or hand-edit sqlc output. New tables are workspace-scoped with composite foreign keys and RLS like their precedents.
@@ -80,6 +80,8 @@ Group "LEAP · Nexus"            (one group per workspace)
 | REQ-7 | Target resolution inside a topic, in order: explicit `WF-n` of this workspace → reply to a bound message → the topic's subject: exactly one active execution bound to it → that one; several → clarification buttons listing only those; none → the assistant with the subject (task id) as context. In General, Phase 6 rules apply unchanged. Commands (`/status`, `/cancel`, `/resume`, `/note`) without an id use the same order. | FR-035, FR-037, FR-041 | P3 |
 | REQ-8 | A ClickUp task URL (or bare task id with `/topic <id>`) in General replies with an "Mở topic" URL button to that task's topic (created if needed, the task must be readable by the workspace's ClickUp source). Reports posted outside their topic (fallback) and `/list` entries carry the same button. | FR-131, FR-040 | P4 |
 | REQ-9 | Lifecycle: a ClickUp status event moving a task to a done/closed status type closes its topic when no execution bound to it is active; when the last active execution ends and the task is already done/closed, the topic closes then. Any new send to a closed topic reopens it first. Closing never deletes. | FR-131 | P4 |
+| REQ-11 | Router retest after topics: at phase end the Lead runs `route-eval` (REQ-13) on the VPS against the General conversation and one task topic and records the result in the completion report. No prompt change in this phase. | FR-043 | P4 |
+| REQ-13 | `nh assistant route-eval --workspace-id <ws> [--file cases.txt]` runs the router prompt on a fixed set of owner messages (with an optional synthetic history) against the configured fast model and prints per case: expected route, got route, tier, router_error, token counts — never the reply text. Exit code ≠ 0 when an expectation fails. Default set covers greetings, thanks, general questions, task/status questions, action requests, follow-ups and design requests. | FR-043, NFR-030 | P4 |
 | REQ-10 | Runbook: enabling Topics, bot rights, setting the group per workspace, `report.topic` values, fallback behavior; CLI `nh telegram topics --workspace-id` lists subject keys, thread ids and states (no names). | NFR-034 | P4 |
 
 ## 3. Domain and interface decisions
@@ -105,6 +107,7 @@ Group "LEAP · Nexus"            (one group per workspace)
 | Migration + storage | `db/migrations/00025_telegram_topics.sql`, `db/query/telegram_topic.sql`, sqlc output, `internal/adapters/storage/telegram_topic_store.go` (new), `conversation_store.go` |
 | Telegram adapter | `internal/adapters/control/telegram/bot.go` (forum methods), `internal/delivery/http/telegram_handler.go` (per-workspace group, thread id) |
 | Routing | new `internal/behavior/topics.go`, `output.go`, `workflow_adapter.go`, `approvals.go`, `internal/agent/workflow_adapter.go` (report path), `cmd/server/wiring.go` |
+| Route-eval | `cmd/setup-notices/` (`assistant route-eval`), read-only use of `internal/behavior/assistant_router.go` |
 | Behavior schema | `internal/behavior/schema.go`, `validate.go`, `examples/behaviors/pr-auto-approve.yaml`, other examples |
 | Resolver + commands | `internal/behavior/workflow_targets.go`, `inbox_worker.go`, `commands.go`, `assistant.go` |
 | Lifecycle | ClickUp status handling (`internal/adapters/sources/clickup/parser.go` consumer side), workflow terminal hook |
@@ -121,22 +124,32 @@ Group "LEAP · Nexus"            (one group per workspace)
 ### P3 — Topic-aware resolution
 **REQ:** 6, 7. Resolver order with topic subject, scoped buttons, assistant context per topic, commands without id. Commit `feat(behavior): resolve follow-ups from the topic they are written in`.
 
-### P4 — Jump links, lifecycle, CLI and runbook
-**REQ:** 8, 9, 10. Task link in General → "Mở topic", buttons on fallback reports and `/list`, close/reopen rules, `nh telegram topics`, runbook. Commit `feat(telegram): topic links and lifecycle`.
+### P4 — Jump links, lifecycle, CLI, route-eval and runbook
+**REQ:** 8, 9, 10, 11, 13. Task link in General → "Mở topic", buttons on fallback reports and `/list`, close/reopen rules, `nh telegram topics`, runbook. Commit `feat(telegram): topic links and lifecycle`.
 
 ## 6. Agent dispatch and evidence gates
 
 ```text
-P1 → P2 → Batch A Tester/CI (storage, races, routing, fallback) → Batch A Reviewer → fixes
+P1 → P2 → Batch A Tester/CI (storage, races, routing, fallback) → Batch A Reviewer (debt TD-RS-1/2 first: review `ea7e25c`) → fixes
 P3 → P4 → Batch B Tester/CI (journeys below) → Batch B Reviewer → fixes
 same-head PASS + APPROVE → completion report → owner turns on Topics → merge (deploys to VPS) after OK → Telegram report
 ```
 
 Journeys for Batch B (fake Bot API): Lead tags the owner on task T → topic "T · …" created, report inside; a second event on T lands in the same topic; owner writes "thêm test" in T's topic with one active WF → instruction v1 to it, nothing else touched; two active WFs on T → buttons with only those two; PR-approve DM → "PR approve" topic; task T closed → topic closed; new tag on T → reopened; bot loses the right → message in General with an "Mở topic" fallback, nothing lost; a message from another workspace's group or another user → ignored.
 
+Agent models (owner: Claude only, pick the cheapest model that fits):
+
+| Work | Agent | Model | Why |
+|---|---|---|---|
+| P1 storage + migration, P2 routing + fallback, P4 links/lifecycle/CLI/runbook | Implementer subagent | Sonnet | clear patterns to follow, moderate risk |
+| P3 topic-aware resolution (isolation, ambiguity, concurrency) | Implementer subagent | Opus | the riskiest logic in the phase |
+| Batch A/B tests | Tester subagent | Sonnet | many cases, follows the brief |
+| Batch A/B review (incl. hotfix debt) | Reviewer subagent | Opus | must find what the others missed |
+| Fix rounds | same session as the original task | same model | keeps context warm |
+
 ## 7. Phase completion gate
 
-- [ ] All REQ-1–10 cases have CI evidence on the final head; no skip, race or panic; the journeys above pass.
+- [ ] All REQ-1–11 and REQ-13 cases have CI evidence on the final head; no skip, race or panic; the journeys above pass.
 - [ ] Reviewer APPROVE on the same head; Critical/Important findings resolved.
 - [ ] Migration validates, generation reproducible, no topic/task names stored or logged.
 - [ ] Lead updates `docs/product/TRACEABILITY.md`, writes `docs/product/reports/<date>-phase6b-report.md`. Merge into `develop` (deploys to the VPS) needs the owner's OK; Topics must be on in the group before the merge.

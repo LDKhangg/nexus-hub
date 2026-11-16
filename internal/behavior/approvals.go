@@ -46,13 +46,13 @@ func (e *Engine) HandleCallback(ctx context.Context, a CallbackAction) (Callback
 		if json.Unmarshal(ap.Options, &options) != nil || a.Data.Option < 0 || a.Data.Option >= len(options) {
 			return CallbackResult{}, ErrNotAvailable
 		}
-		reply, ok, err := e.answer(ctx, ap, chatOf(a.WorkspaceID, a.IntegrationID, a.ChatID), options[a.Data.Option], a.Actor, false)
+		reply, ok, err := e.answer(ctx, ap, chatOfAction(a), options[a.Data.Option], a.Actor, false)
 		if err != nil {
 			return CallbackResult{}, err
 		}
 		return result(reply, ok), nil
 	case CallbackApprove:
-		chat := chatOf(a.WorkspaceID, a.IntegrationID, a.ChatID)
+		chat := chatOfAction(a)
 		switch ap.Kind {
 		case ApprovalPostDraft:
 			reply, ok, err := e.post(ctx, ap, chat, a.Actor)
@@ -81,6 +81,12 @@ func result(reply string, ok bool) CallbackResult {
 	return r
 }
 
+// chatOfAction is the chat and topic a button was pressed in: replies to an
+// inbound update go to the update's own thread.
+func chatOfAction(a CallbackAction) ChatRef {
+	return ChatRef{WorkspaceID: a.WorkspaceID, IntegrationID: a.IntegrationID, ChatID: a.ChatID, ThreadID: a.ThreadID}
+}
+
 func chatOf(ws, integration string, chat int64) ChatRef {
 	return ChatRef{WorkspaceID: ws, IntegrationID: integration, ChatID: chat}
 }
@@ -93,7 +99,7 @@ func (e *Engine) HandleFreeText(ctx context.Context, a FreeTextAnswer) (string, 
 	if text == "" {
 		return "", ErrNotAvailable
 	}
-	chat := chatOf(a.WorkspaceID, a.IntegrationID, a.ChatID)
+	chat := ChatRef{WorkspaceID: a.WorkspaceID, IntegrationID: a.IntegrationID, ChatID: a.ChatID, ThreadID: a.ThreadID}
 	switch ap.Kind {
 	case ApprovalItemAnswer:
 		reply, _, err := e.answer(ctx, ap, chat, text, a.Actor, true)
@@ -129,7 +135,7 @@ func (e *Engine) HandleFreeText(ctx context.Context, a FreeTextAnswer) (string, 
 }
 
 func (e *Engine) aliasFreeText(ctx context.Context, a CallbackAction) (CallbackResult, error) {
-	id, err := e.prompt(ctx, chatOf(a.WorkspaceID, a.IntegrationID, a.ChatID), a.MessageID, "Trả lời bằng tên bạn muốn đặt.")
+	id, err := e.prompt(ctx, chatOfAction(a), a.MessageID, "Trả lời bằng tên bạn muốn đặt.")
 	if err != nil {
 		return CallbackResult{}, err
 	}
@@ -168,7 +174,7 @@ func (e *Engine) rate(ctx context.Context, a CallbackAction) (CallbackResult, er
 	if err != nil {
 		return CallbackResult{Toast: t.thanks()}, nil
 	}
-	chat := chatOf(a.WorkspaceID, a.IntegrationID, a.ChatID)
+	chat := chatOfAction(a)
 	if id, err := e.prompt(ctx, chat, a.MessageID, t.reasonPrompt()); err == nil {
 		_ = e.d.Store.SetReplyMessage(ctx, a.WorkspaceID, fb.ID, id)
 	}
@@ -177,9 +183,8 @@ func (e *Engine) rate(ctx context.Context, a CallbackAction) (CallbackResult, er
 
 // prompt sends a message that opens a reply box and returns its ID.
 func (e *Engine) prompt(ctx context.Context, chat ChatRef, replyTo int64, text string) (int64, error) {
-	sctx, cancel := context.WithTimeout(ctx, e.s.RequestTimeout)
-	defer cancel()
-	return e.d.Messenger.SendMessage(sctx, chat, OutMessage{Text: text, ReplyTo: replyTo, ForceReply: true})
+	id, _, err := e.deliver(ctx, chat, OutMessage{Text: text, ReplyTo: replyTo, ForceReply: true})
+	return id, err
 }
 
 // askFreeText puts an ask in free-text mode: a reply to the prompt it
@@ -191,7 +196,7 @@ func (e *Engine) askFreeText(ctx context.Context, a CallbackAction) (CallbackRes
 		return CallbackResult{}, err
 	}
 	t := textsFor(rc.Doc.Language)
-	id, err := e.prompt(ctx, chatOf(a.WorkspaceID, a.IntegrationID, a.ChatID), a.MessageID, t.replyPrompt())
+	id, err := e.prompt(ctx, chatOfAction(a), a.MessageID, t.replyPrompt())
 	if err != nil {
 		return CallbackResult{}, err
 	}

@@ -99,6 +99,23 @@ type Doc struct {
 	// run-level actions may require with "when".
 	Verdict  *VerdictDoc  `json:"verdict,omitempty" yaml:"verdict,omitempty"`
 	Workflow *WorkflowDoc `json:"workflow,omitempty" yaml:"workflow,omitempty"`
+	// Report says where the owner's Telegram messages of a run go.
+	Report *ReportDoc `json:"report,omitempty" yaml:"report,omitempty"`
+}
+
+// Report topic modes. Any other topic value is a fixed topic name.
+const (
+	ReportTopicTask     = "task"
+	ReportTopicWorkflow = "workflow"
+	ReportTopicGeneral  = "general"
+	// MaxReportTopicBytes caps a fixed topic name.
+	MaxReportTopicBytes = 64
+)
+
+// ReportDoc is the report block of a behavior.
+type ReportDoc struct {
+	// Topic is task (default), workflow, general or a fixed topic name.
+	Topic string `json:"topic,omitempty" yaml:"topic,omitempty"`
 }
 
 // VerdictDoc declares the closed list of verdict labels the model may
