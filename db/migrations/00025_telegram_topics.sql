@@ -42,8 +42,14 @@ COMMENT ON COLUMN public.telegram_updates.message_thread_id IS 'Telegram topic i
 -- +goose Down
 ALTER TABLE public.telegram_updates
     DROP COLUMN message_thread_id;
-DELETE FROM public.conversations c
-WHERE c.thread_id <> 0;
+DELETE FROM public.workflow_instructions
+WHERE conversation_id IN (SELECT id FROM public.conversations WHERE thread_id <> 0);
+DELETE FROM public.conversation_workflows
+WHERE conversation_id IN (SELECT id FROM public.conversations WHERE thread_id <> 0);
+DELETE FROM public.conversation_messages
+WHERE conversation_id IN (SELECT id FROM public.conversations WHERE thread_id <> 0);
+DELETE FROM public.conversations
+WHERE thread_id <> 0;
 ALTER TABLE public.conversations
     DROP CONSTRAINT conversations_workspace_integration_chat_thread_key;
 ALTER TABLE public.conversations
