@@ -58,6 +58,7 @@ type assistantHistoryKey struct {
 	workspaceID   string
 	integrationID string
 	chatID        int64
+	threadID      int64
 }
 
 // chatHistory preserves the original in-package seam for callers without an
@@ -70,12 +71,22 @@ func (a *Assistant) chatHistory(workspaceID string, chatID int64) *assistantHist
 // chatHistoryFor returns the workspace/integration/chat history and whether
 // it was created by this call.
 func (a *Assistant) chatHistoryFor(workspaceID, integrationID string, chatID int64) (*assistantHistory, bool) {
+	return a.threadHistoryFor(workspaceID, integrationID, chatID, 0)
+}
+
+// threadHistoryFor returns the history of one forum topic (threadID > 0) or
+// of the chat's main thread (0), and whether it was created by this call.
+// Each topic keeps its own history, like its own conversation summary.
+func (a *Assistant) threadHistoryFor(workspaceID, integrationID string, chatID, threadID int64) (*assistantHistory, bool) {
+	if threadID < 0 {
+		threadID = 0
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.history == nil {
 		a.history = map[assistantHistoryKey]*assistantHistory{}
 	}
-	key := assistantHistoryKey{workspaceID: workspaceID, integrationID: integrationID, chatID: chatID}
+	key := assistantHistoryKey{workspaceID: workspaceID, integrationID: integrationID, chatID: chatID, threadID: threadID}
 	h := a.history[key]
 	if h == nil {
 		h = &assistantHistory{}

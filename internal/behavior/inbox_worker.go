@@ -66,6 +66,9 @@ type InboxDeps struct {
 	// even when the conversational assistant is disabled.
 	Workflows        workflow.Reader
 	WorkflowCommands workflow.Engine
+	// Topics finds the subject of a forum topic for follow-up resolution.
+	// Nil keeps the Phase 6 rules in every thread.
+	Topics TopicLookup
 }
 
 // InboxWorker processes stored Telegram updates: built-in commands,

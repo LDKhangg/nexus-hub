@@ -203,6 +203,15 @@ func (r *TopicRouter) subject(ctx context.Context, ws string, in TopicIntent) (k
 	return "", ""
 }
 
+// TopicByThread returns the stored topic of one thread of one chat of the
+// workspace, for follow-up resolution; ErrNotFound when unknown.
+func (r *TopicRouter) TopicByThread(ctx context.Context, workspaceID, integrationID string, chatID, threadID int64) (Topic, error) {
+	if r == nil || r.d.Store == nil {
+		return Topic{}, ErrNotFound
+	}
+	return r.d.Store.TopicByThread(ctx, workspaceID, integrationID, chatID, threadID)
+}
+
 // Destination returns base with the ThreadID of the topic for in, creating
 // or reopening the topic on demand. On any failure it returns base itself
 // (General).

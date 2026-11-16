@@ -160,6 +160,7 @@ func run() error {
 		Conversations:    ag.conversations,
 		Workflows:        workflows.store,
 		WorkflowCommands: workflows.commands,
+		Topics:           topics,
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
 	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows}
 	// Telegram updates arrive by webhook, or by long polling when the hub
