@@ -19,6 +19,14 @@ const workerBodyLimit = "64K"
 
 const workerDeviceKey = "worker_device"
 
+// Device tokens are "nhw_" plus 32 random bytes in unpadded base64url
+// (storage.randomWorkerToken). Anything else is refused before the DB.
+const (
+	workerTokenPrefix = "nhw_"
+	workerTokenLen    = len(workerTokenPrefix) + 43
+	authFailureKey    = "auth_failure"
+)
+
 // WorkerHandler serves the local worker API under /worker/v1. Responses never
 // echo tokens, codes or request bodies; errors are fixed strings.
 type WorkerHandler struct {
@@ -26,6 +34,7 @@ type WorkerHandler struct {
 	auth          behavior.WorkerAuthenticator
 	deviceLimiter *tokenBuckets
 	enrollLimiter *tokenBuckets
+	authFailures  *tokenBuckets                    // global budget for failed authentications (R-3)
 	leases        behavior.WorkerLeases            // nil: poll always answers 204
 	instructions  behavior.WorkerInstructionSource // nil: no instructions
 	pollWait      time.Duration                    // long-poll cap (W6)
@@ -37,6 +46,7 @@ func NewWorkerHandler(enroller behavior.WorkerEnroller, auth behavior.WorkerAuth
 		enroller: enroller, auth: auth,
 		deviceLimiter: newTokenBuckets(20, 5, time.Now),
 		enrollLimiter: newTokenBuckets(10, 10.0/60, time.Now),
+		authFailures:  newTokenBuckets(30, 1, time.Now),
 		pollWait:      behavior.WorkerPollMaxWait,
 		pollRecheck:   3 * time.Second,
 	}
@@ -103,18 +113,25 @@ func (h *WorkerHandler) Enroll(c echo.Context) error {
 }
 
 // authenticate requires "Authorization: Bearer <token>" for a live device and
-// applies the per-device rate limit.
+// applies the per-device rate limit. Malformed tokens are refused without a
+// DB call; while the global budget for failed authentications is empty every
+// token lookup is refused with 429.
 func (h *WorkerHandler) authenticate(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		header := c.Request().Header.Get("Authorization")
 		scheme, token, ok := strings.Cut(header, " ")
 		token = strings.TrimSpace(token)
-		if !ok || !strings.EqualFold(scheme, "Bearer") || token == "" {
+		if !ok || !strings.EqualFold(scheme, "Bearer") || !wellFormedWorkerToken(token) {
 			return workerError(c, http.StatusUnauthorized, "unauthorized")
+		}
+		if h.authFailures.empty(authFailureKey) {
+			c.Response().Header().Set("Retry-After", "1")
+			return workerError(c, http.StatusTooManyRequests, "rate limited")
 		}
 		device, err := h.auth.Authenticate(c.Request().Context(), token)
 		if err != nil {
 			if errors.Is(err, behavior.ErrNotFound) {
+				h.authFailures.allow(authFailureKey)
 				return workerError(c, http.StatusUnauthorized, "unauthorized")
 			}
 			return workerError(c, http.StatusInternalServerError, "internal error")
@@ -163,6 +180,19 @@ func workerBodyError(c echo.Context, err error) error {
 	return workerError(c, http.StatusBadRequest, "invalid request")
 }
 
+// wellFormedWorkerToken checks the device token shape without a DB call.
+func wellFormedWorkerToken(token string) bool {
+	if len(token) != workerTokenLen || !strings.HasPrefix(token, workerTokenPrefix) {
+		return false
+	}
+	for _, r := range token[len(workerTokenPrefix):] {
+		if !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 // tokenBuckets is a small in-memory token bucket per key.
 type tokenBuckets struct {
 	mu      sync.Mutex
@@ -203,4 +233,17 @@ func (t *tokenBuckets) allow(key string) bool {
 	}
 	b.tokens--
 	return true
+}
+
+// empty reports whether key has no whole token left, without taking one.
+func (t *tokenBuckets) empty(key string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	b, ok := t.buckets[key]
+	if !ok {
+		return false
+	}
+	now := t.now()
+	tokens := b.tokens + now.Sub(b.last).Seconds()*t.rate
+	return tokens < 1
 }
