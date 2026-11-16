@@ -79,14 +79,14 @@ func (s *p6bStore) byID(id int64) (string, *Topic) {
 	return "", nil
 }
 
-func (s *p6bStore) SetTopicThread(_ context.Context, ws string, id, thread int64) (Topic, error) {
+func (s *p6bStore) SetTopicThread(_ context.Context, ws string, id, thread int64, reservedAt time.Time) (Topic, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.setErr != nil {
 		return Topic{}, s.setErr
 	}
 	_, r := s.byID(id)
-	if r == nil || r.WorkspaceID != ws || r.ThreadID != 0 {
+	if r == nil || r.WorkspaceID != ws || r.ThreadID != 0 || !r.ReservedAt.Equal(reservedAt) {
 		return Topic{}, ErrConflict
 	}
 	r.ThreadID = thread
@@ -787,7 +787,7 @@ func TestPhase6bFallbackMatrix(t *testing.T) {
 	type setup func(e *p6bEnv)
 	preTopic := func(e *p6bEnv, state string) {
 		top, _, _ := e.store.EnsureTopic(ctx, TopicKey{WorkspaceID: p6bWS, IntegrationID: p6bBot, ChatID: p6bChatID, SubjectKind: TopicSubjectClickUpTask, SubjectKey: "FB-1"})
-		_, _ = e.store.SetTopicThread(ctx, p6bWS, top.ID, 77)
+		_, _ = e.store.SetTopicThread(ctx, p6bWS, top.ID, 77, top.ReservedAt)
 		if state == TopicClosed {
 			_, _ = e.store.SetTopicState(ctx, p6bWS, top.ID, TopicClosed)
 		}
@@ -803,9 +803,11 @@ func TestPhase6bFallbackMatrix(t *testing.T) {
 	}{
 		{"not a forum", func(e *p6bEnv) { e.client.createErr = p6bErr("topic_not_forum") }, 0, 1, 1, 0, nil},
 		{"no rights to create", func(e *p6bEnv) { e.client.createErr = p6bErr("topic_no_rights") }, 0, 1, 1, 0, nil},
-		{"create transport error", func(e *p6bEnv) { e.client.createErr = p6bErr("transport") }, 0, 1, 1, 0, nil},
-		{"create timeout", func(e *p6bEnv) { e.client.createErr = context.DeadlineExceeded }, 0, 1, 1, 0, nil},
-		{"create returns no id", func(e *p6bEnv) { e.client.zeroID = true }, 0, 1, 1, 0, nil},
+		{"create transport error keeps the reservation (R3)", func(e *p6bEnv) { e.client.createErr = &relay.DeliveryError{Code: "transport", Retryable: true} }, 0, 1, 1, 1, nil},
+		{"create timeout keeps the reservation (R3)", func(e *p6bEnv) { e.client.createErr = context.DeadlineExceeded }, 0, 1, 1, 1, nil},
+		{"create returns no id keeps the reservation (R3)", func(e *p6bEnv) { e.client.zeroID = true }, 0, 1, 1, 1, nil},
+		{"create rate limited releases (R3)", func(e *p6bEnv) { e.client.createErr = &relay.DeliveryError{Code: "rate_limited", Retryable: true} }, 0, 1, 1, 0, nil},
+		{"create rejected releases (R3)", func(e *p6bEnv) { e.client.createErr = p6bErr("rejected") }, 0, 1, 1, 0, nil},
 		{"no client", func(e *p6bEnv) { e.router.d.Client = nil }, 0, 1, 0, 0, nil},
 		{"store failure", func(e *p6bEnv) { e.store.ensureErr = errors.New("db down") }, 0, 1, 0, 0, nil},
 		{"thread id not stored keeps the message in the topic", func(e *p6bEnv) { e.store.setErr = errors.New("db down") }, 101, 1, 1, 1, nil},

@@ -153,7 +153,11 @@ func migrationDownWithData(t *testing.T, topicDeps bool) {
 	if got := e.count(`SELECT count(*) FROM conversations WHERE id=$1`, general.ID); got != 1 {
 		t.Fatalf("General conversation lost by Down: %d", got)
 	}
-	if got := e.count(`SELECT count(*) FROM conversation_messages WHERE conversation_id=$1`, general.ID); got != 1 {
+	wantMsgs := 1
+	if topicDeps {
+		wantMsgs = 2 // R4: the topic conversation's message is folded into General
+	}
+	if got := e.count(`SELECT count(*) FROM conversation_messages WHERE conversation_id=$1`, general.ID); got != wantMsgs {
 		t.Fatalf("General message lost by Down: %d", got)
 	}
 	if got := e.count(`SELECT count(*) FROM conversations WHERE id=$1`, topicConv.ID); got != 0 {
@@ -221,17 +225,17 @@ func TestPhase6bSetThreadReleaseSemantics(t *testing.T) {
 	if err != nil || !claimed {
 		t.Fatalf("first ensure claimed=%v err=%v", claimed, err)
 	}
-	if _, err := store.SetTopicThread(e.ctx, workspaceB, top.ID, 31); !errors.Is(err, behavior.ErrConflict) {
+	if _, err := store.SetTopicThread(e.ctx, workspaceB, top.ID, 31, top.ReservedAt); !errors.Is(err, behavior.ErrConflict) {
 		t.Fatalf("foreign workspace SetTopicThread err=%v, want ErrConflict", err)
 	}
-	if _, err := store.SetTopicThread(e.ctx, workspaceA, top.ID, 0); !errors.Is(err, behavior.ErrInvalid) {
+	if _, err := store.SetTopicThread(e.ctx, workspaceA, top.ID, 0, top.ReservedAt); !errors.Is(err, behavior.ErrInvalid) {
 		t.Fatalf("thread 0 err=%v, want ErrInvalid", err)
 	}
-	set, err := store.SetTopicThread(e.ctx, workspaceA, top.ID, 31)
+	set, err := store.SetTopicThread(e.ctx, workspaceA, top.ID, 31, top.ReservedAt)
 	if err != nil || set.ThreadID != 31 {
 		t.Fatalf("set=%+v err=%v", set, err)
 	}
-	if _, err := store.SetTopicThread(e.ctx, workspaceA, top.ID, 32); !errors.Is(err, behavior.ErrConflict) {
+	if _, err := store.SetTopicThread(e.ctx, workspaceA, top.ID, 32, top.ReservedAt); !errors.Is(err, behavior.ErrConflict) {
 		t.Fatalf("second SetTopicThread err=%v, want ErrConflict", err)
 	}
 	if got, _ := store.TopicBySubject(e.ctx, k); got.ThreadID != 31 {
@@ -296,7 +300,7 @@ func TestPhase6bLeaseTakeover(t *testing.T) {
 	}
 	// A completed topic is never taken over, however old.
 	top, _ := store.TopicBySubject(e.ctx, k)
-	if _, err := store.SetTopicThread(e.ctx, workspaceA, top.ID, 77); err != nil {
+	if _, err := store.SetTopicThread(e.ctx, workspaceA, top.ID, 77, top.ReservedAt); err != nil {
 		t.Fatal(err)
 	}
 	mustExec(t, e.ctx, e.pool, `UPDATE telegram_topics SET reserved_at = now() - interval '1 day'`)
@@ -311,7 +315,7 @@ func TestPhase6bTopicLookupsAreScoped(t *testing.T) {
 	e, store := topicEnv(t)
 	k := topicKey(behavior.TopicSubjectClickUpTask, "SCOPE")
 	top, _, _ := store.EnsureTopic(e.ctx, k)
-	if _, err := store.SetTopicThread(e.ctx, workspaceA, top.ID, 9); err != nil {
+	if _, err := store.SetTopicThread(e.ctx, workspaceA, top.ID, 9, top.ReservedAt); err != nil {
 		t.Fatal(err)
 	}
 	other := []behavior.TopicKey{k, k, k}
