@@ -79,6 +79,7 @@ const (
 type TaskState struct {
 	ID          string
 	Status      string
+	StatusType  string // ClickUp status type (open, custom, done, closed); may be empty
 	AssigneeIDs []string
 	Name        string // the task title; used only to name a Telegram topic, never stored or logged
 	Description string // ClickUp's plain-text description
@@ -1038,11 +1039,26 @@ func (e *Engine) deliver(ctx context.Context, chat ChatRef, m OutMessage) (int64
 		defer cancel()
 		return e.d.Messenger.SendMessage(sctx, to, m)
 	}
+	// jump adds the "Mở topic" button when the message goes to General
+	// although the subject's topic exists.
+	var intent *TopicIntent
+	jump := func(to ChatRef) {
+		if intent == nil || to.ThreadID != 0 || e.d.Topics == nil {
+			return
+		}
+		jctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.s.RequestTimeout)
+		defer cancel()
+		if b, ok := e.d.Topics.JumpButton(jctx, to, *intent); ok {
+			m = withJumpButton(m, b)
+		}
+	}
 	if chat.topic != nil {
 		in := *chat.topic
+		intent = &in
 		tctx, cancel := context.WithTimeout(ctx, e.s.RequestTimeout)
 		chat = e.d.Topics.Destination(tctx, chat, in)
 		cancel()
+		jump(chat)
 	}
 	id, err := send(chat)
 	if err == nil {
@@ -1054,6 +1070,7 @@ func (e *Engine) deliver(ctx context.Context, chat ChatRef, m OutMessage) (int64
 		cancel()
 		if ok {
 			chat = again
+			jump(chat)
 			id, err = send(chat)
 			if err == nil {
 				e.d.Topics.NoteSent(chat)

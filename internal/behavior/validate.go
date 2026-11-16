@@ -52,7 +52,7 @@ var (
 )
 
 // Engine-reserved command names that a behavior may not take.
-var reservedCommands = map[string]bool{"/help": true, "/trace": true, "/undo": true, "/start": true, "/deep": true}
+var reservedCommands = map[string]bool{"/help": true, "/trace": true, "/undo": true, "/start": true, "/deep": true, "/topic": true}
 
 var triggerTypes = map[string]bool{
 	TriggerTaskStatusChanged: true, TriggerTaskAssigned: true, TriggerCommentAdded: true, TriggerTelegramCommand: true,

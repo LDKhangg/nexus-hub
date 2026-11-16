@@ -111,7 +111,7 @@ func buttons(rows [][]behavior.Button) [][]Button {
 	for i, row := range rows {
 		out[i] = make([]Button, len(row))
 		for j, b := range row {
-			out[i][j] = Button{Text: b.Text, Data: b.Data}
+			out[i][j] = Button{Text: b.Text, Data: b.Data, URL: b.URL}
 		}
 	}
 	return out

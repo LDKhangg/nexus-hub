@@ -161,8 +161,16 @@ func run() error {
 		Workflows:        workflows.store,
 		WorkflowCommands: workflows.commands,
 		Topics:           topics,
+		Links:            topics,
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
-	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows}
+	// A done/closed ClickUp task closes its topic once no execution of it is
+	// active (status events and a periodic sweep).
+	lifecycle, err := buildTopicLifecycle(pool, s, integrations, ag, resolver, messenger, workflows.store, workspaces)
+	if err != nil {
+		return err
+	}
+	notices.SetStatusObserver(lifecycle.StatusChanged)
+	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows, lifecycle}
 	// Telegram updates arrive by webhook, or by long polling when the hub
 	// has no public URL (telegram_mode, see settings.TelegramPolling). Both
 	// paths end in the same handler.

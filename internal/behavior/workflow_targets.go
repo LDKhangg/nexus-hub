@@ -61,6 +61,13 @@ func (w *InboxWorker) workflowOrAssistant(ctx context.Context, u InboundUpdate, 
 		return w.reply(ctx, to, msgAssistantGone, "assistant_text_gone")
 	}
 	trimmed := strings.TrimSpace(text)
+	// A message that is only a ClickUp task link, written in General, gets
+	// the "Mở topic" button of that task's topic.
+	if u.ThreadID == 0 && w.d.Links != nil {
+		if taskID, ok := taskURLRef(trimmed); ok {
+			return w.topicJump(ctx, u, to, taskID)
+		}
+	}
 	// Target order: exactly one explicit WF-n anywhere in the text, then the
 	// reply target, then a clarification. Several references never store.
 	refs := workflow.FindRefs(trimmed)
@@ -455,6 +462,7 @@ func (w *InboxWorker) workflowList(ctx context.Context, u InboundUpdate, to Chat
 		maxPages  = 10
 	)
 	lines := make([]string, 0, listLimit)
+	var listed []int64
 	var before int64
 	for page := 0; page < maxPages && len(lines) < listLimit; page++ {
 		items, next, err := r.ListExecutions(ctx, workflow.ExecutionQuery{WorkspaceID: u.WorkspaceID, BeforeID: before, Limit: listLimit})
@@ -464,6 +472,7 @@ func (w *InboxWorker) workflowList(ctx context.Context, u InboundUpdate, to Chat
 		for _, item := range items {
 			if !item.State.IsTerminal() {
 				lines = append(lines, fmt.Sprintf("%s · %s · %s", workflow.FormatRef(item.ID), oneLine(item.BehaviorName, 60), item.State))
+				listed = append(listed, item.ID)
 				if len(lines) == listLimit {
 					break
 				}
@@ -476,6 +485,9 @@ func (w *InboxWorker) workflowList(ctx context.Context, u InboundUpdate, to Chat
 	}
 	if len(lines) == 0 {
 		return w.reply(ctx, to, "Không có workflow đang hoạt động.", "")
+	}
+	if rows := w.listJumpRows(ctx, u, listed); len(rows) > 0 {
+		return w.replyMessage(ctx, to, OutMessage{Text: strings.Join(lines, "\n"), Buttons: rows}, "")
 	}
 	return w.reply(ctx, to, strings.Join(lines, "\n"), "")
 }

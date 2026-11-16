@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
@@ -67,7 +68,17 @@ func (r *NoticeRepository) ResolveTarget(ctx context.Context, job relay.NoticeJo
 	if row.WorkspaceID.String() != job.WorkspaceID || source.WorkspaceID != row.WorkspaceID.String() || tenant.ValidateClickUpSource(source) != nil || tenant.ValidateTelegramTarget(source, target) != nil {
 		return invalid()
 	}
-	config, err := tenant.ParseTelegramTargetConfig(target.Config)
+	// One owner chat per workspace: owner_chat_id, else chat_id (the same
+	// rule as the relay and inbound updates). A static message_thread_id is
+	// kept as configured.
+	conf := make(map[string]any, len(target.Config)+1)
+	for k, v := range target.Config {
+		conf[k] = v
+	}
+	if chat := tenant.TelegramOwnerChatID(target.Config); chat != 0 {
+		conf["chat_id"] = strconv.FormatInt(chat, 10)
+	}
+	config, err := tenant.ParseTelegramTargetConfig(conf)
 	if err != nil {
 		return invalid()
 	}

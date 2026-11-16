@@ -21,10 +21,12 @@ import (
 // bytes.
 const MaxCallbackData = 64
 
-// Button is one inline keyboard button that sends callback data.
+// Button is one inline keyboard button: it sends callback data, or, when
+// URL is set instead, opens that link.
 type Button struct {
 	Text string
 	Data string
+	URL  string
 }
 
 // MessageOptions are the optional parts of a sendMessage call.
@@ -51,7 +53,8 @@ type WebhookInfo struct {
 
 type inlineButton struct {
 	Text         string `json:"text"`
-	CallbackData string `json:"callback_data"`
+	CallbackData string `json:"callback_data,omitempty"`
+	URL          string `json:"url,omitempty"`
 }
 
 type replyMarkup struct {
@@ -69,6 +72,13 @@ func keyboard(rows [][]Button) ([][]inlineButton, error) {
 		}
 		r := make([]inlineButton, 0, len(row))
 		for _, b := range row {
+			if b.URL != "" {
+				if b.Text == "" || units(b.Text) > 64 || b.Data != "" || len(b.URL) > 512 || !strings.HasPrefix(b.URL, "https://t.me/") || !utf8.ValidString(b.URL) {
+					return nil, errBadButton
+				}
+				r = append(r, inlineButton{Text: b.Text, URL: b.URL})
+				continue
+			}
 			if b.Text == "" || units(b.Text) > 64 || b.Data == "" || len(b.Data) > MaxCallbackData || !utf8.ValidString(b.Data) {
 				return nil, errBadButton
 			}

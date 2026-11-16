@@ -69,6 +69,9 @@ type InboxDeps struct {
 	// Topics finds the subject of a forum topic for follow-up resolution.
 	// Nil keeps the Phase 6 rules in every thread.
 	Topics TopicLookup
+	// Links makes "Mở topic" jump links (a pasted task link, /topic, /list).
+	// Nil turns them off.
+	Links TopicLinks
 }
 
 // InboxWorker processes stored Telegram updates: built-in commands,
@@ -365,6 +368,8 @@ func (w *InboxWorker) command(ctx context.Context, u InboundUpdate, to ChatRef, 
 		return w.reportCommand(hctx, u, to)
 	case "/deep":
 		return w.deepCommand(ctx, u, to, actor, corr)
+	case "/topic":
+		return w.topicCommand(ctx, u, to)
 	case "/status", "/list", "/cancel", "/resume", "/note":
 		return w.workflowControlCommand(hctx, u, to, actor, corr)
 	default:
@@ -383,6 +388,7 @@ func (w *InboxWorker) helpText(ctx context.Context, workspaceID string) string {
 	b.WriteString("Lệnh có sẵn:\n")
 	b.WriteString("/help: danh sách lệnh\n")
 	b.WriteString("/deep <câu hỏi>: hỏi trợ lý bằng mô hình mạnh nhất\n")
+	b.WriteString("/topic <task id hoặc link ClickUp>: nút mở topic của task\n")
 	b.WriteString("/trace <run id hoặc task> [item]: xem một lần chạy\n")
 	b.WriteString("/prefs [short|normal|detailed]: tùy chọn báo cáo\n")
 	b.WriteString("/template <kind> [reset]: mẫu báo cáo\n")

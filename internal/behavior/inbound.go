@@ -245,6 +245,8 @@ type ChatRef struct {
 type Button struct {
 	Text string
 	Data string
+	// URL makes a link button (a topic jump link) instead of a callback.
+	URL string
 }
 
 // OutMessage is a plain-text message with optional inline buttons.

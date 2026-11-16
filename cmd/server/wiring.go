@@ -242,7 +242,7 @@ func (t taskReader) ReadTask(ctx context.Context, workspaceID, tokenRef, taskID 
 	if err != nil {
 		return behavior.TaskState{}, err
 	}
-	return behavior.TaskState{ID: st.ID, Name: st.Name, Status: st.Status, AssigneeIDs: st.AssigneeIDs, Description: st.Description, Markdown: st.Markdown}, nil
+	return behavior.TaskState{ID: st.ID, Name: st.Name, Status: st.Status, StatusType: st.StatusType, AssigneeIDs: st.AssigneeIDs, Description: st.Description, Markdown: st.Markdown}, nil
 }
 
 // ownerChats reaches the owner: through the bot and chat a Telegram command
@@ -311,6 +311,45 @@ func buildTopicRouter(pool *pgxpool.Pool, s settings.Settings, integrations *sto
 		deps.Resources = lister
 	}
 	return behavior.NewTopicRouter(deps)
+}
+
+// buildTopicLifecycle wires the topic lifecycle: it closes the topic of a
+// done/closed ClickUp task once no execution of the task is active. Task
+// status is read only to learn whether the task is done.
+func buildTopicLifecycle(pool *pgxpool.Pool, s settings.Settings, integrations *storage.IntegrationRepository, ag agentServices, resolver *secrets.Resolver, closer behavior.TopicCloser, reader workflow.Reader, workspaces *storage.WorkspaceRepository) (*behavior.TopicLifecycle, error) {
+	store, err := storage.NewTelegramTopicStore(pool)
+	if err != nil {
+		return nil, errors.New("telegram topic store startup failed")
+	}
+	policies := behaviorPolicies{integrations: integrations, known: ag.known}
+	tasks := clickuptools.NewTaskReader(netguard.Client(s.ToolTimeout, netguard.DefaultHosts), resolver)
+	return behavior.NewTopicLifecycle(behavior.TopicLifecycleDeps{
+		Store: store, Closer: closer, Executions: ag.conversations, Reader: reader,
+		CloseStatuses: s.TopicCloseStatuses,
+		Workspaces: func(ctx context.Context) ([]string, error) {
+			var ids []string
+			for offset := int32(0); ; offset += 100 {
+				page, err := workspaces.List(ctx, 100, offset)
+				if err != nil {
+					return nil, err
+				}
+				for _, w := range page {
+					ids = append(ids, w.ID)
+				}
+				if len(page) < 100 {
+					return ids, nil
+				}
+			}
+		},
+		ReadTask: func(ctx context.Context, workspaceID, taskID string) (string, string, error) {
+			cfg, err := policies.RunPolicy(ctx, workspaceID, "")
+			if err != nil {
+				return "", "", err
+			}
+			st, err := tasks.ReadTask(ctx, workspaceID, cfg.ClickUpTokenRef, taskID)
+			return st.Status, st.StatusType, err
+		},
+	})
 }
 
 // behaviorPolicies finds a run's grants: the agent config of the ClickUp

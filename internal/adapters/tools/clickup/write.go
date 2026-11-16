@@ -43,9 +43,12 @@ var (
 
 // TaskState is an exact read of a task for conflict checks.
 type TaskState struct {
-	ID          string
-	Name        string
-	Status      string
+	ID     string
+	Name   string
+	Status string
+	// StatusType is ClickUp's status type (open, custom, done, closed); empty
+	// when ClickUp did not send it.
+	StatusType  string
 	AssigneeIDs []string
 	// Description is ClickUp's plain-text description; Markdown is the
 	// markdown description the engine writes blocks into.
@@ -129,13 +132,13 @@ func (c client) readTask(ctx context.Context, token, taskID string) (TaskState, 
 		Name                string
 		Description         string
 		MarkdownDescription *string `json:"markdown_description"`
-		Status              struct{ Status string }
+		Status              struct{ Status, Type string }
 		Assignees           []struct{ ID any }
 	}
 	if err := json.Unmarshal(data, &task); err != nil || task.ID == "" {
 		return TaskState{}, toolErr("invalid_response", false)
 	}
-	st := TaskState{ID: task.ID, Name: task.Name, Status: task.Status.Status, Description: task.Description}
+	st := TaskState{ID: task.ID, Name: task.Name, Status: task.Status.Status, StatusType: task.Status.Type, Description: task.Description}
 	if task.MarkdownDescription != nil {
 		st.Markdown = *task.MarkdownDescription
 	} else {
