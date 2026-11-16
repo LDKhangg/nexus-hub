@@ -31,6 +31,9 @@ func run(args []string, out io.Writer, lookup func(string) (string, bool)) error
 		defer cancel()
 		return workerEnroll(ctx, args[2:], out, lookup) // laptop side: needs no database
 	}
+	if isWorkerLocal(args) {
+		return workerLocal(args[1:], out, lookup) // laptop side: needs no database
+	}
 	url, ok := lookup("DATABASE_URL")
 	if !ok || url == "" {
 		return errors.New("explicit DATABASE_URL is required")

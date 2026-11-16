@@ -25,7 +25,8 @@ const workerUsage = `usage: worker <command>
   worker devices --workspace-id <uuid> [--json]
   worker revoke --workspace-id <uuid> <name>
   worker jobs --workspace-id <uuid> [--limit n] [--json]
-  worker enroll --hub <url> [--name <device>] [--capabilities a,b]   (laptop; needs no database)`
+  worker enroll --hub <url> [--name <device>] [--capabilities a,b]   (laptop; needs no database)
+  worker run|status|clean [--config <path>]                          (laptop; needs no database)`
 
 var workerNameSanitizeRE = regexp.MustCompile(`[^A-Za-z0-9_.-]+`)
 
