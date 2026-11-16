@@ -75,27 +75,28 @@ func (t *ingestTriggers) ownerClickUpID(ctx context.Context) (string, error) {
 	return v, nil
 }
 
-// start creates the runs one event starts and returns how many were new.
-// Only database errors are returned; an event or behavior that cannot make
-// a run is skipped.
-func (t *ingestTriggers) start(ctx context.Context, e domain.NormalizedEvent) (int, error) {
+// start creates the runs one event starts. created counts new runs only;
+// runs counts every run stored for the event, new or already there from an
+// earlier delivery of the same event. Only database errors are returned;
+// an event or behavior that cannot make a run is skipped.
+func (t *ingestTriggers) start(ctx context.Context, e domain.NormalizedEvent) (created, runs int, err error) {
 	ev, ok := behavior.EventFromNormalized(e)
 	if !ok {
-		return 0, nil
+		return 0, 0, nil
 	}
 	return t.startEvent(ctx, ev)
 }
 
 // startEvent creates the runs one trigger event starts and returns how
-// many were new. Only database errors are returned.
-func (t *ingestTriggers) startEvent(ctx context.Context, ev behavior.Event) (int, error) {
+// many were new and how many exist for it (new or existing). Only database
+// errors are returned.
+func (t *ingestTriggers) startEvent(ctx context.Context, ev behavior.Event) (created, runs int, err error) {
 	if err := t.load(ctx); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if len(t.versions) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
-	created := 0
 	for _, m := range behavior.MatchEvent(ev, t.versions, t.owner) {
 		nr, ok := m.RunFor(ev)
 		if !ok {
@@ -108,14 +109,15 @@ func (t *ingestTriggers) startEvent(ctx context.Context, ev behavior.Event) (int
 			continue
 		}
 		if err != nil {
-			return created, err
+			return created, runs, err
 		}
+		runs++
 		if isNew {
 			created++
 			log.Printf("behavior ingest: run %d created for version %d corr=%s", run.ID, m.Version.ID, run.CorrelationID)
 		}
 	}
-	return created, nil
+	return created, runs, nil
 }
 
 var _ behavior.ChatRunStarter = (*BehaviorStore)(nil)
@@ -141,7 +143,7 @@ func (s *BehaviorStore) StartChatRuns(ctx context.Context, workspaceID string, e
 		if ev.Type != behavior.TriggerChatMessage {
 			continue
 		}
-		n, err := t.startEvent(ctx, ev)
+		n, _, err := t.startEvent(ctx, ev)
 		if err != nil {
 			return 0, err
 		}

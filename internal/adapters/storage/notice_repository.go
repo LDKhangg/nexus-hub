@@ -181,8 +181,10 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 		if e.Metadata["webhook_id"] != config.WebhookID {
 			return result, errors.New("webhook identity mismatch")
 		}
-		// Behavior runs commit with the rest of the callback.
-		started, err := triggers.start(ctx, e)
+		// Behavior runs commit with the rest of the callback. started
+		// counts new runs (accounting); runs also counts runs left by an
+		// earlier delivery of this event, so a redelivery gets no notice.
+		started, runs, err := triggers.start(ctx, e)
 		if err != nil {
 			return result, err
 		}
@@ -204,7 +206,7 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 				}
 				ownerRead = true
 			}
-			if !noticeWanted(e, owner, started) {
+			if !noticeWanted(e, owner, runs) {
 				if started > 0 {
 					result.Accepted++
 				} else {
@@ -291,9 +293,11 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 // through a group mention (everyone, followers, assignees), does; status
 // changes and untagged comments never do. A comment that already started
 // a behavior run (for example mention-report) is reported by that run, so
-// it gets no second notice. With no owner set, nothing is noticed.
-func noticeWanted(e domain.NormalizedEvent, owner string, started int) bool {
-	if e.EventType != domain.EventCommandPosted || started > 0 || owner == "" || e.SenderID == owner {
+// it gets no second notice; runs counts new and existing runs for the
+// event, so a redelivered comment stays silent too. With no owner set,
+// nothing is noticed.
+func noticeWanted(e domain.NormalizedEvent, owner string, runs int) bool {
+	if e.EventType != domain.EventCommandPosted || runs > 0 || owner == "" || e.SenderID == owner {
 		return false
 	}
 	if e.Metadata["tagged_group"] == "true" {
