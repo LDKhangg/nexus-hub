@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -111,7 +112,9 @@ func parseRouterDecision(raw json.RawMessage) (routerDecision, error) {
 	if err := dec.Decode(&out); err != nil {
 		return routerDecision{}, errRouterInvalid
 	}
-	if dec.More() {
+	// Anything but whitespace after the first value is invalid; dec.More
+	// alone misses a stray '}' or ']'.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return routerDecision{}, errRouterInvalid
 	}
 	if out.Route == nil {
