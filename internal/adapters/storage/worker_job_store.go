@@ -101,22 +101,62 @@ func mapWorkerJob(row sqlc.WorkerJob) behavior.WorkerJob {
 	return job
 }
 
-// secretKeySuffixes mark payload keys that look like credentials. The payload
-// must never carry a secret (Global Constraints), so such keys are refused.
-var secretKeySuffixes = []string{
-	"token", "secret", "password", "passwd", "authorization", "api_key", "apikey",
-	"credential", "credentials", "private_key", "cookie", "access_key",
+// secretKeyWords mark payload key segments that look like credentials. The
+// payload must never carry a secret (Global Constraints), so such keys are
+// refused in any position of the key.
+var secretKeyWords = map[string]bool{
+	"token": true, "secret": true, "password": true, "passwd": true, "authorization": true,
+	"credential": true, "credentials": true, "cookie": true, "apikey": true,
+}
+
+// secretKeyPairs are adjacent segments that look like credentials.
+var secretKeyPairs = map[string]bool{
+	"api_key": true, "private_key": true, "access_key": true,
+}
+
+// harmlessAfterToken are words that, right after "token", make it a count.
+var harmlessAfterToken = map[string]bool{"count": true, "limit": true, "usage": true}
+
+// secretKeySegments lowercases a key, turns "-" and camelCase humps into "_"
+// and splits it into segments.
+func secretKeySegments(k string) []string {
+	var b strings.Builder
+	rs := []rune(k)
+	for i, r := range rs {
+		if r >= 'A' && r <= 'Z' && i > 0 && rs[i-1] >= 'a' && rs[i-1] <= 'z' {
+			b.WriteByte('_')
+		}
+		if r == '-' || r == ' ' || r == '.' {
+			r = '_'
+		}
+		b.WriteRune(r)
+	}
+	return strings.FieldsFunc(strings.ToLower(b.String()), func(r rune) bool { return r == '_' })
+}
+
+func keyLooksSecret(k string) bool {
+	segs := secretKeySegments(k)
+	for i, seg := range segs {
+		if i+1 < len(segs) && secretKeyPairs[seg+"_"+segs[i+1]] {
+			return true
+		}
+		if !secretKeyWords[seg] {
+			continue
+		}
+		if seg == "token" && i+1 < len(segs) && harmlessAfterToken[segs[i+1]] {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func payloadHasSecretKey(v any) bool {
 	switch t := v.(type) {
 	case map[string]any:
 		for k, child := range t {
-			key := strings.ReplaceAll(strings.ToLower(k), "-", "_")
-			for _, suf := range secretKeySuffixes {
-				if strings.HasSuffix(key, suf) {
-					return true
-				}
+			if keyLooksSecret(k) {
+				return true
 			}
 			if payloadHasSecretKey(child) {
 				return true
