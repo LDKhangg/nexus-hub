@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `executing-plans` for an assigned task. The role boundaries and sequential handoff process in `AGENTS.md` override generic implementation/TDD instructions. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** DRAFT 2026-11-16 — written for the owner's review. Not approved; nothing is implemented. Open decisions in §1.3.
+**Status:** DRAFT 2026-11-16 — written for the owner's review. Not approved; nothing is implemented. Owner decisions W1–W10 taken (§1.3); waiting for plan approval.
 
 **Goal:** The VPS hub stays the orchestrator (Telegram, ClickUp, GitHub events, approvals, state). Heavy work — clone, edit, build, test, run Claude Code — runs on the owner's laptop when it is online, using the owner's own Claude subscription login and GitHub credentials. From a task topic the owner sends `/task <what to do>`; the laptop does the work in an isolated git worktree, pushes a branch, opens a draft PR from the owner's account, and the result appears in the same topic. When the laptop is offline the job waits and the topic says so.
 
@@ -56,15 +56,15 @@ Owner decisions taken 2026-11-16:
 | W4 | Laptop offline → job waits and the task topic is told; no fallback to the VPS, GitHub Actions or the API key. |
 | W5 | Output: branch + draft PR from the owner's personal account (that account cannot approve its own PR). |
 
-Open, for the owner (recommended option first):
+Owner decisions taken 2026-11-16 (second round):
 
-| ID | Question | Options |
-|---|---|---|
-| W6 | Long-poll vs WebSocket | **a)** HTTPS long-poll, each request ≤ 55 s (under Cloudflare's ~100 s limit), reconnect with backoff · b) WebSocket through the tunnel (fewer requests, more moving parts) |
-| W7 | How long a disconnected job keeps its lease | **a)** heartbeat every 20 s, lease 10 min; after expiry the job becomes `INTERRUPTED`, the topic is told, and the same device may resume it from its worktree within 24 h; afterwards the owner chooses Retry/Cancel · b) lease expiry requeues the job automatically from scratch |
-| W8 | Job size limits | **a)** per job: 60 min wall time, executor turn limit 50, diff ≤ 2,000 changed lines (larger → stop and ask) · b) other numbers (settings, changeable later) |
-| W9 | Which repositories a job may touch | **a)** only repositories registered on the hub (`nh github-repo`) and present under the laptop's `repos_dir` · b) any GitHub repo the owner's `gh` can see |
-| W10 | Where the task's instruction comes from | **a)** the `/task` text plus the ClickUp task (title, description, recent comments) read on the laptop with a read-only ClickUp token stored on the laptop · b) only the `/task` text and the task id (the executor reads ClickUp itself if it has access) |
+| ID | Decision |
+|---|---|
+| W6 | HTTPS long-poll, each request ≤ 55 s (under Cloudflare's ~100 s limit), reconnect with backoff. |
+| W7 | Heartbeat every 20 s, lease 10 min. After expiry the job becomes `INTERRUPTED` and the topic is told; the same device may resume it from its worktree within 24 h; afterwards the owner chooses Retry/Cancel. |
+| W8 | Per job: 60 min wall time, executor turn limit 50, diff ≤ 2,000 changed lines (larger → stop and ask). Settings, changeable later. |
+| W9 | Only repositories registered on the hub (`nh github-repo`). If a registered repo is missing under `repos_dir`, the worker clones it there; existing clones are fetched/pulled before the worktree is made. |
+| W10 | The job instruction = the `/task` text + the ClickUp task (title, description, recent comments) read on the laptop with a read-only ClickUp token stored on the laptop. |
 
 ## 2. Requirements and acceptance
 
@@ -83,7 +83,10 @@ Open, for the owner (recommended option first):
 | REQ-11 | `/task <instruction>` inside a ClickUp task topic starts a built-in workflow `local-task` (Phase 5 engine) with one `worker.run` step for that task; outside a task topic it asks which task (or accepts `/task FC-6583 <instruction>`). The topic shows `WF-n`, the device that took it, progress, and the result with the PR link. Follow-up text in the topic while the job runs is stored as a Phase 6 instruction and delivered to the worker with the next heartbeat. | FR-060, FR-066 | W-4 |
 | REQ-12 | Audit: every lease, heartbeat loss, result and revoke is recorded (device id, job id, times, reason code) and visible in `nh worker jobs` / `nh workflow show WF-n`; no text. | FR-110 | W-1, W-2 |
 | REQ-13 | Security: worker endpoints accept only a valid device token (constant-time hash compare), are rate-limited per device, reject bodies over 64 KiB, and only return jobs of the device's workspace. The job payload never contains a secret; tests prove a revoked token gets 401 on every endpoint. | NFR-019, ARCH-003 | W-1, W-2 |
-| REQ-14 | Runbook section "Local worker (Phase 7a)": install, enroll, run as a user service on Linux/macOS/Windows, `repos_dir`, executor choice, what happens offline, revoke a lost laptop. | — | W-4 |
+| REQ-14 | Runbook section "Local worker (Phase 7a)": install, enroll, run as a user service on Linux/macOS/Windows (`systemd --user` with `loginctl enable-linger`, `Restart=always`), `repos_dir`, executor choice, screen lock vs sleep vs lid close (optional `HandleLidSwitchExternalPower=ignore`, owner's choice), checking that `gh`/`claude` logins work without an unlocked desktop keyring, what happens offline, revoke a lost laptop. | — | W-4 |
+| REQ-15 | Durable local outbox: every progress event and result is first written to a journal under the worker's state directory (fsync) and then sent in order with its idempotency key; on network loss or hub downtime it retries with backoff until accepted. The hub accepts late events and results for an `INTERRUPTED` job from the same device within the W7 resume window and moves the job on; later or foreign ones are rejected and recorded. | FR-068, FR-107, NFR-001 | W-2, W-3 |
+| REQ-16 | Crash and restart recovery on the laptop: on start the worker reads its journal, re-attaches to a job whose lease it still holds (resume in the same worktree) or reports it `failed` with reason `worker_restarted`; an executor crash or non-zero exit becomes a result with a fixed reason code, never a silent stop. | FR-068, E2E-007 | W-3 |
+| REQ-17 | Sleep inhibition: while a job runs the worker holds a system sleep/idle inhibitor (logind on Linux, the platform equivalent elsewhere, best effort) and releases it when the job ends; with no job the machine sleeps normally. The worker never changes system power settings. | FR-063 | W-3 |
 
 ## 3. Interfaces (summary)
 
@@ -98,7 +101,7 @@ Open, for the owner (recommended option first):
 |---|---|---|---|
 | W-1 enrollment, devices, auth, audit, migration 00026 | Medium | Claude Sonnet (implementer limits) | REQ-1, REQ-12, REQ-13 |
 | W-2 lease protocol, presence, capability match, cancellation | Hard | Claude Opus (implementer limits) | REQ-2, REQ-3, REQ-4, REQ-7, REQ-9 |
-| W-3 laptop worker: executor, worktree, push, draft PR, progress, hygiene | Hard | Claude Opus (implementer limits) | REQ-5, REQ-6, REQ-8, REQ-10 |
+| W-3 laptop worker: executor, worktree, push, draft PR, progress, hygiene, outbox, recovery, sleep inhibit | Hard | Claude Opus (implementer limits) | REQ-5, REQ-6, REQ-8, REQ-10, REQ-15, REQ-16, REQ-17 |
 | W-4 `/task`, `local-task` workflow, topic messages, runbook | Medium | Claude Sonnet (implementer limits) | REQ-4, REQ-8, REQ-11, REQ-14 |
 | Batch A tests (W-1, W-2) / Batch B tests (W-3, W-4) | — | Claude Sonnet (tester limits) | fake worker client, fake executor, real handlers + throwaway PostgreSQL |
 | Reviews | — | Claude Opus (reviewer limits) | read-only |
@@ -114,7 +117,7 @@ Dispatch: W-1 → W-2 → Batch A test → review → fixes → W-3 → W-4 → 
 
 ## 6. Phase completion gate
 
-- [ ] All REQ-1–14 cases have CI evidence on the final head; no skip, race or panic.
+- [ ] All REQ-1–17 cases have CI evidence on the final head; no skip, race or panic.
 - [ ] Reviewer APPROVE on the same head; Critical/Important findings resolved.
 - [ ] Live check: the owner's laptop enrolls, takes a `/task` from a task topic, opens a draft PR; offline → waiting message; lid closed mid-job → interrupted/resume path.
 - [ ] Lead updates `docs/product/TRACEABILITY.md`, writes `docs/product/reports/<date>-phase7a-report.md`, sends the report to Telegram; merge after the owner's `/merge`.
