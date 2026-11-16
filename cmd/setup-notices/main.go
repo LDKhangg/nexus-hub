@@ -26,6 +26,11 @@ func run(args []string, out io.Writer, lookup func(string) (string, bool)) error
 	if len(args) > 0 && args[0] == "master-key" {
 		return masterKeyInit(args[1:], out) // needs no database
 	}
+	if len(args) > 1 && args[0] == "worker" && args[1] == "enroll" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		return workerEnroll(ctx, args[2:], out, lookup) // laptop side: needs no database
+	}
 	url, ok := lookup("DATABASE_URL")
 	if !ok || url == "" {
 		return errors.New("explicit DATABASE_URL is required")
@@ -51,7 +56,7 @@ func commandFlags(name string) *flag.FlagSet {
 
 func runCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.Writer, lookup func(string) (string, bool)) error {
 	if len(args) == 0 {
-		return errors.New("usage: setup-notices init|bind-webhook|inspect|retry-failed|master-key|secret|migrate-secrets|settings|enable-agent|disable-agent|github-account|github-repo|github-check|behavior|telegram|trace|runs|profile|memory|llm|source|contact|report-prefs|report-template|workflow|assistant")
+		return errors.New("usage: setup-notices init|bind-webhook|inspect|retry-failed|master-key|secret|migrate-secrets|settings|enable-agent|disable-agent|github-account|github-repo|github-check|behavior|telegram|trace|runs|profile|memory|llm|source|contact|report-prefs|report-template|workflow|assistant|worker")
 	}
 	switch args[0] {
 	case "init":
@@ -80,6 +85,8 @@ func runCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.W
 		return assistantCommand(ctx, pool, args[1:], out, lookup)
 	case "workflow":
 		return workflowCommand(ctx, pool, args[1:], out)
+	case "worker":
+		return workerCommand(ctx, pool, args[1:], out)
 	case "trace":
 		return traceCommand(ctx, pool, args[1:], out)
 	case "runs":

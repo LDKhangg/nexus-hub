@@ -150,8 +150,13 @@ func run() error {
 		}
 		telegramHandler.WithAssistant(assistant.Inbox)
 	}
+	workerStore, err := storage.NewWorkerStore(pool)
+	if err != nil {
+		return errors.New("worker store startup failed")
+	}
 	inbox := behavior.NewInboxWorker(behavior.InboxDeps{
-		Inbox: behaviors, Approvals: behaviors, Defs: behaviors, Messenger: messenger,
+		Workers: workerStore,
+		Inbox:   behaviors, Approvals: behaviors, Defs: behaviors, Messenger: messenger,
 		Commands: commands, Undoer: engine, Callbacks: engine,
 		Tracer:           &behavior.TraceService{Store: behaviors, Profiles: behaviors, People: ag.people},
 		People:           ag.people,
@@ -188,6 +193,7 @@ func run() error {
 	e.Use(middleware.Recover())
 	e.Use(middleware.BodyLimit(bodyLimit))
 	e.Server.ReadHeaderTimeout = 5 * time.Second
+	httpdelivery.NewWorkerHandler(workerStore, workerStore).Register(e)
 	e.POST("/webhook/telegram/:integrationID", telegramHandler.Handle)
 	e.POST("/webhook/:source/:integrationID", handler.HandleWebhook)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

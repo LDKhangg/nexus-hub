@@ -610,6 +610,60 @@ type UserProfile struct {
 	UpdatedAt    pgtype.Timestamptz
 }
 
+// Enrolled local worker devices; only the SHA-256 hash of the device token is stored.
+type WorkerDevice struct {
+	ID           pgtype.UUID
+	WorkspaceID  pgtype.UUID
+	Name         string
+	TokenHash    []byte
+	Capabilities []byte
+	State        string
+	LastSeenAt   pgtype.Timestamptz
+	CreatedAt    pgtype.Timestamptz
+	RevokedAt    pgtype.Timestamptz
+}
+
+// One-time worker enrollment codes; only the SHA-256 hash is stored.
+type WorkerEnrollCode struct {
+	ID          int64
+	WorkspaceID pgtype.UUID
+	CodeHash    []byte
+	ExpiresAt   pgtype.Timestamptz
+	UsedAt      pgtype.Timestamptz
+	CreatedBy   string
+	CreatedAt   pgtype.Timestamptz
+}
+
+// Worker audit trail: fixed kind and reason codes only, no free text.
+type WorkerEvent struct {
+	ID          int64
+	WorkspaceID pgtype.UUID
+	DeviceID    pgtype.UUID
+	JobID       pgtype.UUID
+	Kind        string
+	ReasonCode  string
+	CreatedAt   pgtype.Timestamptz
+}
+
+// Jobs leased to local workers; identifiers, fixed states and the structured result only.
+type WorkerJob struct {
+	ID                   pgtype.UUID
+	WorkspaceID          pgtype.UUID
+	ExecutionID          pgtype.Int8
+	StepID               string
+	RequiredCapabilities []byte
+	State                string
+	DeviceID             pgtype.UUID
+	LeaseTokenHash       []byte
+	LeaseExpiresAt       pgtype.Timestamptz
+	Attempt              int32
+	Result               []byte
+	IdempotencyKey       pgtype.Text
+	CreatedAt            pgtype.Timestamptz
+	UpdatedAt            pgtype.Timestamptz
+	FinishedAt           pgtype.Timestamptz
+}
+
 type WorkflowExecution struct {
 	ID                int64
 	WorkspaceID       pgtype.UUID
