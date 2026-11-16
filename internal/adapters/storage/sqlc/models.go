@@ -659,9 +659,40 @@ type WorkerJob struct {
 	Attempt              int32
 	Result               []byte
 	IdempotencyKey       pgtype.Text
+	Payload              []byte
+	Progress             []byte
+	ProgressSeq          int64
+	LeasedAt             pgtype.Timestamptz
+	InterruptedAt        pgtype.Timestamptz
 	CreatedAt            pgtype.Timestamptz
 	UpdatedAt            pgtype.Timestamptz
 	FinishedAt           pgtype.Timestamptz
+}
+
+// Latest bounded telemetry snapshot per worker device.
+type WorkerTelemetry struct {
+	DeviceID    pgtype.UUID
+	WorkspaceID pgtype.UUID
+	Snapshot    []byte
+	ReceivedAt  pgtype.Timestamptz
+}
+
+// Hourly worker telemetry rollups (30-day retention).
+type WorkerTelemetryHourly struct {
+	DeviceID             pgtype.UUID
+	Hour                 pgtype.Timestamptz
+	WorkspaceID          pgtype.UUID
+	Samples              int32
+	CpuLoadSum           float64
+	CpuLoadMax           pgtype.Float8
+	RamUsedPctMax        pgtype.Float8
+	DiskFreeMinBytes     pgtype.Int8
+	ClaudeSessionLeftMin pgtype.Int2
+	ClaudeWeeklyLeftMin  pgtype.Int2
+	JobsTotal            pgtype.Int8
+	FailuresTotal        pgtype.Int8
+	ExecutorTokensTotal  pgtype.Int8
+	BusySecondsTotal     pgtype.Int8
 }
 
 type WorkflowExecution struct {

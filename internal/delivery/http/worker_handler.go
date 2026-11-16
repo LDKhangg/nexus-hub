@@ -26,6 +26,10 @@ type WorkerHandler struct {
 	auth          behavior.WorkerAuthenticator
 	deviceLimiter *tokenBuckets
 	enrollLimiter *tokenBuckets
+	leases        behavior.WorkerLeases            // nil: poll always answers 204
+	instructions  behavior.WorkerInstructionSource // nil: no instructions
+	pollWait      time.Duration                    // long-poll cap (W6)
+	pollRecheck   time.Duration                    // re-check interval while waiting
 }
 
 func NewWorkerHandler(enroller behavior.WorkerEnroller, auth behavior.WorkerAuthenticator) *WorkerHandler {
@@ -33,7 +37,16 @@ func NewWorkerHandler(enroller behavior.WorkerEnroller, auth behavior.WorkerAuth
 		enroller: enroller, auth: auth,
 		deviceLimiter: newTokenBuckets(20, 5, time.Now),
 		enrollLimiter: newTokenBuckets(10, 10.0/60, time.Now),
+		pollWait:      behavior.WorkerPollMaxWait,
+		pollRecheck:   3 * time.Second,
 	}
+}
+
+// WithLeases enables the lease protocol. instructions may be nil.
+func (h *WorkerHandler) WithLeases(leases behavior.WorkerLeases, instructions behavior.WorkerInstructionSource) *WorkerHandler {
+	h.leases = leases
+	h.instructions = instructions
+	return h
 }
 
 // Register mounts the worker routes. Every route except enroll, including
@@ -42,6 +55,9 @@ func (h *WorkerHandler) Register(e *echo.Echo) {
 	e.POST("/worker/v1/enroll", h.Enroll, middleware.BodyLimit(workerBodyLimit))
 	g := e.Group("/worker/v1", middleware.BodyLimit(workerBodyLimit), h.authenticate)
 	g.POST("/poll", h.Poll)
+	g.POST("/jobs/:id/heartbeat", h.Heartbeat)
+	g.POST("/jobs/:id/progress", h.Progress)
+	g.POST("/jobs/:id/result", h.Result)
 }
 
 func workerError(c echo.Context, status int, msg string) error {
@@ -118,15 +134,19 @@ func WorkerDeviceFrom(c echo.Context) (behavior.WorkerDevice, bool) {
 	return d, ok
 }
 
-// Poll is a stub until the lease protocol lands: no job is available.
-func (h *WorkerHandler) Poll(c echo.Context) error {
-	return c.NoContent(http.StatusNoContent)
+func decodeWorkerBody(c echo.Context, v any) error {
+	return decodeWorkerJSON(c, v, false)
 }
 
-func decodeWorkerBody(c echo.Context, v any) error {
+// decodeWorkerJSON decodes one JSON value; an empty body is allowed only
+// when optional is set.
+func decodeWorkerJSON(c echo.Context, v any, optional bool) error {
 	body := http.MaxBytesReader(c.Response(), c.Request().Body, 64<<10)
 	dec := json.NewDecoder(body)
 	if err := dec.Decode(v); err != nil {
+		if optional && errors.Is(err, io.EOF) {
+			return nil
+		}
 		return err
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {

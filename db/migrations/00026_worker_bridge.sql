@@ -47,21 +47,32 @@ CREATE TABLE public.worker_jobs (
     attempt integer NOT NULL DEFAULT 0 CHECK (attempt >= 0),
     result jsonb CHECK (result IS NULL OR jsonb_typeof(result) = 'object'),
     idempotency_key text CHECK (idempotency_key IS NULL OR octet_length(idempotency_key) <= 128),
+    payload jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(payload) = 'object' AND octet_length(payload::text) <= 16384),
+    progress jsonb CHECK (progress IS NULL OR (jsonb_typeof(progress) = 'object' AND octet_length(progress::text) <= 1024)),
+    progress_seq bigint NOT NULL DEFAULT 0 CHECK (progress_seq >= 0),
+    leased_at timestamptz,
+    interrupted_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     finished_at timestamptz,
     UNIQUE (workspace_id, id),
     FOREIGN KEY (workspace_id, execution_id) REFERENCES public.workflow_executions(workspace_id, id),
-    FOREIGN KEY (workspace_id, device_id) REFERENCES public.worker_devices(workspace_id, id)
+    FOREIGN KEY (workspace_id, device_id) REFERENCES public.worker_devices(workspace_id, id),
+    CHECK (state IN ('WAITING_FOR_WORKER', 'CANCELLED') OR device_id IS NOT NULL)
 );
 CREATE INDEX worker_jobs_state_idx ON public.worker_jobs (workspace_id, state);
+CREATE INDEX worker_jobs_waiting_idx ON public.worker_jobs (workspace_id, created_at, id) WHERE state = 'WAITING_FOR_WORKER';
+CREATE INDEX worker_jobs_lease_expiry_idx ON public.worker_jobs (lease_expires_at) WHERE state IN ('LEASED', 'RUNNING', 'CANCELLING');
+-- One job per device at a time (Phase 7a): a second active lease is a unique violation.
+CREATE UNIQUE INDEX worker_jobs_one_active_per_device ON public.worker_jobs (device_id) WHERE state IN ('LEASED', 'RUNNING', 'CANCELLING');
+CREATE INDEX worker_jobs_recent_idx ON public.worker_jobs (workspace_id, created_at DESC);
 COMMENT ON TABLE public.worker_jobs IS 'Jobs leased to local workers; identifiers, fixed states and the structured result only.';
 ALTER TABLE public.worker_jobs ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE public.worker_events (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     workspace_id uuid NOT NULL REFERENCES public.workspaces(id),
-    device_id uuid NOT NULL,
+    device_id uuid,
     job_id uuid,
     kind text NOT NULL CHECK (kind ~ '^[a-z][a-z0-9_]{0,63}$'),
     reason_code text NOT NULL DEFAULT '' CHECK (reason_code = '' OR reason_code ~ '^[a-z][a-z0-9_]{0,63}$'),
@@ -72,8 +83,47 @@ CREATE TABLE public.worker_events (
 CREATE INDEX worker_events_device_idx ON public.worker_events (workspace_id, device_id, id DESC);
 COMMENT ON TABLE public.worker_events IS 'Worker audit trail: fixed kind and reason codes only, no free text.';
 ALTER TABLE public.worker_events ENABLE ROW LEVEL SECURITY;
+CREATE INDEX worker_events_recent_idx ON public.worker_events (workspace_id, id DESC);
+CREATE INDEX worker_events_job_idx ON public.worker_events (workspace_id, job_id, id DESC) WHERE job_id IS NOT NULL;
+
+-- Latest telemetry snapshot per device (REQ-18): bounded numbers and fixed
+-- codes only; no paths, process lists, hostnames or IP addresses.
+CREATE TABLE public.worker_telemetry (
+    device_id uuid PRIMARY KEY,
+    workspace_id uuid NOT NULL REFERENCES public.workspaces(id),
+    snapshot jsonb NOT NULL CHECK (jsonb_typeof(snapshot) = 'object' AND octet_length(snapshot::text) <= 4096),
+    received_at timestamptz NOT NULL,
+    FOREIGN KEY (workspace_id, device_id) REFERENCES public.worker_devices(workspace_id, id)
+);
+COMMENT ON TABLE public.worker_telemetry IS 'Latest bounded telemetry snapshot per worker device.';
+ALTER TABLE public.worker_telemetry ENABLE ROW LEVEL SECURITY;
+
+-- Hourly telemetry rollups, kept 30 days.
+CREATE TABLE public.worker_telemetry_hourly (
+    device_id uuid NOT NULL,
+    hour timestamptz NOT NULL,
+    workspace_id uuid NOT NULL REFERENCES public.workspaces(id),
+    samples integer NOT NULL DEFAULT 0 CHECK (samples >= 0),
+    cpu_load_sum double precision NOT NULL DEFAULT 0,
+    cpu_load_max double precision,
+    ram_used_pct_max double precision,
+    disk_free_min_bytes bigint,
+    claude_session_left_min smallint,
+    claude_weekly_left_min smallint,
+    jobs_total bigint,
+    failures_total bigint,
+    executor_tokens_total bigint,
+    busy_seconds_total bigint,
+    PRIMARY KEY (device_id, hour),
+    FOREIGN KEY (workspace_id, device_id) REFERENCES public.worker_devices(workspace_id, id)
+);
+CREATE INDEX worker_telemetry_hourly_hour_idx ON public.worker_telemetry_hourly (hour);
+COMMENT ON TABLE public.worker_telemetry_hourly IS 'Hourly worker telemetry rollups (30-day retention).';
+ALTER TABLE public.worker_telemetry_hourly ENABLE ROW LEVEL SECURITY;
 
 -- +goose Down
+DROP TABLE public.worker_telemetry_hourly;
+DROP TABLE public.worker_telemetry;
 DROP TABLE public.worker_events;
 DROP TABLE public.worker_jobs;
 DROP TABLE public.worker_enroll_codes;

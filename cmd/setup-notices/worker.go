@@ -24,6 +24,7 @@ import (
 const workerUsage = `usage: worker <command>
   worker devices --workspace-id <uuid> [--json]
   worker revoke --workspace-id <uuid> <name>
+  worker jobs --workspace-id <uuid> [--limit n] [--json]
   worker enroll --hub <url> [--name <device>] [--capabilities a,b]   (laptop; needs no database)`
 
 var workerNameSanitizeRE = regexp.MustCompile(`[^A-Za-z0-9_.-]+`)
@@ -40,7 +41,13 @@ func workerCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out i
 	f := commandFlags("worker " + args[0])
 	ws := f.String("workspace-id", "", "workspace UUID")
 	asJSON := f.Bool("json", false, "print JSON")
+	limit := f.Int("limit", 20, "rows of jobs and of events (1-200)")
 	switch args[0] {
+	case "jobs":
+		if f.Parse(args[1:]) != nil || f.NArg() != 0 || !tenant.ValidUUID(*ws) || *limit < 1 || *limit > 200 {
+			return errors.New(workerUsage)
+		}
+		return workerJobsCommand(ctx, store, *ws, *limit, *asJSON, out)
 	case "devices":
 		if f.Parse(args[1:]) != nil || f.NArg() != 0 || !tenant.ValidUUID(*ws) {
 			return errors.New(workerUsage)
@@ -244,6 +251,90 @@ func writeWorkerToken(path, token string) error {
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return errors.New("could not write the token file")
+	}
+	return nil
+}
+
+// workerJobsCommand prints recent jobs and audit events: ids, states, fixed
+// codes and times only, never payloads, summaries or instructions.
+func workerJobsCommand(ctx context.Context, store *storage.WorkerStore, ws string, limit int, asJSON bool, out io.Writer) error {
+	jobs, err := store.ListJobs(ctx, ws, limit)
+	if err != nil {
+		return errors.New("database operation failed")
+	}
+	events, err := store.ListEvents(ctx, ws, limit)
+	if err != nil {
+		return errors.New("database operation failed")
+	}
+	devices, err := store.ListDevices(ctx, ws)
+	if err != nil {
+		return errors.New("database operation failed")
+	}
+	names := map[string]string{}
+	for _, d := range devices {
+		names[d.ID] = d.Name
+	}
+	type jobRow struct {
+		ID          string     `json:"id"`
+		State       string     `json:"state"`
+		ExecutionID int64      `json:"execution_id,omitempty"`
+		StepID      string     `json:"step_id,omitempty"`
+		Device      string     `json:"device,omitempty"`
+		Attempt     int        `json:"attempt"`
+		Phase       string     `json:"phase,omitempty"`
+		Status      string     `json:"status,omitempty"`
+		ReasonCode  string     `json:"reason_code,omitempty"`
+		CreatedAt   time.Time  `json:"created_at"`
+		UpdatedAt   time.Time  `json:"updated_at"`
+		FinishedAt  *time.Time `json:"finished_at,omitempty"`
+	}
+	type eventRow struct {
+		ID         int64     `json:"id"`
+		Kind       string    `json:"kind"`
+		ReasonCode string    `json:"reason_code,omitempty"`
+		Device     string    `json:"device,omitempty"`
+		JobID      string    `json:"job_id,omitempty"`
+		CreatedAt  time.Time `json:"created_at"`
+	}
+	jr := make([]jobRow, 0, len(jobs))
+	for _, j := range jobs {
+		r := jobRow{ID: j.ID, State: j.State, ExecutionID: j.ExecutionID, StepID: j.StepID, Device: names[j.DeviceID],
+			Attempt: j.Attempt, CreatedAt: j.CreatedAt, UpdatedAt: j.UpdatedAt, FinishedAt: j.FinishedAt}
+		if j.Progress != nil {
+			r.Phase = j.Progress.Phase
+		}
+		if j.Result != nil {
+			r.Status, r.ReasonCode = j.Result.Status, j.Result.ReasonCode
+		}
+		jr = append(jr, r)
+	}
+	er := make([]eventRow, 0, len(events))
+	for _, e := range events {
+		er = append(er, eventRow{ID: e.ID, Kind: e.Kind, ReasonCode: e.ReasonCode, Device: names[e.DeviceID], JobID: e.JobID, CreatedAt: e.CreatedAt})
+	}
+	if asJSON {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(map[string]any{"jobs": jr, "events": er})
+	}
+	fmt.Fprintln(out, "jobs:")
+	for _, r := range jr {
+		dev := r.Device
+		if dev == "" {
+			dev = "-"
+		}
+		fmt.Fprintf(out, "%s\t%s\tattempt %d\t%s\t%s\t%s\n", r.ID, r.State, r.Attempt, dev, strings.TrimSpace(r.Status+" "+r.ReasonCode), r.UpdatedAt.UTC().Format(time.RFC3339))
+	}
+	fmt.Fprintln(out, "events:")
+	for _, e := range er {
+		dev, job := e.Device, e.JobID
+		if dev == "" {
+			dev = "-"
+		}
+		if job == "" {
+			job = "-"
+		}
+		fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\n", e.CreatedAt.UTC().Format(time.RFC3339), e.Kind, e.ReasonCode, dev, job)
 	}
 	return nil
 }

@@ -58,6 +58,9 @@ type Settings struct {
 	AssistantHistoryTurns                 int64         // recent exchanges sent to the assistant
 	AssistantTimeout                      time.Duration // one assistant answer, tool steps included
 	AssistantRatePerMinute                int64         // assistant messages per chat per minute (runaway guard)
+	WorkerMinClaudeLeft                   int64         // % of a Claude limit a worker needs left to take a job
+	WorkerMinDiskFree                     int64         // bytes free under a worker's repos_dir to take a job
+	WorkerMaxRAMUsed                      int64         // % RAM in use above which a worker takes no job
 }
 
 // Store reads every stored setting.
@@ -153,6 +156,9 @@ var specs = map[string]spec{
 	"assistant_timeout":          {kind: kDuration, def: 180 * time.Second, min: 10, max: 900, set: func(s *Settings, v any) { s.AssistantTimeout = v.(time.Duration) }},
 	"assistant_rate_per_minute":  {kind: kInt, def: int64(30), min: 1, max: 120, set: func(s *Settings, v any) { s.AssistantRatePerMinute = v.(int64) }},
 	"topic_close_statuses":       {kind: kStatusList, def: "complete,closed,done", set: func(s *Settings, v any) { s.TopicCloseStatuses = v.(string) }},
+	"worker_min_claude_left":     {kind: kInt, def: int64(10), min: 0, max: 100, set: func(s *Settings, v any) { s.WorkerMinClaudeLeft = v.(int64) }},
+	"worker_min_disk_free":       {kind: kInt, def: int64(5 << 30), min: 0, max: 1 << 44, set: func(s *Settings, v any) { s.WorkerMinDiskFree = v.(int64) }},
+	"worker_max_ram_used":        {kind: kInt, def: int64(90), min: 1, max: 100, set: func(s *Settings, v any) { s.WorkerMaxRAMUsed = v.(int64) }},
 	"telegram_mode":              {kind: kEnum, def: TelegramModeAuto, enum: []string{TelegramModeAuto, TelegramModeWebhook, TelegramModePoll}, set: func(s *Settings, v any) { s.TelegramMode = v.(string) }},
 }
 

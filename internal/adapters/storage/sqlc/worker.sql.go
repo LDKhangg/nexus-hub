@@ -13,7 +13,11 @@ import (
 
 const authenticateWorkerDevice = `-- name: AuthenticateWorkerDevice :one
 UPDATE public.worker_devices
-SET last_seen_at = now(), state = CASE WHEN state = 'busy' THEN 'busy' ELSE 'online' END
+SET last_seen_at = now(),
+    state = CASE WHEN EXISTS (
+        SELECT 1 FROM public.worker_jobs j
+        WHERE j.device_id = worker_devices.id AND j.state IN ('LEASED', 'RUNNING', 'CANCELLING')
+    ) THEN 'busy' ELSE 'online' END
 WHERE token_hash = $1 AND revoked_at IS NULL
 RETURNING id, workspace_id, name, token_hash, capabilities, state, last_seen_at, created_at, revoked_at
 `
@@ -32,6 +36,53 @@ func (q *Queries) AuthenticateWorkerDevice(ctx context.Context, tokenHash []byte
 		&i.LastSeenAt,
 		&i.CreatedAt,
 		&i.RevokedAt,
+	)
+	return i, err
+}
+
+const cancelWorkerJob = `-- name: CancelWorkerJob :one
+UPDATE public.worker_jobs
+SET state = CASE WHEN state IN ('WAITING_FOR_WORKER', 'INTERRUPTED') THEN 'CANCELLED' ELSE 'CANCELLING' END,
+    finished_at = CASE WHEN state IN ('WAITING_FOR_WORKER', 'INTERRUPTED') THEN $1 ELSE finished_at END,
+    lease_expires_at = CASE WHEN state IN ('WAITING_FOR_WORKER', 'INTERRUPTED') THEN NULL ELSE lease_expires_at END,
+    updated_at = $1
+WHERE workspace_id = $2 AND id = $3
+  AND state IN ('WAITING_FOR_WORKER', 'LEASED', 'RUNNING', 'CANCELLING', 'INTERRUPTED')
+RETURNING id, workspace_id, execution_id, step_id, required_capabilities, state, device_id, lease_token_hash, lease_expires_at, attempt, result, idempotency_key, payload, progress, progress_seq, leased_at, interrupted_at, created_at, updated_at, finished_at
+`
+
+type CancelWorkerJobParams struct {
+	Now         pgtype.Timestamptz
+	WorkspaceID pgtype.UUID
+	ID          pgtype.UUID
+}
+
+// Waiting or interrupted jobs are cancelled at once; leased or running ones
+// become CANCELLING until the worker reports.
+func (q *Queries) CancelWorkerJob(ctx context.Context, arg CancelWorkerJobParams) (WorkerJob, error) {
+	row := q.db.QueryRow(ctx, cancelWorkerJob, arg.Now, arg.WorkspaceID, arg.ID)
+	var i WorkerJob
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepID,
+		&i.RequiredCapabilities,
+		&i.State,
+		&i.DeviceID,
+		&i.LeaseTokenHash,
+		&i.LeaseExpiresAt,
+		&i.Attempt,
+		&i.Result,
+		&i.IdempotencyKey,
+		&i.Payload,
+		&i.Progress,
+		&i.ProgressSeq,
+		&i.LeasedAt,
+		&i.InterruptedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.FinishedAt,
 	)
 	return i, err
 }
@@ -95,6 +146,236 @@ func (q *Queries) CreateWorkerEnrollCode(ctx context.Context, arg CreateWorkerEn
 	return err
 }
 
+const createWorkerJob = `-- name: CreateWorkerJob :one
+
+INSERT INTO public.worker_jobs (workspace_id, execution_id, step_id, required_capabilities, payload)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, workspace_id, execution_id, step_id, required_capabilities, state, device_id, lease_token_hash, lease_expires_at, attempt, result, idempotency_key, payload, progress, progress_seq, leased_at, interrupted_at, created_at, updated_at, finished_at
+`
+
+type CreateWorkerJobParams struct {
+	WorkspaceID          pgtype.UUID
+	ExecutionID          pgtype.Int8
+	StepID               string
+	RequiredCapabilities []byte
+	Payload              []byte
+}
+
+// Jobs (lease protocol, Phase 7a W-2). Payloads hold ids and bounded context
+// only; results are the structured contract.
+func (q *Queries) CreateWorkerJob(ctx context.Context, arg CreateWorkerJobParams) (WorkerJob, error) {
+	row := q.db.QueryRow(ctx, createWorkerJob,
+		arg.WorkspaceID,
+		arg.ExecutionID,
+		arg.StepID,
+		arg.RequiredCapabilities,
+		arg.Payload,
+	)
+	var i WorkerJob
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepID,
+		&i.RequiredCapabilities,
+		&i.State,
+		&i.DeviceID,
+		&i.LeaseTokenHash,
+		&i.LeaseExpiresAt,
+		&i.Attempt,
+		&i.Result,
+		&i.IdempotencyKey,
+		&i.Payload,
+		&i.Progress,
+		&i.ProgressSeq,
+		&i.LeasedAt,
+		&i.InterruptedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
+const deviceHasOtherActiveWorkerJob = `-- name: DeviceHasOtherActiveWorkerJob :one
+SELECT EXISTS (
+    SELECT 1 FROM public.worker_jobs
+    WHERE device_id = $1 AND id <> $2 AND state IN ('LEASED', 'RUNNING', 'CANCELLING')
+)
+`
+
+type DeviceHasOtherActiveWorkerJobParams struct {
+	DeviceID pgtype.UUID
+	JobID    pgtype.UUID
+}
+
+func (q *Queries) DeviceHasOtherActiveWorkerJob(ctx context.Context, arg DeviceHasOtherActiveWorkerJobParams) (bool, error) {
+	row := q.db.QueryRow(ctx, deviceHasOtherActiveWorkerJob, arg.DeviceID, arg.JobID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const expireWorkerLeases = `-- name: ExpireWorkerLeases :many
+UPDATE public.worker_jobs
+SET state = CASE WHEN state = 'CANCELLING' THEN 'CANCELLED' ELSE 'INTERRUPTED' END,
+    interrupted_at = CASE WHEN state = 'CANCELLING' THEN NULL ELSE $1::timestamptz END,
+    finished_at = CASE WHEN state = 'CANCELLING' THEN $1::timestamptz ELSE NULL END,
+    lease_expires_at = NULL, updated_at = $1::timestamptz
+WHERE state IN ('LEASED', 'RUNNING', 'CANCELLING') AND lease_expires_at < $1::timestamptz
+RETURNING id, workspace_id, execution_id, step_id, required_capabilities, state, device_id, lease_token_hash, lease_expires_at, attempt, result, idempotency_key, payload, progress, progress_seq, leased_at, interrupted_at, created_at, updated_at, finished_at
+`
+
+// An expired lease interrupts the job (W7); a job already cancelling is
+// cancelled instead.
+func (q *Queries) ExpireWorkerLeases(ctx context.Context, now pgtype.Timestamptz) ([]WorkerJob, error) {
+	rows, err := q.db.Query(ctx, expireWorkerLeases, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []WorkerJob
+	for rows.Next() {
+		var i WorkerJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.ExecutionID,
+			&i.StepID,
+			&i.RequiredCapabilities,
+			&i.State,
+			&i.DeviceID,
+			&i.LeaseTokenHash,
+			&i.LeaseExpiresAt,
+			&i.Attempt,
+			&i.Result,
+			&i.IdempotencyKey,
+			&i.Payload,
+			&i.Progress,
+			&i.ProgressSeq,
+			&i.LeasedAt,
+			&i.InterruptedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const finishWorkerJob = `-- name: FinishWorkerJob :one
+UPDATE public.worker_jobs
+SET state = $1, result = $2, idempotency_key = $3,
+    lease_expires_at = NULL, interrupted_at = NULL, finished_at = $4, updated_at = $4
+WHERE id = $5
+RETURNING id, workspace_id, execution_id, step_id, required_capabilities, state, device_id, lease_token_hash, lease_expires_at, attempt, result, idempotency_key, payload, progress, progress_seq, leased_at, interrupted_at, created_at, updated_at, finished_at
+`
+
+type FinishWorkerJobParams struct {
+	State          string
+	Result         []byte
+	IdempotencyKey pgtype.Text
+	Now            pgtype.Timestamptz
+	ID             pgtype.UUID
+}
+
+// Records the result. The lease token hash stays so a retried upload with the
+// same idempotency key can be matched.
+func (q *Queries) FinishWorkerJob(ctx context.Context, arg FinishWorkerJobParams) (WorkerJob, error) {
+	row := q.db.QueryRow(ctx, finishWorkerJob,
+		arg.State,
+		arg.Result,
+		arg.IdempotencyKey,
+		arg.Now,
+		arg.ID,
+	)
+	var i WorkerJob
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepID,
+		&i.RequiredCapabilities,
+		&i.State,
+		&i.DeviceID,
+		&i.LeaseTokenHash,
+		&i.LeaseExpiresAt,
+		&i.Attempt,
+		&i.Result,
+		&i.IdempotencyKey,
+		&i.Payload,
+		&i.Progress,
+		&i.ProgressSeq,
+		&i.LeasedAt,
+		&i.InterruptedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
+const getWorkerJob = `-- name: GetWorkerJob :one
+SELECT id, workspace_id, execution_id, step_id, required_capabilities, state, device_id, lease_token_hash, lease_expires_at, attempt, result, idempotency_key, payload, progress, progress_seq, leased_at, interrupted_at, created_at, updated_at, finished_at FROM public.worker_jobs
+WHERE workspace_id = $1 AND id = $2
+`
+
+type GetWorkerJobParams struct {
+	WorkspaceID pgtype.UUID
+	ID          pgtype.UUID
+}
+
+func (q *Queries) GetWorkerJob(ctx context.Context, arg GetWorkerJobParams) (WorkerJob, error) {
+	row := q.db.QueryRow(ctx, getWorkerJob, arg.WorkspaceID, arg.ID)
+	var i WorkerJob
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepID,
+		&i.RequiredCapabilities,
+		&i.State,
+		&i.DeviceID,
+		&i.LeaseTokenHash,
+		&i.LeaseExpiresAt,
+		&i.Attempt,
+		&i.Result,
+		&i.IdempotencyKey,
+		&i.Payload,
+		&i.Progress,
+		&i.ProgressSeq,
+		&i.LeasedAt,
+		&i.InterruptedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
+const getWorkerTelemetry = `-- name: GetWorkerTelemetry :one
+SELECT device_id, workspace_id, snapshot, received_at FROM public.worker_telemetry
+WHERE device_id = $1
+`
+
+func (q *Queries) GetWorkerTelemetry(ctx context.Context, deviceID pgtype.UUID) (WorkerTelemetry, error) {
+	row := q.db.QueryRow(ctx, getWorkerTelemetry, deviceID)
+	var i WorkerTelemetry
+	err := row.Scan(
+		&i.DeviceID,
+		&i.WorkspaceID,
+		&i.Snapshot,
+		&i.ReceivedAt,
+	)
+	return i, err
+}
+
 const insertWorkerEvent = `-- name: InsertWorkerEvent :exec
 INSERT INTO public.worker_events (workspace_id, device_id, job_id, kind, reason_code)
 VALUES ($1, $2, $3, $4, $5)
@@ -117,6 +398,77 @@ func (q *Queries) InsertWorkerEvent(ctx context.Context, arg InsertWorkerEventPa
 		arg.ReasonCode,
 	)
 	return err
+}
+
+const leaseWorkerJob = `-- name: LeaseWorkerJob :one
+WITH candidate AS (
+    SELECT c.id FROM public.worker_jobs c
+    WHERE c.workspace_id = $5
+      AND c.state = 'WAITING_FOR_WORKER'
+      AND c.required_capabilities <@ $6::jsonb
+      AND NOT EXISTS (
+          SELECT 1 FROM public.worker_jobs a
+          WHERE a.device_id = $1 AND a.state IN ('LEASED', 'RUNNING', 'CANCELLING')
+      )
+    ORDER BY c.created_at, c.id
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE public.worker_jobs j
+SET state = 'LEASED', device_id = $1, lease_token_hash = $2,
+    lease_expires_at = $3, attempt = j.attempt + 1, leased_at = $4,
+    interrupted_at = NULL, progress = NULL, progress_seq = 0, updated_at = $4
+FROM candidate
+WHERE j.id = candidate.id AND j.state = 'WAITING_FOR_WORKER'
+RETURNING j.id, j.workspace_id, j.execution_id, j.step_id, j.required_capabilities, j.state, j.device_id, j.lease_token_hash, j.lease_expires_at, j.attempt, j.result, j.idempotency_key, j.payload, j.progress, j.progress_seq, j.leased_at, j.interrupted_at, j.created_at, j.updated_at, j.finished_at
+`
+
+type LeaseWorkerJobParams struct {
+	DeviceID       pgtype.UUID
+	LeaseTokenHash []byte
+	LeaseExpiresAt pgtype.Timestamptz
+	Now            pgtype.Timestamptz
+	WorkspaceID    pgtype.UUID
+	Capabilities   []byte
+}
+
+// Leases the oldest waiting job of the workspace whose required capabilities
+// are a subset of the device's, unless the device already holds an active
+// job. SKIP LOCKED keeps concurrent pollers off the same row; the unique
+// index worker_jobs_one_active_per_device is the last guard.
+func (q *Queries) LeaseWorkerJob(ctx context.Context, arg LeaseWorkerJobParams) (WorkerJob, error) {
+	row := q.db.QueryRow(ctx, leaseWorkerJob,
+		arg.DeviceID,
+		arg.LeaseTokenHash,
+		arg.LeaseExpiresAt,
+		arg.Now,
+		arg.WorkspaceID,
+		arg.Capabilities,
+	)
+	var i WorkerJob
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepID,
+		&i.RequiredCapabilities,
+		&i.State,
+		&i.DeviceID,
+		&i.LeaseTokenHash,
+		&i.LeaseExpiresAt,
+		&i.Attempt,
+		&i.Result,
+		&i.IdempotencyKey,
+		&i.Payload,
+		&i.Progress,
+		&i.ProgressSeq,
+		&i.LeasedAt,
+		&i.InterruptedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.FinishedAt,
+	)
+	return i, err
 }
 
 const listWorkerDevices = `-- name: ListWorkerDevices :many
@@ -155,6 +507,214 @@ func (q *Queries) ListWorkerDevices(ctx context.Context, workspaceID pgtype.UUID
 	return items, nil
 }
 
+const listWorkerEvents = `-- name: ListWorkerEvents :many
+SELECT id, workspace_id, device_id, job_id, kind, reason_code, created_at FROM public.worker_events
+WHERE workspace_id = $1
+ORDER BY id DESC
+LIMIT $2
+`
+
+type ListWorkerEventsParams struct {
+	WorkspaceID pgtype.UUID
+	RowLimit    int32
+}
+
+func (q *Queries) ListWorkerEvents(ctx context.Context, arg ListWorkerEventsParams) ([]WorkerEvent, error) {
+	rows, err := q.db.Query(ctx, listWorkerEvents, arg.WorkspaceID, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []WorkerEvent
+	for rows.Next() {
+		var i WorkerEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.DeviceID,
+			&i.JobID,
+			&i.Kind,
+			&i.ReasonCode,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkerJobs = `-- name: ListWorkerJobs :many
+SELECT id, workspace_id, execution_id, step_id, required_capabilities, state, device_id, lease_token_hash, lease_expires_at, attempt, result, idempotency_key, payload, progress, progress_seq, leased_at, interrupted_at, created_at, updated_at, finished_at FROM public.worker_jobs
+WHERE workspace_id = $1
+ORDER BY created_at DESC, id
+LIMIT $2
+`
+
+type ListWorkerJobsParams struct {
+	WorkspaceID pgtype.UUID
+	RowLimit    int32
+}
+
+func (q *Queries) ListWorkerJobs(ctx context.Context, arg ListWorkerJobsParams) ([]WorkerJob, error) {
+	rows, err := q.db.Query(ctx, listWorkerJobs, arg.WorkspaceID, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []WorkerJob
+	for rows.Next() {
+		var i WorkerJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.ExecutionID,
+			&i.StepID,
+			&i.RequiredCapabilities,
+			&i.State,
+			&i.DeviceID,
+			&i.LeaseTokenHash,
+			&i.LeaseExpiresAt,
+			&i.Attempt,
+			&i.Result,
+			&i.IdempotencyKey,
+			&i.Payload,
+			&i.Progress,
+			&i.ProgressSeq,
+			&i.LeasedAt,
+			&i.InterruptedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkerTelemetry = `-- name: ListWorkerTelemetry :many
+SELECT device_id, workspace_id, snapshot, received_at FROM public.worker_telemetry
+WHERE workspace_id = $1
+`
+
+func (q *Queries) ListWorkerTelemetry(ctx context.Context, workspaceID pgtype.UUID) ([]WorkerTelemetry, error) {
+	rows, err := q.db.Query(ctx, listWorkerTelemetry, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []WorkerTelemetry
+	for rows.Next() {
+		var i WorkerTelemetry
+		if err := rows.Scan(
+			&i.DeviceID,
+			&i.WorkspaceID,
+			&i.Snapshot,
+			&i.ReceivedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockWorkerJob = `-- name: LockWorkerJob :one
+SELECT id, workspace_id, execution_id, step_id, required_capabilities, state, device_id, lease_token_hash, lease_expires_at, attempt, result, idempotency_key, payload, progress, progress_seq, leased_at, interrupted_at, created_at, updated_at, finished_at FROM public.worker_jobs
+WHERE workspace_id = $1 AND id = $2
+FOR UPDATE
+`
+
+type LockWorkerJobParams struct {
+	WorkspaceID pgtype.UUID
+	ID          pgtype.UUID
+}
+
+func (q *Queries) LockWorkerJob(ctx context.Context, arg LockWorkerJobParams) (WorkerJob, error) {
+	row := q.db.QueryRow(ctx, lockWorkerJob, arg.WorkspaceID, arg.ID)
+	var i WorkerJob
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepID,
+		&i.RequiredCapabilities,
+		&i.State,
+		&i.DeviceID,
+		&i.LeaseTokenHash,
+		&i.LeaseExpiresAt,
+		&i.Attempt,
+		&i.Result,
+		&i.IdempotencyKey,
+		&i.Payload,
+		&i.Progress,
+		&i.ProgressSeq,
+		&i.LeasedAt,
+		&i.InterruptedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
+const markWorkerDevicesOffline = `-- name: MarkWorkerDevicesOffline :many
+UPDATE public.worker_devices
+SET state = 'offline'
+WHERE revoked_at IS NULL AND state <> 'offline'
+  AND (last_seen_at IS NULL OR last_seen_at < $1)
+RETURNING id, workspace_id
+`
+
+type MarkWorkerDevicesOfflineRow struct {
+	ID          pgtype.UUID
+	WorkspaceID pgtype.UUID
+}
+
+func (q *Queries) MarkWorkerDevicesOffline(ctx context.Context, cutoff pgtype.Timestamptz) ([]MarkWorkerDevicesOfflineRow, error) {
+	rows, err := q.db.Query(ctx, markWorkerDevicesOffline, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []MarkWorkerDevicesOfflineRow
+	for rows.Next() {
+		var i MarkWorkerDevicesOfflineRow
+		if err := rows.Scan(&i.ID, &i.WorkspaceID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const pruneWorkerTelemetryHourly = `-- name: PruneWorkerTelemetryHourly :execrows
+DELETE FROM public.worker_telemetry_hourly
+WHERE hour < $1
+`
+
+func (q *Queries) PruneWorkerTelemetryHourly(ctx context.Context, before pgtype.Timestamptz) (int64, error) {
+	result, err := q.db.Exec(ctx, pruneWorkerTelemetryHourly, before)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const redeemWorkerEnrollCode = `-- name: RedeemWorkerEnrollCode :one
 UPDATE public.worker_enroll_codes
 SET used_at = now()
@@ -168,6 +728,28 @@ func (q *Queries) RedeemWorkerEnrollCode(ctx context.Context, codeHash []byte) (
 	var workspace_id pgtype.UUID
 	err := row.Scan(&workspace_id)
 	return workspace_id, err
+}
+
+const refreshWorkerDeviceState = `-- name: RefreshWorkerDeviceState :exec
+UPDATE public.worker_devices d
+SET state = CASE
+        WHEN EXISTS (
+            SELECT 1 FROM public.worker_jobs j
+            WHERE j.device_id = d.id AND j.state IN ('LEASED', 'RUNNING', 'CANCELLING')
+        ) THEN 'busy'
+        WHEN d.last_seen_at IS NOT NULL AND d.last_seen_at >= $1::timestamptz THEN 'online'
+        ELSE 'offline' END
+WHERE d.id = $2 AND d.revoked_at IS NULL
+`
+
+type RefreshWorkerDeviceStateParams struct {
+	OnlineAfter pgtype.Timestamptz
+	DeviceID    pgtype.UUID
+}
+
+func (q *Queries) RefreshWorkerDeviceState(ctx context.Context, arg RefreshWorkerDeviceStateParams) error {
+	_, err := q.db.Exec(ctx, refreshWorkerDeviceState, arg.OnlineAfter, arg.DeviceID)
+	return err
 }
 
 const revokeWorkerDevice = `-- name: RevokeWorkerDevice :one
@@ -197,4 +779,186 @@ func (q *Queries) RevokeWorkerDevice(ctx context.Context, arg RevokeWorkerDevice
 		&i.RevokedAt,
 	)
 	return i, err
+}
+
+const updateWorkerJobLease = `-- name: UpdateWorkerJobLease :one
+UPDATE public.worker_jobs
+SET lease_expires_at = $1, state = $2,
+    interrupted_at = NULL, updated_at = $3
+WHERE id = $4
+RETURNING id, workspace_id, execution_id, step_id, required_capabilities, state, device_id, lease_token_hash, lease_expires_at, attempt, result, idempotency_key, payload, progress, progress_seq, leased_at, interrupted_at, created_at, updated_at, finished_at
+`
+
+type UpdateWorkerJobLeaseParams struct {
+	LeaseExpiresAt pgtype.Timestamptz
+	State          string
+	Now            pgtype.Timestamptz
+	ID             pgtype.UUID
+}
+
+// Extends a held lease (heartbeat, progress) and resumes an interrupted job.
+func (q *Queries) UpdateWorkerJobLease(ctx context.Context, arg UpdateWorkerJobLeaseParams) (WorkerJob, error) {
+	row := q.db.QueryRow(ctx, updateWorkerJobLease,
+		arg.LeaseExpiresAt,
+		arg.State,
+		arg.Now,
+		arg.ID,
+	)
+	var i WorkerJob
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepID,
+		&i.RequiredCapabilities,
+		&i.State,
+		&i.DeviceID,
+		&i.LeaseTokenHash,
+		&i.LeaseExpiresAt,
+		&i.Attempt,
+		&i.Result,
+		&i.IdempotencyKey,
+		&i.Payload,
+		&i.Progress,
+		&i.ProgressSeq,
+		&i.LeasedAt,
+		&i.InterruptedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
+const updateWorkerJobProgress = `-- name: UpdateWorkerJobProgress :one
+UPDATE public.worker_jobs
+SET progress = $1, progress_seq = $2, lease_expires_at = $3,
+    state = $4, interrupted_at = NULL, updated_at = $5
+WHERE id = $6
+RETURNING id, workspace_id, execution_id, step_id, required_capabilities, state, device_id, lease_token_hash, lease_expires_at, attempt, result, idempotency_key, payload, progress, progress_seq, leased_at, interrupted_at, created_at, updated_at, finished_at
+`
+
+type UpdateWorkerJobProgressParams struct {
+	Progress       []byte
+	ProgressSeq    int64
+	LeaseExpiresAt pgtype.Timestamptz
+	State          string
+	Now            pgtype.Timestamptz
+	ID             pgtype.UUID
+}
+
+func (q *Queries) UpdateWorkerJobProgress(ctx context.Context, arg UpdateWorkerJobProgressParams) (WorkerJob, error) {
+	row := q.db.QueryRow(ctx, updateWorkerJobProgress,
+		arg.Progress,
+		arg.ProgressSeq,
+		arg.LeaseExpiresAt,
+		arg.State,
+		arg.Now,
+		arg.ID,
+	)
+	var i WorkerJob
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.StepID,
+		&i.RequiredCapabilities,
+		&i.State,
+		&i.DeviceID,
+		&i.LeaseTokenHash,
+		&i.LeaseExpiresAt,
+		&i.Attempt,
+		&i.Result,
+		&i.IdempotencyKey,
+		&i.Payload,
+		&i.Progress,
+		&i.ProgressSeq,
+		&i.LeasedAt,
+		&i.InterruptedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
+const upsertWorkerTelemetry = `-- name: UpsertWorkerTelemetry :exec
+INSERT INTO public.worker_telemetry (device_id, workspace_id, snapshot, received_at)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (device_id) DO UPDATE
+SET snapshot = EXCLUDED.snapshot, received_at = EXCLUDED.received_at
+`
+
+type UpsertWorkerTelemetryParams struct {
+	DeviceID    pgtype.UUID
+	WorkspaceID pgtype.UUID
+	Snapshot    []byte
+	ReceivedAt  pgtype.Timestamptz
+}
+
+func (q *Queries) UpsertWorkerTelemetry(ctx context.Context, arg UpsertWorkerTelemetryParams) error {
+	_, err := q.db.Exec(ctx, upsertWorkerTelemetry,
+		arg.DeviceID,
+		arg.WorkspaceID,
+		arg.Snapshot,
+		arg.ReceivedAt,
+	)
+	return err
+}
+
+const upsertWorkerTelemetryHourly = `-- name: UpsertWorkerTelemetryHourly :exec
+INSERT INTO public.worker_telemetry_hourly (
+    device_id, hour, workspace_id, samples, cpu_load_sum, cpu_load_max, ram_used_pct_max,
+    disk_free_min_bytes, claude_session_left_min, claude_weekly_left_min,
+    jobs_total, failures_total, executor_tokens_total, busy_seconds_total)
+VALUES (
+    $1, $2, $3, 1, COALESCE($4::double precision, 0),
+    $4::double precision, $5::double precision, $6::bigint,
+    $7::smallint, $8::smallint,
+    $9::bigint, $10::bigint, $11::bigint, $12::bigint)
+ON CONFLICT (device_id, hour) DO UPDATE SET
+    samples = worker_telemetry_hourly.samples + 1,
+    cpu_load_sum = worker_telemetry_hourly.cpu_load_sum + COALESCE(EXCLUDED.cpu_load_max, 0),
+    cpu_load_max = GREATEST(worker_telemetry_hourly.cpu_load_max, EXCLUDED.cpu_load_max),
+    ram_used_pct_max = GREATEST(worker_telemetry_hourly.ram_used_pct_max, EXCLUDED.ram_used_pct_max),
+    disk_free_min_bytes = LEAST(worker_telemetry_hourly.disk_free_min_bytes, EXCLUDED.disk_free_min_bytes),
+    claude_session_left_min = LEAST(worker_telemetry_hourly.claude_session_left_min, EXCLUDED.claude_session_left_min),
+    claude_weekly_left_min = LEAST(worker_telemetry_hourly.claude_weekly_left_min, EXCLUDED.claude_weekly_left_min),
+    jobs_total = GREATEST(worker_telemetry_hourly.jobs_total, EXCLUDED.jobs_total),
+    failures_total = GREATEST(worker_telemetry_hourly.failures_total, EXCLUDED.failures_total),
+    executor_tokens_total = GREATEST(worker_telemetry_hourly.executor_tokens_total, EXCLUDED.executor_tokens_total),
+    busy_seconds_total = GREATEST(worker_telemetry_hourly.busy_seconds_total, EXCLUDED.busy_seconds_total)
+`
+
+type UpsertWorkerTelemetryHourlyParams struct {
+	DeviceID            pgtype.UUID
+	Hour                pgtype.Timestamptz
+	WorkspaceID         pgtype.UUID
+	CpuLoad             pgtype.Float8
+	RamUsedPct          pgtype.Float8
+	DiskFreeBytes       pgtype.Int8
+	ClaudeSessionLeft   pgtype.Int2
+	ClaudeWeeklyLeft    pgtype.Int2
+	JobsTotal           pgtype.Int8
+	FailuresTotal       pgtype.Int8
+	ExecutorTokensTotal pgtype.Int8
+	BusySecondsTotal    pgtype.Int8
+}
+
+func (q *Queries) UpsertWorkerTelemetryHourly(ctx context.Context, arg UpsertWorkerTelemetryHourlyParams) error {
+	_, err := q.db.Exec(ctx, upsertWorkerTelemetryHourly,
+		arg.DeviceID,
+		arg.Hour,
+		arg.WorkspaceID,
+		arg.CpuLoad,
+		arg.RamUsedPct,
+		arg.DiskFreeBytes,
+		arg.ClaudeSessionLeft,
+		arg.ClaudeWeeklyLeft,
+		arg.JobsTotal,
+		arg.FailuresTotal,
+		arg.ExecutorTokensTotal,
+		arg.BusySecondsTotal,
+	)
+	return err
 }

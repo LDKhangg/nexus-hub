@@ -154,6 +154,9 @@ func run() error {
 	if err != nil {
 		return errors.New("worker store startup failed")
 	}
+	workerStore.SetAssignmentThresholds(behavior.WorkerThresholds{
+		MinClaudeLeftPct: s.WorkerMinClaudeLeft, MinDiskFreeBytes: s.WorkerMinDiskFree, MaxRAMUsedPct: s.WorkerMaxRAMUsed,
+	})
 	inbox := behavior.NewInboxWorker(behavior.InboxDeps{
 		Workers: workerStore,
 		Inbox:   behaviors, Approvals: behaviors, Defs: behaviors, Messenger: messenger,
@@ -176,7 +179,7 @@ func run() error {
 	}
 	notices.SetStatusObserver(lifecycle.StatusChanged)
 	topics.OnTaskTopicOpen(lifecycle.TopicReopened)
-	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows, lifecycle}
+	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows, lifecycle, &behavior.WorkerSweeper{Store: workerStore}}
 	// Telegram updates arrive by webhook, or by long polling when the hub
 	// has no public URL (telegram_mode, see settings.TelegramPolling). Both
 	// paths end in the same handler.
@@ -193,7 +196,7 @@ func run() error {
 	e.Use(middleware.Recover())
 	e.Use(middleware.BodyLimit(bodyLimit))
 	e.Server.ReadHeaderTimeout = 5 * time.Second
-	httpdelivery.NewWorkerHandler(workerStore, workerStore).Register(e)
+	httpdelivery.NewWorkerHandler(workerStore, workerStore).WithLeases(workerStore, nil).Register(e)
 	e.POST("/webhook/telegram/:integrationID", telegramHandler.Handle)
 	e.POST("/webhook/:source/:integrationID", handler.HandleWebhook)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

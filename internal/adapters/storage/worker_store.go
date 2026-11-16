@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
@@ -25,13 +26,21 @@ type WorkerStore struct {
 	pool *pgxpool.Pool
 	q    *sqlc.Queries
 	now  func() time.Time
+
+	mu         sync.Mutex
+	changed    chan struct{} // closed and replaced when jobs may be leasable
+	thresholds behavior.WorkerThresholds
+	observer   behavior.WorkerJobObserver
 }
 
 func NewWorkerStore(pool *pgxpool.Pool) (*WorkerStore, error) {
 	if pool == nil {
 		return nil, errors.New("worker store requires pool")
 	}
-	return &WorkerStore{pool: pool, q: sqlc.New(pool), now: time.Now}, nil
+	return &WorkerStore{
+		pool: pool, q: sqlc.New(pool), now: time.Now,
+		changed: make(chan struct{}), thresholds: behavior.DefaultWorkerThresholds,
+	}, nil
 }
 
 var (
