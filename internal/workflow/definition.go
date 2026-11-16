@@ -43,6 +43,11 @@ const (
 
 	StepKindAgentReport = "agent.report"
 
+	// StepKindWorkerRun hands one job to a local worker and waits for it
+	// (Phase 7a). It is internal: only the built-in local-task definition
+	// uses it.
+	StepKindWorkerRun = "worker.run"
+
 	CapabilityInProcess = "in_process"
 
 	NotificationHandlerTelegram = "telegram.message"
@@ -57,6 +62,7 @@ var registeredStepKinds = map[string]bool{
 
 var internalStepKinds = map[string]bool{
 	StepKindAgentTriage: true, StepKindAgentInvestigate: true, StepKindAgentReport: true,
+	StepKindWorkerRun: true,
 }
 
 // IsInternalStepKind reports whether kind is reserved for internal built-in

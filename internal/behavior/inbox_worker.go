@@ -74,6 +74,16 @@ type InboxDeps struct {
 	Links TopicLinks
 	// Workers backs /worker (enroll, list, revoke). Nil answers "not available".
 	Workers WorkerAdmin
+	// WorkerTelemetry adds telemetry to the /worker cards; nil shows "không rõ".
+	WorkerTelemetry WorkerTelemetryReader
+	// LocalTasks backs /task (start a local task, registered repos). Nil
+	// answers "not available".
+	LocalTasks LocalTaskStarter
+	// WorkerJobs backs the Retry and Cancel buttons, /retry and the job line
+	// of /status. Nil turns them off.
+	WorkerJobs WorkerJobControl
+	// WorkerNotifier is told when a retried job waits again. Optional.
+	WorkerNotifier WorkerJobQueued
 }
 
 // InboxWorker processes stored Telegram updates: built-in commands,
@@ -374,6 +384,10 @@ func (w *InboxWorker) command(ctx context.Context, u InboundUpdate, to ChatRef, 
 		return w.topicCommand(ctx, u, to)
 	case "/worker":
 		reply, err = w.workerCommand(hctx, u.WorkspaceID, args, actor)
+	case "/task":
+		return w.taskCommand(ctx, u, to, args)
+	case "/retry":
+		reply, err = w.retryCommand(hctx, u, args)
 	case "/status", "/list", "/cancel", "/resume", "/note":
 		return w.workflowControlCommand(hctx, u, to, actor, corr)
 	default:
@@ -399,7 +413,8 @@ func (w *InboxWorker) helpText(ctx context.Context, workspaceID string) string {
 	b.WriteString("/undo <run id>: hoàn tác một lần chạy")
 	b.WriteString("\n/contacts [tìm kiếm]: danh bạ\n/alias <platform:id> <tên>: đặt tên")
 	b.WriteString("\n/status [WF-id]: trạng thái workflow\n/list: workflow đang hoạt động")
-	b.WriteString("\n/worker enroll|list|revoke <tên>: máy local làm việc")
+	b.WriteString("\n/worker [enroll|list|revoke <tên>]: máy local làm việc")
+	b.WriteString("\n/task [TASK-ID] <yêu cầu>: giao việc cho máy local\n/retry [WF-id]: thử lại việc của máy local")
 	b.WriteString("\n/note [WF-id] <nội dung>: bổ sung yêu cầu\n/cancel [WF-id]: đề nghị huỷ\n/resume [WF-id]: đề nghị tiếp tục")
 	if w.d.Defs == nil {
 		return b.String()
@@ -505,6 +520,12 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 		}
 		return w.workflowTargetCallback(ctx, u, to, data, a, actor, corr)
 	}
+	if a.Kind == ApprovalWorkerJob {
+		if a.Decision != "" || !w.now().Before(a.ExpiresAt) {
+			return msgStale, "stale", true
+		}
+		return w.workerJobCallback(ctx, u, data, a, actor)
+	}
 	if data.Kind.Decides() && (a.Decision != "" || !w.now().Before(a.ExpiresAt)) {
 		return msgStale, "stale", true
 	}
@@ -565,7 +586,7 @@ func (w *InboxWorker) freeText(ctx context.Context, u InboundUpdate, to ChatRef,
 	return w.reply(ctx, to, text, code)
 }
 
-const usageWorker = "Cách dùng: /worker enroll | /worker list | /worker revoke <tên máy>"
+const usageWorker = "Cách dùng: /worker | /worker enroll | /worker list | /worker revoke <tên máy>"
 
 // workerCommand handles /worker enroll|list|revoke. Replies carry the one-time
 // code only on enroll; no token ever passes through chat.
@@ -574,11 +595,13 @@ func (w *InboxWorker) workerCommand(ctx context.Context, workspaceID, args, acto
 		return "", ErrNotAvailable
 	}
 	f := strings.Fields(args)
-	sub := "list"
+	sub := "card"
 	if len(f) > 0 {
 		sub = strings.ToLower(f[0])
 	}
 	switch {
+	case sub == "card" && len(f) == 0:
+		return w.workerCards(ctx, workspaceID)
 	case sub == "enroll" && len(f) <= 1:
 		code, expires, err := w.d.Workers.CreateEnrollCode(ctx, workspaceID, actor)
 		if err != nil {

@@ -121,7 +121,46 @@ CREATE INDEX worker_telemetry_hourly_hour_idx ON public.worker_telemetry_hourly 
 COMMENT ON TABLE public.worker_telemetry_hourly IS 'Hourly worker telemetry rollups (30-day retention).';
 ALTER TABLE public.worker_telemetry_hourly ENABLE ROW LEVEL SECURITY;
 
+-- Local tasks (W-4): the owner's /task starts the built-in workflow
+-- local_task, whose single worker.run step waits for one worker job. The
+-- route row remembers where the topic messages go and what the job is for;
+-- it holds ids only, never the instruction text.
+ALTER TABLE public.approvals DROP CONSTRAINT approvals_kind_check;
+ALTER TABLE public.approvals ADD CONSTRAINT approvals_kind_check
+    CHECK (kind IN ('item_answer','post_draft','confirm_action','feedback','feedback_reason','contact_alias','assistant_action','workflow_target','worker_job'));
+ALTER TABLE public.behaviors DROP CONSTRAINT behaviors_internal_kind_check;
+ALTER TABLE public.behaviors ADD CONSTRAINT behaviors_internal_kind_check
+    CHECK (internal_kind IS NULL OR internal_kind IN ('agent_comment_pipeline','local_task'));
+
+CREATE TABLE public.worker_task_routes (
+    workspace_id uuid NOT NULL REFERENCES public.workspaces(id),
+    execution_id bigint NOT NULL,
+    integration_id uuid NOT NULL,
+    chat_id bigint NOT NULL,
+    thread_id bigint NOT NULL DEFAULT 0,
+    repo text NOT NULL CHECK (octet_length(repo) BETWEEN 3 AND 200),
+    task_ref text NOT NULL DEFAULT '' CHECK (octet_length(task_ref) <= 64),
+    clickup_task_id text NOT NULL DEFAULT '' CHECK (octet_length(clickup_task_id) <= 64),
+    progress_message_id bigint NOT NULL DEFAULT 0,
+    progress_job_attempt integer NOT NULL DEFAULT 0,
+    waiting_notice text NOT NULL DEFAULT '' CHECK (octet_length(waiting_notice) <= 64),
+    instruction_version bigint NOT NULL DEFAULT 0 CHECK (instruction_version >= 0),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, execution_id),
+    FOREIGN KEY (workspace_id, execution_id) REFERENCES public.workflow_executions(workspace_id, id)
+);
+COMMENT ON TABLE public.worker_task_routes IS 'Where the topic messages of a local task go, and what it works on; ids and counters only.';
+ALTER TABLE public.worker_task_routes ENABLE ROW LEVEL SECURITY;
+
 -- +goose Down
+DROP TABLE public.worker_task_routes;
+DELETE FROM public.approvals WHERE kind IN ('workflow_target','worker_job');
+ALTER TABLE public.approvals DROP CONSTRAINT approvals_kind_check;
+ALTER TABLE public.approvals ADD CONSTRAINT approvals_kind_check
+    CHECK (kind IN ('item_answer','post_draft','confirm_action','feedback','feedback_reason','contact_alias','assistant_action'));
+ALTER TABLE public.behaviors DROP CONSTRAINT behaviors_internal_kind_check;
+ALTER TABLE public.behaviors ADD CONSTRAINT behaviors_internal_kind_check
+    CHECK (internal_kind IS NULL OR internal_kind IN ('agent_comment_pipeline'));
 DROP TABLE public.worker_telemetry_hourly;
 DROP TABLE public.worker_telemetry;
 DROP TABLE public.worker_events;

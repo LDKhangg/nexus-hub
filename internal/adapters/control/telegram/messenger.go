@@ -26,6 +26,7 @@ func NewMessenger(client *Client, integrations IntegrationLookup) *Messenger {
 }
 
 var _ behavior.Messenger = (*Messenger)(nil)
+var _ behavior.MessageEditor = (*Messenger)(nil)
 
 // ControlTokenRef returns the bot token reference of an eligible Telegram
 // control integration in the workspace.
@@ -85,6 +86,16 @@ func (m *Messenger) ReopenTopic(ctx context.Context, to behavior.ChatRef, thread
 		return err
 	}
 	return m.client.ReopenForumTopic(ctx, to.WorkspaceID, ref, chatIDString(to.ChatID), threadID)
+}
+
+// EditMessageText replaces the text of a message the bot sent (the progress
+// message of a local task).
+func (m *Messenger) EditMessageText(ctx context.Context, to behavior.ChatRef, messageID int64, text string) error {
+	ref, err := ControlTokenRef(ctx, m.integrations, to.WorkspaceID, to.IntegrationID)
+	if err != nil {
+		return err
+	}
+	return m.client.EditMessageText(ctx, to.WorkspaceID, ref, chatIDString(to.ChatID), messageID, text, nil)
 }
 
 func (m *Messenger) RemoveButtons(ctx context.Context, to behavior.ChatRef, messageID int64) error {

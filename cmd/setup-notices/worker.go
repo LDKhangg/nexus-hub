@@ -57,25 +57,12 @@ func workerCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out i
 		if err != nil {
 			return errors.New("database operation failed")
 		}
-		type row struct {
-			ID           string     `json:"id"`
-			Name         string     `json:"name"`
-			State        string     `json:"state"`
-			Capabilities []string   `json:"capabilities"`
-			LastSeenAt   *time.Time `json:"last_seen_at"`
-			CreatedAt    time.Time  `json:"created_at"`
-			RevokedAt    *time.Time `json:"revoked_at"`
+		// The same fields as the Telegram /worker card (REQ-18).
+		records, err := store.ListTelemetry(ctx, *ws)
+		if err != nil {
+			return errors.New("database operation failed")
 		}
-		now := time.Now()
-		rows := make([]row, 0, len(devices))
-		for _, d := range devices {
-			caps := d.Capabilities
-			if caps == nil {
-				caps = []string{}
-			}
-			rows = append(rows, row{ID: d.ID, Name: d.Name, State: d.DisplayState(now), Capabilities: caps,
-				LastSeenAt: d.LastSeenAt, CreatedAt: d.CreatedAt, RevokedAt: d.RevokedAt})
-		}
+		rows := behavior.BuildWorkerDeviceInfos(devices, records, time.Now())
 		if *asJSON {
 			enc := json.NewEncoder(out)
 			enc.SetIndent("", "  ")

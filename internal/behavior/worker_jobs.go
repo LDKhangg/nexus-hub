@@ -67,6 +67,7 @@ const (
 	WorkerEventResultPrefix    = "result_" // + status
 	WorkerEventRejected        = "rejected"
 	WorkerEventOffline         = "offline"
+	WorkerEventRetried         = "retried"
 )
 
 // Reason codes of rejected worker requests.

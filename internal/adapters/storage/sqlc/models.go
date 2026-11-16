@@ -669,6 +669,23 @@ type WorkerJob struct {
 	FinishedAt           pgtype.Timestamptz
 }
 
+// Where the topic messages of a local task go, and what it works on; ids and counters only.
+type WorkerTaskRoute struct {
+	WorkspaceID        pgtype.UUID
+	ExecutionID        int64
+	IntegrationID      pgtype.UUID
+	ChatID             int64
+	ThreadID           int64
+	Repo               string
+	TaskRef            string
+	ClickupTaskID      string
+	ProgressMessageID  int64
+	ProgressJobAttempt int32
+	WaitingNotice      string
+	InstructionVersion int64
+	CreatedAt          pgtype.Timestamptz
+}
+
 // Latest bounded telemetry snapshot per worker device.
 type WorkerTelemetry struct {
 	DeviceID    pgtype.UUID
