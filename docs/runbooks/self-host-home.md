@@ -1095,6 +1095,16 @@ back to General while its topic exists carries an **Mở topic** button.
   `/topic <task id or link>`. The bot replies with an **Mở topic** button to
   that task's topic and creates the topic if needed. A task the workspace's
   ClickUp source cannot read gets a short "Không đọc được task" reply.
+- Custom task IDs work too (`/topic FC-6583`, the bare ID in a link, or
+  `https://app.clickup.com/t/<team>/FC-6583`). The hub resolves the custom ID
+  to the canonical task with the link's team, or with the ClickUp source's
+  `clickup_team_id` when the ID is bare; the two must match. The topic is
+  keyed by the canonical task ID, so webhook and behavior messages for the
+  same task land in the same topic.
+- The assistant can do the same from plain words ("tạo topic cho task này
+  <link>", "mở topic FC-6583"): it has the tool `open_task_topic` in the
+  owner's forum group and sends the **Mở topic** button. It changes nothing
+  but the group's topics, so it asks for no confirmation.
 - `/list` in General adds one **WF-n · Mở topic** button for each active
   workflow whose task has a topic.
 - Inside a topic, text without a `WF-n` goes to the task's single active
@@ -1128,6 +1138,19 @@ Prints one JSON object with, per topic, the subject kind and key
 (`clickup_task:<id>`, `workflow:<id>`, `fixed:<name>`), thread id, state
 (`open`, `closed`, or `reserved` while being created), chat and integration
 ids and times. It never prints topic or task names.
+
+### Send a message to the owner chat
+
+```sh
+printf '%s' 'Phase report text' | nh telegram send --workspace-id $WS
+printf '%s' 'Phase report text' | nh telegram send --workspace-id $WS --topic 'Reports'
+```
+
+The text comes from stdin (1 to 4000 characters, plain text, never argv) and
+goes to the workspace's owner chat: General, or the fixed-name topic given by
+`--topic` (created on first use; General when topics are unavailable, shown as
+`"topic":"fallback_general"`). Prints `{"status":"sent","message_id":n}`. The
+text is never logged. Needs `DATABASE_URL` and `NEXUS_MASTER_KEY_FILE`.
 
 ### Check the router (route-eval)
 

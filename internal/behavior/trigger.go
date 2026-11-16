@@ -365,26 +365,47 @@ func containsFold(list []string, v string, fold bool) bool {
 	return false
 }
 
+// TaskRef is a task reference as the owner wrote it: an ID (canonical or
+// custom, such as "FC-6583") and the ClickUp workspace (team) ID of the URL
+// it came from, "" for a bare ID or a URL without a team.
+type TaskRef struct {
+	ID     string
+	TeamID string
+}
+
+// customTaskIDRe matches ClickUp custom task IDs such as "FC-6583".
+var customTaskIDRe = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[0-9]+$`)
+
+// Custom reports whether the ID is a custom task ID, which must be resolved
+// to the canonical ID before use.
+func (r TaskRef) Custom() bool { return customTaskIDRe.MatchString(r.ID) }
+
 // ParseTaskRef reads a ClickUp task ID or task URL
 // (https://app.clickup.com/t/<id> or https://app.clickup.com/t/<team>/<id>).
 func ParseTaskRef(s string) (string, bool) {
+	ref, ok := ParseTaskRefTeam(s)
+	return ref.ID, ok
+}
+
+// ParseTaskRefTeam is ParseTaskRef that also returns the URL's team ID.
+func ParseTaskRefTeam(s string) (TaskRef, bool) {
 	s = strings.TrimSpace(s)
 	if taskIDRe.MatchString(s) {
-		return s, true
+		return TaskRef{ID: s}, true
 	}
 	u, err := url.Parse(s)
 	if err != nil || u.Scheme != "https" || !strings.EqualFold(u.Hostname(), "app.clickup.com") || u.Port() != "" || u.User != nil {
-		return "", false
+		return TaskRef{}, false
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	switch {
 	case len(parts) == 2 && parts[0] == "t":
-		return parts[1], taskIDRe.MatchString(parts[1])
+		return TaskRef{ID: parts[1]}, taskIDRe.MatchString(parts[1])
 	case len(parts) == 3 && parts[0] == "t":
 		if _, err := strconv.ParseUint(parts[1], 10, 64); err != nil {
-			return "", false
+			return TaskRef{}, false
 		}
-		return parts[2], taskIDRe.MatchString(parts[2])
+		return TaskRef{ID: parts[2], TeamID: parts[1]}, taskIDRe.MatchString(parts[2])
 	}
-	return "", false
+	return TaskRef{}, false
 }

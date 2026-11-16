@@ -173,6 +173,28 @@ func (r *TaskReader) ReadTask(ctx context.Context, workspaceID, tokenRef, taskID
 	return r.c.readTask(ctx, token, taskID)
 }
 
+// ResolveCustomID returns the canonical task ID of a custom task ID (such as
+// "FC-6583") of the ClickUp workspace teamID. Errors are *tools.ToolError
+// with safe codes.
+func (r *TaskReader) ResolveCustomID(ctx context.Context, workspaceID, tokenRef, customID, teamID string) (string, error) {
+	if !taskIDRe.MatchString(customID) || !teamIDRe.MatchString(teamID) {
+		return "", toolErr("invalid_input", false)
+	}
+	token, err := r.c.token(ctx, workspaceID, tokenRef)
+	if err != nil {
+		return "", err
+	}
+	data, err := r.c.do(ctx, token, http.MethodGet, "/api/v2/task/"+customID+"?custom_task_ids=true&team_id="+teamID, nil, false)
+	if err != nil {
+		return "", err
+	}
+	var task struct{ ID string }
+	if err := json.Unmarshal(data, &task); err != nil || !taskIDRe.MatchString(task.ID) {
+		return "", toolErr("invalid_response", false)
+	}
+	return task.ID, nil
+}
+
 // decodeStrict decodes a tool input with no unknown field.
 func decodeStrict(raw json.RawMessage, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))

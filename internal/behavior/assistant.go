@@ -471,7 +471,7 @@ func (w *InboxWorker) toolLoop(ctx context.Context, tc domain.ToolCallingProvide
 		turns = append(turns, domain.Turn{Role: m.Role, Text: m.Text})
 	}
 	turns = append(turns, domain.Turn{Role: domain.UserRole, Text: ownerText})
-	tools := w.assistantToolDefs()
+	tools := w.assistantToolDefsFor(job.u)
 	tt := &assistantToolTurn{u: job.u, to: job.to, actor: job.actor, corr: job.corr,
 		ownerText: job.text, workflowID: job.workflowID, proposed: map[string]bool{}}
 	res := assistantTurnResult{model: model}
