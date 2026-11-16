@@ -289,6 +289,7 @@ Hub tools:
 type assistantTurnResult struct {
 	text           string
 	model          string
+	route          string // the usage log's route label (assistant_router.go)
 	usage          domain.Usage
 	cut            bool // the model stopped at its output limit
 	steps          int  // model calls
@@ -358,7 +359,10 @@ func parseAssistantDecision(s string) (assistantDecision, error) {
 // answer. The turn is added to the history only when it succeeds.
 func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistantTurnResult, error) {
 	a := w.d.Assistant
-	res := assistantTurnResult{model: a.Model}
+	res := assistantTurnResult{model: a.Model, route: routeSkip}
+	if job.tier == assistantTierDeep {
+		res.model, res.route = a.deepModel(), routeDeep
+	}
 	p, err := a.Models(ctx, job.u.WorkspaceID)
 	if err != nil || p == nil {
 		return res, errAssistantModel
@@ -377,11 +381,45 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 	}
 	prior := hist.messagesForTurns(a.historyTurns())
 	ownerText := assistantOwnerText(job.text, job.workflowID)
-	if tc, ok := p.(domain.ToolCallingProvider); ok {
-		res, err = w.toolLoop(ctx, tc, job, prior, ownerText)
-	} else {
-		res, err = a.plainTurnWithSystem(ctx, p, prior, ownerText, assistantSystem)
+	// Pick the model. /deep runs on the deep model without the router. A
+	// turn with a resolved workflow target, a provider without native
+	// structured output (the CLI providers) or an unset fast model skips the
+	// router and keeps today's path on assistant_model. Otherwise the router
+	// answers simple messages itself or escalates; any router failure falls
+	// back to assistant_model (fail upward, never a fast answer).
+	model, route := res.model, res.route
+	var (
+		routerUsage domain.Usage
+		routerSteps int
+		answered    bool
+	)
+	if job.tier != assistantTierDeep && job.workflowID <= 0 && a.FastModel != "" {
+		if jp, ok := p.(domain.JSONProvider); ok {
+			d, usage, rerr := a.route(ctx, jp, prior, ownerText)
+			routerUsage, routerSteps = usage, 1
+			switch {
+			case rerr != nil:
+				route = routeWorkFallback
+			case d.route == routeAnswer:
+				res = assistantTurnResult{text: d.reply, model: a.FastModel}
+				route, answered = routeAnswer, true
+			case d.route == routeDeep:
+				model, route = a.deepModel(), routeDeep
+			default:
+				route = routeWork
+			}
+		}
 	}
+	if !answered {
+		if tc, ok := p.(domain.ToolCallingProvider); ok {
+			res, err = w.toolLoop(ctx, tc, job, prior, ownerText, model)
+		} else {
+			res, err = a.plainTurnWithSystem(ctx, p, prior, ownerText, assistantSystem, model)
+		}
+	}
+	res.route = route
+	res.usage.Add(routerUsage)
+	res.steps += routerSteps
 	if err != nil {
 		return res, err
 	}
@@ -394,20 +432,20 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 // plainTurn answers with a provider that has no tool calling: the history
 // and the owner's text, no tools.
 func (a *Assistant) plainTurn(ctx context.Context, p domain.LLMProvider, prior []domain.Message, text string) (assistantTurnResult, error) {
-	return a.plainTurnWithSystem(ctx, p, prior, text, assistantSystem)
+	return a.plainTurnWithSystem(ctx, p, prior, text, assistantSystem, a.Model)
 }
 
-func (a *Assistant) plainTurnWithSystem(ctx context.Context, p domain.LLMProvider, prior []domain.Message, text, system string) (assistantTurnResult, error) {
+func (a *Assistant) plainTurnWithSystem(ctx context.Context, p domain.LLMProvider, prior []domain.Message, text, system, model string) (assistantTurnResult, error) {
 	msgs := append(append([]domain.Message(nil), prior...), domain.Message{Role: domain.UserRole, Text: text})
-	resp, err := p.Generate(ctx, &domain.LLMRequest{Model: a.Model, System: system, MaxTokens: assistantMaxTokens, Messages: msgs, CacheHistory: true})
+	resp, err := p.Generate(ctx, &domain.LLMRequest{Model: model, System: system, MaxTokens: assistantMaxTokens, Messages: msgs, CacheHistory: true})
 	if err != nil || resp == nil {
-		return assistantTurnResult{model: a.Model, steps: 1}, assistantErr(ctx, err)
+		return assistantTurnResult{model: model, steps: 1}, assistantErr(ctx, err)
 	}
-	return assistantTurnResult{text: resp.Text, model: a.Model, usage: resp.Usage, steps: 1}, nil
+	return assistantTurnResult{text: resp.Text, model: model, usage: resp.Usage, steps: 1}, nil
 }
 
 // toolLoop runs the tool-calling loop of one turn.
-func (w *InboxWorker) toolLoop(ctx context.Context, tc domain.ToolCallingProvider, job assistantJob, prior []domain.Message, ownerText string) (assistantTurnResult, error) {
+func (w *InboxWorker) toolLoop(ctx context.Context, tc domain.ToolCallingProvider, job assistantJob, prior []domain.Message, ownerText, model string) (assistantTurnResult, error) {
 	a := w.d.Assistant
 	turns := make([]domain.Turn, 0, len(prior)+1+2*assistantMaxSteps)
 	for _, m := range prior {
@@ -417,14 +455,14 @@ func (w *InboxWorker) toolLoop(ctx context.Context, tc domain.ToolCallingProvide
 	tools := w.assistantToolDefs()
 	tt := &assistantToolTurn{u: job.u, to: job.to, actor: job.actor, corr: job.corr,
 		ownerText: job.text, workflowID: job.workflowID, proposed: map[string]bool{}}
-	res := assistantTurnResult{model: a.Model}
+	res := assistantTurnResult{model: model}
 	for step := 0; step < assistantMaxSteps; step++ {
 		offered := tools
 		if step == assistantMaxSteps-1 {
 			offered = nil // the last step must answer
 		}
 		resp, err := tc.GenerateWithTools(ctx, &domain.ToolRequest{
-			Model: a.Model, System: assistantSystem, MaxTokens: assistantMaxTokens,
+			Model: model, System: assistantSystem, MaxTokens: assistantMaxTokens,
 			Tools: offered, Turns: turns, CacheStatic: true, CacheHistory: true,
 		})
 		res.steps++
@@ -519,6 +557,7 @@ type assistantJob struct {
 	corr       string
 	text       string
 	workflowID int64
+	tier       string // "" lets the router decide; assistantTierDeep is /deep
 	queued     time.Time
 }
 
@@ -543,7 +582,14 @@ func (w *InboxWorker) queueAssistantText(ctx context.Context, u InboundUpdate, t
 }
 
 func (w *InboxWorker) queueAssistantTextForWorkflow(ctx context.Context, u InboundUpdate, to ChatRef, actor, corr, text string, workflowID int64) outcome {
+	return w.queueAssistantJob(ctx, assistantJob{u: u, to: to, actor: actor, corr: corr, text: text, workflowID: workflowID})
+}
+
+// queueAssistantJob checks the chat's rate limit and queues job for the
+// assistant goroutine.
+func (w *InboxWorker) queueAssistantJob(ctx context.Context, job assistantJob) outcome {
 	a := w.d.Assistant
+	u, to := job.u, job.to
 	if a == nil || a.Models == nil {
 		return w.reply(ctx, to, msgHint, "")
 	}
@@ -551,11 +597,16 @@ func (w *InboxWorker) queueAssistantTextForWorkflow(ctx context.Context, u Inbou
 		return w.reply(ctx, to, msgAssistantBusy, "assistant_rate_limited")
 	}
 	select {
-	case w.assistantJobs <- assistantJob{u: u, to: to, actor: actor, corr: corr, text: text, workflowID: workflowID, queued: time.Now()}:
+	case w.assistantJobs <- withQueued(job, time.Now()):
 		return outcome{code: "assistant_queued"}
 	default:
 		return w.reply(ctx, to, msgAssistantOverloaded, "assistant_queue_full")
 	}
+}
+
+func withQueued(job assistantJob, now time.Time) assistantJob {
+	job.queued = now
+	return job
 }
 
 // runAssistant runs queued assistant jobs one at a time until ctx ends.
@@ -617,7 +668,7 @@ func (w *InboxWorker) assistantJob(ctx context.Context, job assistantJob) outcom
 	}
 	notice.Stop()
 	slog.Info("assistant turn",
-		"route", "default",
+		"route", res.route,
 		"model", res.model,
 		"steps", res.steps,
 		"input_tokens", res.usage.Input,

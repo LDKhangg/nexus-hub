@@ -708,7 +708,8 @@ kept separately per workspace and chat, only in memory, and is forgotten when
 Nexus restarts. Messages, prompts, tool inputs/results and answers are never
 logged.
 
-The defaults are model `claude-opus-5-5`, a 180-second turn timeout and 30
+The defaults are model `claude-sonnet-5-5` (see "Assistant models and routing
+(Phase 6a)" below for the fast and deep models), a 180-second turn timeout and 30
 owner messages per chat per minute. Configure them with
 `nh settings set assistant_model <claude-model-id>`,
 `nh settings set assistant_timeout <duration>` and
@@ -950,6 +951,61 @@ Its `instructions` object contains only `count`, `latest_version`, `latest_at`
 and `used_version`; `used_version` is the highest version recorded by an
 `owner_instructions` checkpoint. Instruction text and conversation summaries
 are never printed. All lookups are workspace-scoped.
+
+## Assistant models and routing (Phase 6a)
+
+Free-text messages no longer all go to one large model with every tool. With
+the Anthropic API provider, a first pass on a fast model decides how to answer:
+
+| Setting | Default | Used for |
+|---|---|---|
+| `assistant_fast_model` | `claude-haiku-5-5` | the router; answers simple messages itself |
+| `assistant_model` | `claude-sonnet-5-5` | work: the tool loop with the hub tools |
+| `assistant_deep_model` | `claude-opus-5-5` | hard work, and every `/deep` message |
+| `assistant_history_turns` | `6` (1–20) | recent exchanges sent with each call, after the stored summary |
+
+Set them with `nh settings set <key> <value>`; `nh settings list` shows them.
+The models take the same Claude model ids as `assistant_model`.
+
+Routing rules:
+
+- The router sees the stored summary, the last `assistant_history_turns`
+  exchanges and your message, has no tools, and returns either a short reply
+  or an escalation to `work` or `deep`.
+- It may answer itself only greetings, thanks, acknowledgements and general
+  questions that need no workspace data. Anything about tasks, PRs,
+  workflows, runs, people, reports, status or settings, any request to do or
+  change something, and anything it is unsure about escalates.
+- It fails upward: a router error, timeout, refusal, cut-off or invalid
+  output runs the turn on `assistant_model`, never as a fast answer.
+- Skips: a message that replies to a workflow (a `WF-n` target) and the CLI
+  providers (Claude Code, opencode), which have no native structured-output
+  API call, skip the router and keep the single path on `assistant_model`.
+  Write changes still only run after you press **Làm**.
+- `/deep <câu hỏi>` skips the router and runs the turn on
+  `assistant_deep_model`, through the same queue and rate limit. `/deep`
+  alone replies with a usage hint. Like plain text, its text is held only in
+  memory, never in the update row.
+
+Every answer ends with a small line naming the model that wrote it, for
+example `· haiku`, `· sonnet` or `· opus`. The line is not kept in the
+conversation history sent back to the model.
+
+Each finished turn logs one metadata line, never text:
+
+```text
+msg="assistant turn" route=answer model=claude-haiku-5-5 steps=1 input_tokens=… output_tokens=… cache_read_tokens=… cache_write_tokens=… latency_ms=…
+```
+
+`route` is `answer` (fast reply), `work`, `deep` (router or `/deep`),
+`work_fallback` (the router failed) or `skip` (router not run). Token counts
+include the router call. To estimate cost, sum the tokens per `model` from
+the service log (for example `journalctl --user -u nexus-hub | grep
+'assistant turn'`) and multiply by that model's prices: `input_tokens` at the
+input price, `cache_write_tokens` at the cache-write price,
+`cache_read_tokens` at the much lower cache-read price, and `output_tokens`
+at the output price. A high `cache_read_tokens` share means the cached
+prefix (system prompt, tools and history) is working.
 
 ## Upkeep
 

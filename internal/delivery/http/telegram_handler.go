@@ -283,6 +283,25 @@ func (h *TelegramHandler) WithAssistant(stager AssistantStager) *TelegramHandler
 	return h
 }
 
+// stageDeep keeps the text of "/deep <text>" out of the update row: like
+// plain text, it is staged in memory for the assistant and Args holds only
+// its key. Without an assistant (or when staging fails) Args stays empty.
+func (h *TelegramHandler) stageDeep(workspaceID string, u behavior.InboundUpdate, args string) behavior.InboundUpdate {
+	if args == "" || h.assistant == nil {
+		return u
+	}
+	if utf8.RuneCountInString(args) > 4000 {
+		u.Note = behavior.NoteTextTooLong
+		return u
+	}
+	key, err := h.assistant.StageAssistantText(workspaceID, args, h.now())
+	if err != nil {
+		return u
+	}
+	u.Args = behavior.AssistantTextPrefix + key
+	return u
+}
+
 // isOwner applies the owner rule (see TelegramHandler).
 func (h *TelegramHandler) isOwner(chatID, fromID int64) bool {
 	owner := h.ownerChatID
@@ -344,6 +363,9 @@ func (h *TelegramHandler) normalize(ctx context.Context, workspaceID string, upd
 			}
 			u.Command = name
 			args = strings.TrimSpace(args)
+			if name == "/deep" {
+				return h.stageDeep(workspaceID, u, args), true, nil
+			}
 			if utf8.RuneCountInString(args) > 512 {
 				u.Note = behavior.NoteArgsTooLong
 				return u, true, nil
