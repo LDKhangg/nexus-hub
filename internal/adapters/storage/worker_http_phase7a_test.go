@@ -316,6 +316,7 @@ func TestWorkerHTTP7a_JourneyPollHeartbeat(t *testing.T) {
 	}
 	// Fix Brief A1 (R-1): while still LEASED the holder gets the same job
 	// again with a new lease token; the old token is dead.
+	h.advance(time.Second) // R-5: only a poll started after the lease reissues it
 	re := h.poll(t, tok, 0, nil)
 	if re.code != 200 || re.body["job_id"] != j.ID || re.body["lease_token"] == lt {
 		t.Fatalf("leased device poll: %d %s", re.code, re.raw)

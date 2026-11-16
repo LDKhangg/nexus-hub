@@ -116,6 +116,7 @@ func TestWorkerFix7a_ReissueIgnoresTelemetryBlock(t *testing.T) {
 	if _, ok := e.lease(t, fresh); ok {
 		t.Fatal("control: blocked telemetry still assigned a new job")
 	}
+	e.advance(time.Second) // R-5: only a poll started after the lease reissues it
 	l2 := e.mustLease(t, d)
 	if l2.Job.ID != j.ID || l2.LeaseToken == l1.LeaseToken {
 		t.Fatalf("no reissue under blocking telemetry: %+v", l2.Job)
@@ -131,6 +132,7 @@ func TestWorkerFix7a_HTTPLostResponseRecovered(t *testing.T) {
 	if r1.code != 200 {
 		t.Fatalf("first poll: %d", r1.code)
 	}
+	h.advance(time.Second) // R-5: only a poll started after the lease reissues it
 	r2 := h.poll(t, tok, 0, nil)
 	if r2.code != 200 || r2.body["job_id"] != j.ID || r2.body["lease_token"] == r1.body["lease_token"] || r2.body["attempt"] != r1.body["attempt"] {
 		t.Fatalf("second poll: %d %s", r2.code, r2.raw)
