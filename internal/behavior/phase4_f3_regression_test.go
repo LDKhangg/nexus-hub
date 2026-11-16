@@ -312,7 +312,8 @@ func TestPhase4F3AssistantQueue(t *testing.T) {
 		if out := e.say(t, "chào"); out.code != "assistant_answer" {
 			t.Fatalf("quick: %+v", out)
 		}
-		if got := e.msg.texts(); len(got) != 1 || got[0] != "nhanh" {
+		// Phase 6a REQ-5: each sent answer ends with the model footer.
+		if got := e.msg.texts(); len(got) != 1 || got[0] != "nhanh\n· opus" {
 			t.Fatalf("quick answer sent %q", got)
 		}
 
@@ -347,7 +348,7 @@ func TestPhase4F3AssistantQueue(t *testing.T) {
 		case <-time.After(p4Safety):
 			t.Fatal("job did not finish")
 		}
-		if got := e.msg.texts(); len(got) != 2 || got[0] != msgAssistantWorking || got[1] != "chậm" {
+		if got := e.msg.texts(); len(got) != 2 || got[0] != msgAssistantWorking || got[1] != "chậm\n· opus" {
 			t.Fatalf("slow answer sent %q", got)
 		}
 
