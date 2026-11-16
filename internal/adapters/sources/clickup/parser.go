@@ -115,11 +115,26 @@ func validUserID(id string) bool {
 }
 
 // historyValue is a history item's before/after value: a status object for
-// status changes, a user object for assignee changes.
+// status changes, a user object for assignee changes. ClickUp sends other
+// shapes too (a comment id string for taskCommentPosted).
 type historyValue struct {
 	Status string `json:"status"`
 	Type   string `json:"type"`
 	ID     flexID `json:"id"`
+}
+
+// UnmarshalJSON never fails: anything that is not an object with readable
+// fields (string, number, bool, array) reads as an empty value, so an
+// unexpected shape cannot reject an otherwise valid callback. JSON null
+// never reaches this method; the pointer field stays nil.
+func (h *historyValue) UnmarshalJSON(b []byte) error {
+	*h = historyValue{}
+	type plain historyValue
+	var p plain
+	if json.Unmarshal(b, &p) == nil {
+		*h = historyValue(p)
+	}
+	return nil
 }
 
 type ClickUpWebhookPayload struct {
