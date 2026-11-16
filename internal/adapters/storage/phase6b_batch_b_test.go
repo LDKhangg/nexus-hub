@@ -63,7 +63,12 @@ func TestPhase6bB1_NoticeTargetUsesOwnerChat(t *testing.T) {
 		{"owner_chat_id null falls back", `{"chat_id":"-10042","owner_chat_id":null,"bot_token_env":"TOKEN"}`, "-10042", nil, false},
 		{"invalid owner falls back", `{"chat_id":"-10042","owner_chat_id":"abc","bot_token_env":"TOKEN"}`, "-10042", nil, false},
 		{"zero owner falls back", `{"chat_id":"-10042","owner_chat_id":0,"bot_token_env":"TOKEN"}`, "-10042", nil, false},
-		{"static thread kept", `{"owner_chat_id":-100777,"message_thread_id":5,"bot_token_env":"TOKEN"}`, "-100777", ptrInt64(5), false},
+		// Ruling R3: a thread belongs to chat_id; without chat_id (or with a
+		// different one) the owner chat gets no thread (was: kept).
+		{"thread dropped, owner chat without chat_id", `{"owner_chat_id":-100777,"message_thread_id":5,"bot_token_env":"TOKEN"}`, "-100777", nil, false},
+		{"thread dropped, owner chat differs", `{"chat_id":"-10042","owner_chat_id":-100777,"message_thread_id":5,"bot_token_env":"TOKEN"}`, "-100777", nil, false},
+		{"thread kept, owner chat equals chat_id", `{"chat_id":"-100777","owner_chat_id":-100777,"message_thread_id":5,"bot_token_env":"TOKEN"}`, "-100777", ptrInt64(5), false},
+		{"thread kept, no owner chat", `{"chat_id":"-10042","message_thread_id":5,"bot_token_env":"TOKEN"}`, "-10042", ptrInt64(5), false},
 		{"no chat at all", `{"bot_token_env":"TOKEN"}`, "", nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

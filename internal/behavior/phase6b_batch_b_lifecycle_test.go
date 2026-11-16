@@ -198,8 +198,12 @@ func TestPhase6bB1_LifecycleDoneDetection(t *testing.T) {
 		{"type done", "", "Shipped", "done", true},
 		{"type closed", "", "Whatever", "closed", true},
 		{"type is case-insensitive", "", "x", " DONE ", true},
-		{"type custom beats a matching name", "", "Complete", "custom", false},
-		{"type open beats a matching name", "", "closed", "open", false},
+		// Ruling R2: a done/closed type OR a listed name closes; a non-done
+		// type no longer vetoes a listed name (was: type beat the name).
+		{"custom type with a listed name closes", "", "Complete", "custom", true},
+		{"open type with a listed name closes", "", "closed", "open", true},
+		{"custom type with an unlisted name stays open", "", "Shipped", "custom", false},
+		{"custom type with a custom-listed name closes", "shipped", " Shipped ", "custom", true},
 		{"type done beats a missing name", "complete", "Totally different", "done", true},
 		{"default names without type", "", "Complete", "", true},
 		{"default closed", "", "closed", "", true},
@@ -489,10 +493,12 @@ func TestPhase6bB1_LifecycleSweepReads(t *testing.T) {
 	})
 	t.Run("open status stays open", func(t *testing.T) {
 		e := newLCEnv(t, "", lcTopic(1, lcWS, "T1", 10))
-		e.status, e.stype = "Complete", "custom"
+		// Ruling R2: "Complete" is listed, so a custom type no longer keeps
+		// it open; an unlisted custom name still does.
+		e.status, e.stype = "Shipped", "custom"
 		e.l.Sweep(context.Background())
 		if e.store.state(1) != TopicOpen {
-			t.Fatal("closed a custom-type status")
+			t.Fatal("closed an unlisted custom-type status")
 		}
 	})
 	t.Run("active execution is not read", func(t *testing.T) {

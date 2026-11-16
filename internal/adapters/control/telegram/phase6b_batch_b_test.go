@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
+	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
 
 // Phase 6b batch B: URL buttons on inline keyboards (REQ-8). Fake Bot API.
@@ -114,5 +115,67 @@ func TestPhase6bB1_MessengerButtonConversion(t *testing.T) {
 	_, err := c.SendMessage(context.Background(), "ws", "ref", "-100", "x", MessageOptions{Buttons: [][]Button{{{Text: "a", Data: strings.Repeat("d", MaxCallbackData+1)}}}})
 	if ErrorCode(err) != "invalid_button" {
 		t.Fatalf("long callback data: %v", err)
+	}
+}
+
+type b1Lookup struct{ in tenant.WebhookIntegration }
+
+func (l b1Lookup) LookupWebhookIntegration(context.Context, string) (tenant.WebhookIntegration, error) {
+	return l.in, nil
+}
+
+const b1IntegrationID = "019a6690-abcd-7000-8000-0000000000b1"
+
+func b1Control(cfg map[string]any) b1Lookup {
+	return b1Lookup{tenant.WebhookIntegration{ID: b1IntegrationID, WorkspaceID: "ws", Platform: "telegram", Role: tenant.IntegrationRoleControl, IsEnabled: true, Config: cfg}}
+}
+
+// TC-B1-R4a (REQ-9/8, review R4): a control integration whose config has only
+// owner_chat_id (no chat_id) still resolves its token and every Messenger
+// call (reply, create/close/reopen topic) works against the owner chat.
+func TestPhase6bB1_OwnerChatOnlyConfigMessenger(t *testing.T) {
+	lookup := b1Control(map[string]any{"owner_chat_id": float64(-1001234567890), "bot_token_env": "TOKEN"})
+	ref, err := ControlTokenRef(context.Background(), lookup, "ws", b1IntegrationID)
+	if err != nil || ref == "" {
+		t.Fatalf("ref=%q err=%v", ref, err)
+	}
+	api := &p6bAPI{}
+	c := api.client(t, func(method string, _ map[string]any) (int, string) {
+		if method == "createForumTopic" {
+			return 200, `{"ok":true,"result":{"message_thread_id":77}}`
+		}
+		return 200, `{"ok":true,"result":{"message_id":5}}`
+	})
+	m := NewMessenger(c, lookup)
+	to := behavior.ChatRef{WorkspaceID: "ws", IntegrationID: b1IntegrationID, ChatID: -1001234567890}
+	ctx := context.Background()
+	if _, err := m.SendMessage(ctx, to, behavior.OutMessage{Text: "hi"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if id, err := m.CreateTopic(ctx, to, "T"); err != nil || id != 77 {
+		t.Fatalf("create: id=%d err=%v", id, err)
+	}
+	if err := m.CloseTopic(ctx, to, 77); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := m.ReopenTopic(ctx, to, 77); err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if len(api.calls) != 4 {
+		t.Fatalf("calls=%d", len(api.calls))
+	}
+	for _, call := range api.calls {
+		if call.body["chat_id"] != "-1001234567890" && call.body["chat_id"] != float64(-1001234567890) {
+			t.Fatalf("%s chat_id=%v", call.method, call.body["chat_id"])
+		}
+	}
+	// Still invalid: no chat id at all, or no token.
+	for name, cfg := range map[string]map[string]any{
+		"no chat":  {"bot_token_env": "TOKEN"},
+		"no token": {"owner_chat_id": float64(-100)},
+	} {
+		if _, err := ControlTokenRef(ctx, b1Control(cfg), "ws", b1IntegrationID); err == nil {
+			t.Fatalf("%s accepted", name)
+		}
 	}
 }

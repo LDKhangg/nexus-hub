@@ -25,7 +25,9 @@ func TestPhase6bRelayTargetUsesOwnerChat(t *testing.T) {
 		{"owner_chat_id differs from chat_id", `{"chat_id":"-10042","owner_chat_id":-100777,"bot_token_ref":"telegram"}`, "-100777", nil, false},
 		{"only owner_chat_id", `{"owner_chat_id":"-100888","bot_token_ref":"telegram"}`, "-100888", nil, false},
 		{"only chat_id", `{"chat_id":"-10042","bot_token_ref":"telegram"}`, "-10042", nil, false},
-		{"static thread kept", `{"owner_chat_id":-100777,"message_thread_id":5,"bot_token_ref":"telegram"}`, "-100777", ptrInt64(5), false},
+		// Ruling R3: the thread is dropped when the owner chat is not chat_id.
+		{"thread dropped, owner chat without chat_id", `{"owner_chat_id":-100777,"message_thread_id":5,"bot_token_ref":"telegram"}`, "-100777", nil, false},
+		{"thread kept, owner chat equals chat_id", `{"chat_id":"-100777","owner_chat_id":-100777,"message_thread_id":5,"bot_token_ref":"telegram"}`, "-100777", ptrInt64(5), false},
 		{"no chat at all is invalid", `{"bot_token_ref":"telegram"}`, "", nil, true},
 		{"invalid owner falls to chat_id", `{"chat_id":"-10042","owner_chat_id":"abc","bot_token_ref":"telegram"}`, "-10042", nil, false},
 	} {

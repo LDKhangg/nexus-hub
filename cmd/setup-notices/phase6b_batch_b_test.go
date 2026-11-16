@@ -375,3 +375,32 @@ func TestPhase6bB1_RouteEvalProviderWithoutStructuredCalls(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+// TC-B1-R6 (review R6): `group set` with a group chat id (negative) while
+// owner_telegram_user_id is 0 adds a fixed warning; no warning when the user
+// id is set or the chat id is positive (private chat).
+func TestPhase6bB1_TelegramGroupSetWarning(t *testing.T) {
+	c := newPhase4CLI(t)
+	tg, _ := b1Integrations(t, c)
+	set := func(chat string) map[string]any {
+		t.Helper()
+		return b1Decode(t, c.must("telegram", "group", "set", "--workspace-id", c.ws, "--integration-id", tg, "--chat-id", chat))
+	}
+	const want = "owner_telegram_user_id is not set: messages from a group are ignored until it is set (nh settings set owner_telegram_user_id <your Telegram user id>)"
+	got := set("-1001234567890")
+	if got["warning"] != want || got["status"] != "set" {
+		t.Fatalf("unset user id, group chat: %v", got)
+	}
+	if w := set("424242"); w["warning"] != nil {
+		t.Fatalf("positive chat id warned: %v", w)
+	}
+	c.must("settings", "set", "owner_telegram_user_id", "555")
+	if w := set("-1009876543210"); w["warning"] != nil || w["status"] != "set" {
+		t.Fatalf("user id set but warned: %v", w)
+	}
+	// Setting it back to 0 brings the warning back.
+	c.must("settings", "set", "owner_telegram_user_id", "0")
+	if w := set("-1001234567890"); w["warning"] != want {
+		t.Fatalf("user id 0 again, no warning: %v", w)
+	}
+}
