@@ -1,6 +1,7 @@
 package http
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -35,6 +36,7 @@ type WorkerHandler struct {
 	deviceLimiter *tokenBuckets
 	enrollLimiter *tokenBuckets
 	authFailures  *tokenBuckets                    // global budget for failed authentications (R-3)
+	knownTokens   *knownTokenSet                   // hashes of tokens that authenticated; skip authFailures
 	leases        behavior.WorkerLeases            // nil: poll always answers 204
 	instructions  behavior.WorkerInstructionSource // nil: no instructions
 	pollWait      time.Duration                    // long-poll cap (W6)
@@ -49,6 +51,7 @@ func NewWorkerHandler(enroller behavior.WorkerEnroller, auth behavior.WorkerAuth
 		deviceLimiter: newTokenBuckets(20, 5, time.Now),
 		enrollLimiter: newTokenBuckets(10, 10.0/60, time.Now),
 		authFailures:  newTokenBuckets(30, 1, time.Now),
+		knownTokens:   newKnownTokenSet(256, 24*time.Hour, time.Now),
 		pollWait:      behavior.WorkerPollMaxWait,
 		pollRecheck:   3 * time.Second,
 		stopping:      make(chan struct{}),
@@ -128,7 +131,8 @@ func (h *WorkerHandler) Enroll(c echo.Context) error {
 // authenticate requires "Authorization: Bearer <token>" for a live device and
 // applies the per-device rate limit. Malformed tokens are refused without a
 // DB call; while the global budget for failed authentications is empty every
-// token lookup is refused with 429.
+// lookup of an unknown token is refused with 429. A token that authenticated
+// recently skips that budget but is still checked against the DB.
 func (h *WorkerHandler) authenticate(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		header := c.Request().Header.Get("Authorization")
@@ -137,18 +141,24 @@ func (h *WorkerHandler) authenticate(next echo.HandlerFunc) echo.HandlerFunc {
 		if !ok || !strings.EqualFold(scheme, "Bearer") || !wellFormedWorkerToken(token) {
 			return workerError(c, http.StatusUnauthorized, "unauthorized")
 		}
-		if h.authFailures.empty(authFailureKey) {
+		hash := sha256.Sum256([]byte(token))
+		known := h.knownTokens.has(hash)
+		if !known && h.authFailures.empty(authFailureKey) {
 			c.Response().Header().Set("Retry-After", "1")
 			return workerError(c, http.StatusTooManyRequests, "rate limited")
 		}
 		device, err := h.auth.Authenticate(c.Request().Context(), token)
 		if err != nil {
 			if errors.Is(err, behavior.ErrNotFound) {
+				if known {
+					h.knownTokens.remove(hash) // revoked or rotated: back to the bucket
+				}
 				h.authFailures.allow(authFailureKey)
 				return workerError(c, http.StatusUnauthorized, "unauthorized")
 			}
 			return workerError(c, http.StatusInternalServerError, "internal error")
 		}
+		h.knownTokens.add(hash)
 		if !h.deviceLimiter.allow(device.ID) {
 			c.Response().Header().Set("Retry-After", "1")
 			return workerError(c, http.StatusTooManyRequests, "rate limited")
@@ -259,4 +269,66 @@ func (t *tokenBuckets) empty(key string) bool {
 	now := t.now()
 	tokens := b.tokens + now.Sub(b.last).Seconds()*t.rate
 	return tokens < 1
+}
+
+// knownTokenSet holds SHA-256 hashes of device tokens that authenticated
+// recently, so a flood of bad tokens cannot lock out a known device. A known
+// token still goes through Authenticate on every request, so a revoke takes
+// effect at once. Bounded in size and age; hashes are never logged.
+type knownTokenSet struct {
+	mu      sync.Mutex
+	max     int
+	ttl     time.Duration
+	now     func() time.Time
+	entries map[[sha256.Size]byte]time.Time // hash -> added at
+}
+
+func newKnownTokenSet(max int, ttl time.Duration, now func() time.Time) *knownTokenSet {
+	return &knownTokenSet{max: max, ttl: ttl, now: now, entries: map[[sha256.Size]byte]time.Time{}}
+}
+
+func (k *knownTokenSet) has(hash [sha256.Size]byte) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	at, ok := k.entries[hash]
+	if !ok {
+		return false
+	}
+	if k.now().Sub(at) > k.ttl {
+		delete(k.entries, hash)
+		return false
+	}
+	return true
+}
+
+// add records hash, refreshing its age. When full, expired entries go first,
+// then the oldest one.
+func (k *knownTokenSet) add(hash [sha256.Size]byte) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	now := k.now()
+	if _, ok := k.entries[hash]; !ok && len(k.entries) >= k.max {
+		var oldest [sha256.Size]byte
+		var oldestAt time.Time
+		first := true
+		for h, at := range k.entries {
+			if now.Sub(at) > k.ttl {
+				delete(k.entries, h)
+				continue
+			}
+			if first || at.Before(oldestAt) {
+				oldest, oldestAt, first = h, at, false
+			}
+		}
+		if len(k.entries) >= k.max {
+			delete(k.entries, oldest)
+		}
+	}
+	k.entries[hash] = now
+}
+
+func (k *knownTokenSet) remove(hash [sha256.Size]byte) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	delete(k.entries, hash)
 }
