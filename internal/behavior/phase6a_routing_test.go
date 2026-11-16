@@ -82,7 +82,7 @@ func (m *p6aModel) GenerateJSON(ctx context.Context, req *domain.JSONRequest) (*
 	} else if len(m.json) > 0 {
 		step = m.json[len(m.json)-1]
 	} else {
-		step = p6aJSONStep{resp: p6aRouter(`{"route":"escalate","tier":"work"}`)}
+		step = p6aJSONStep{resp: p6aRouter(`{"route":"escalate","reply":"","tier":"work"}`)}
 	}
 	m.mu.Unlock()
 	if hook != nil {
@@ -178,7 +178,7 @@ func (l *p6aLog) requireTurn(t *testing.T, n int, route, model string) map[strin
 // sent answer ends with "· haiku"; the next turn's history has no footer.
 func TestPhase6aRouter_FastAnswerUsesOnlyTheFastModel(t *testing.T) {
 	logs := p6aCaptureLog(t)
-	m := &p6aModel{json: []p6aJSONStep{{resp: p6aRouter(`{"route":"answer","reply":"  Không có gì! 🙂  "}`)}, {resp: p6aRouter(`{"route":"answer","reply":"Chào bạn"}`)}}}
+	m := &p6aModel{json: []p6aJSONStep{{resp: p6aRouter(`{"route":"answer","reply":"  Không có gì! 🙂  ","tier":"none"}`)}, {resp: p6aRouter(`{"route":"answer","reply":"Chào bạn","tier":"none"}`)}}}
 	e := p6aEnv(m)
 	if out := e.say(t, "cảm ơn nhé"); out.code != "assistant_answer" {
 		t.Fatalf("outcome=%+v", out)
@@ -198,7 +198,7 @@ func TestPhase6aRouter_FastAnswerUsesOnlyTheFastModel(t *testing.T) {
 		t.Fatalf("router messages=%+v", r.Messages)
 	}
 	line := logs.requireTurn(t, 1, routeAnswer, p6aFast)
-	if line["steps"] != float64(1) || line["input_tokens"] != float64(10) || line["output_tokens"] != float64(2) || line["cache_read_tokens"] != float64(3) || line["cache_write_tokens"] != float64(4) {
+	if line["router_error"] != "" || line["steps"] != float64(1) || line["input_tokens"] != float64(10) || line["output_tokens"] != float64(2) || line["cache_read_tokens"] != float64(3) || line["cache_write_tokens"] != float64(4) {
 		t.Fatalf("usage line=%v", line)
 	}
 
@@ -228,7 +228,7 @@ func TestPhase6aRouter_EscalationPicksTheModel(t *testing.T) {
 	} {
 		t.Run(tc.tier, func(t *testing.T) {
 			logs := p6aCaptureLog(t)
-			m := &p6aModel{json: []p6aJSONStep{{resp: p6aRouter(`{"route":"escalate","tier":"` + tc.tier + `"}`)}}}
+			m := &p6aModel{json: []p6aJSONStep{{resp: p6aRouter(`{"route":"escalate","reply":"","tier":"` + tc.tier + `"}`)}}}
 			e := p6aEnv(m)
 			if out := e.say(t, "task 86xyz đang thế nào?"); out.code != "assistant_answer" {
 				t.Fatalf("outcome=%+v", out)
@@ -251,47 +251,55 @@ func TestPhase6aRouter_EscalationPicksTheModel(t *testing.T) {
 }
 
 // TC-6A32 (REQ-7, REQ-9): every router failure fails upward to
-// assistant_model; the fast reply is never sent.
+// assistant_model with its fixed router_error code; the fast reply is never
+// sent. Each output carries all fields except the one under test.
 func TestPhase6aRouter_FailuresFallBackToWork(t *testing.T) {
-	long := `{"route":"answer","reply":"` + strings.Repeat("á", assistantRouterMaxReplyRunes+1) + `"}`
-	answer := p6aRouter(`{"route":"answer","reply":"FAST-REPLY"}`)
+	const ok = `{"route":"answer","reply":"FAST-REPLY","tier":"none"}`
+	long := `{"route":"answer","reply":"` + strings.Repeat("á", assistantRouterMaxReplyRunes+1) + `","tier":"none"}`
 	stop := func(s domain.StopReason) *domain.JSONResponse {
-		r := *answer
+		r := p6aRouter(ok)
 		r.Stop = s
-		return &r
+		return r
 	}
-	cases := map[string]p6aJSONStep{
-		"provider error":      {err: errors.New("boom")},
-		"timeout":             {err: context.DeadlineExceeded},
-		"nil response":        {},
-		"refusal":             {resp: stop(domain.StopRefusal)},
-		"max tokens":          {resp: stop(domain.StopMaxTokens)},
-		"tool use stop":       {resp: stop(domain.StopToolUse)},
-		"invalid json":        {resp: p6aRouter(`{"route":"answer","reply":"FAST-REPLY"`)},
-		"empty":               {resp: p6aRouter(``)},
-		"null":                {resp: p6aRouter(`null`)},
-		"array":               {resp: p6aRouter(`[{"route":"answer","reply":"FAST-REPLY"}]`)},
-		"trailing object":     {resp: p6aRouter(`{"route":"answer","reply":"FAST-REPLY"} {"route":"answer"}`)},
-		"trailing text":       {resp: p6aRouter(`{"route":"answer","reply":"FAST-REPLY"} ok`)},
-		"trailing brace":      {resp: p6aRouter(`{"route":"answer","reply":"FAST-REPLY"}}`)},
-		"unknown field":       {resp: p6aRouter(`{"route":"answer","reply":"FAST-REPLY","confidence":0.9}`)},
-		"missing route":       {resp: p6aRouter(`{"reply":"FAST-REPLY"}`)},
-		"null route":          {resp: p6aRouter(`{"route":null,"reply":"FAST-REPLY"}`)},
-		"unknown route":       {resp: p6aRouter(`{"route":"maybe","reply":"FAST-REPLY"}`)},
-		"answer no reply":     {resp: p6aRouter(`{"route":"answer"}`)},
-		"answer empty reply":  {resp: p6aRouter(`{"route":"answer","reply":" \n\t "}`)},
-		"answer long reply":   {resp: p6aRouter(long)},
-		"answer with tier":    {resp: p6aRouter(`{"route":"answer","reply":"FAST-REPLY","tier":"work"}`)},
-		"escalate no tier":    {resp: p6aRouter(`{"route":"escalate"}`)},
-		"escalate bad tier":   {resp: p6aRouter(`{"route":"escalate","tier":"fast"}`)},
-		"escalate tier case":  {resp: p6aRouter(`{"route":"escalate","tier":"Deep"}`)},
-		"route case":          {resp: p6aRouter(`{"route":"Answer","reply":"FAST-REPLY"}`)},
-		"duplicate key trick": {resp: p6aRouter(`{"route":"escalate","route":"answer","reply":"FAST-REPLY","tier":"work"}`)},
+	type fail struct {
+		step p6aJSONStep
+		code string
 	}
-	for name, step := range cases {
+	cases := map[string]fail{
+		"provider error":     {p6aJSONStep{err: errors.New("boom")}, "provider_error"},
+		"timeout":            {p6aJSONStep{err: context.DeadlineExceeded}, "timeout"},
+		"llm timeout code":   {p6aJSONStep{err: &domain.LLMError{Code: domain.LLMCodeTimeout}}, "timeout"},
+		"nil response":       {p6aJSONStep{}, "nil_response"},
+		"refusal":            {p6aJSONStep{resp: stop(domain.StopRefusal)}, "stop_refusal"},
+		"max tokens":         {p6aJSONStep{resp: stop(domain.StopMaxTokens)}, "stop_max_tokens"},
+		"tool use stop":      {p6aJSONStep{resp: stop(domain.StopToolUse)}, "stop_other"},
+		"invalid json":       {p6aJSONStep{resp: p6aRouter(`{"route":"answer","reply":"FAST-REPLY","tier":"none"`)}, "decode"},
+		"empty":              {p6aJSONStep{resp: p6aRouter(``)}, "decode"},
+		"array":              {p6aJSONStep{resp: p6aRouter(`[` + ok + `]`)}, "decode"},
+		"unknown field":      {p6aJSONStep{resp: p6aRouter(`{"route":"answer","reply":"FAST-REPLY","tier":"none","confidence":0.9}`)}, "decode"},
+		"trailing object":    {p6aJSONStep{resp: p6aRouter(ok + ` {"route":"answer"}`)}, "trailing_data"},
+		"trailing text":      {p6aJSONStep{resp: p6aRouter(ok + ` ok`)}, "trailing_data"},
+		"trailing brace":     {p6aJSONStep{resp: p6aRouter(ok + `}`)}, "trailing_data"},
+		"null":               {p6aJSONStep{resp: p6aRouter(`null`)}, "missing_field"},
+		"missing route":      {p6aJSONStep{resp: p6aRouter(`{"reply":"FAST-REPLY","tier":"none"}`)}, "missing_field"},
+		"null route":         {p6aJSONStep{resp: p6aRouter(`{"route":null,"reply":"FAST-REPLY","tier":"none"}`)}, "missing_field"},
+		"answer no reply":    {p6aJSONStep{resp: p6aRouter(`{"route":"answer","tier":"none"}`)}, "missing_field"},
+		"answer no tier":     {p6aJSONStep{resp: p6aRouter(`{"route":"answer","reply":"FAST-REPLY"}`)}, "missing_field"},
+		"escalate no tier":   {p6aJSONStep{resp: p6aRouter(`{"route":"escalate","reply":""}`)}, "missing_field"},
+		"escalate no reply":  {p6aJSONStep{resp: p6aRouter(`{"route":"escalate","tier":"work"}`)}, "missing_field"},
+		"unknown route":      {p6aJSONStep{resp: p6aRouter(`{"route":"maybe","reply":"FAST-REPLY","tier":"none"}`)}, "bad_route"},
+		"route case":         {p6aJSONStep{resp: p6aRouter(`{"route":"Answer","reply":"FAST-REPLY","tier":"none"}`)}, "bad_route"},
+		"answer empty reply": {p6aJSONStep{resp: p6aRouter(`{"route":"answer","reply":" \n\t ","tier":"none"}`)}, "empty_reply"},
+		"answer long reply":  {p6aJSONStep{resp: p6aRouter(long)}, "reply_too_long"},
+		"answer bad tier":    {p6aJSONStep{resp: p6aRouter(`{"route":"answer","reply":"FAST-REPLY","tier":"fast"}`)}, "bad_tier"},
+		"escalate tier none": {p6aJSONStep{resp: p6aRouter(`{"route":"escalate","reply":"","tier":"none"}`)}, "bad_tier"},
+		"escalate bad tier":  {p6aJSONStep{resp: p6aRouter(`{"route":"escalate","reply":"","tier":"fast"}`)}, "bad_tier"},
+		"escalate tier case": {p6aJSONStep{resp: p6aRouter(`{"route":"escalate","reply":"","tier":"Deep"}`)}, "bad_tier"},
+	}
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			logs := p6aCaptureLog(t)
-			m := &p6aModel{json: []p6aJSONStep{step}}
+			m := &p6aModel{json: []p6aJSONStep{tc.step}}
 			e := p6aEnv(m)
 			if out := e.say(t, "cảm ơn nhé"); out.code != "assistant_answer" {
 				t.Fatalf("outcome=%+v", out)
@@ -303,15 +311,58 @@ func TestPhase6aRouter_FailuresFallBackToWork(t *testing.T) {
 			if len(got) != 1 || got[0] != "xong\n· sonnet" || strings.Contains(strings.Join(got, ""), "FAST-REPLY") {
 				t.Fatalf("sent=%q", got)
 			}
-			logs.requireTurn(t, 1, routeWorkFallback, p6aWork)
+			line := logs.requireTurn(t, 1, routeWorkFallback, p6aWork)
+			if line["router_error"] != tc.code {
+				t.Fatalf("router_error=%v, want %s", line["router_error"], tc.code)
+			}
 		})
+	}
+}
+
+// TC-6A32b (REQ-7, hotfix router schema): route is the authority. An
+// answer ignores a valid tier value; an escalation ignores the reply. The
+// schema requires all three fields and offers tier none|work|deep.
+func TestPhase6aRouter_RouteIsAuthoritative(t *testing.T) {
+	var schema struct {
+		Required   []string `json:"required"`
+		Properties struct {
+			Tier struct {
+				Enum []string `json:"enum"`
+			} `json:"tier"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(assistantRouterSchema), &schema); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(schema.Required, ",") != "route,reply,tier" || strings.Join(schema.Properties.Tier.Enum, ",") != "none,work,deep" {
+		t.Fatalf("schema required=%v tier=%v", schema.Required, schema.Properties.Tier.Enum)
+	}
+	for _, tier := range []string{"none", "work", "deep"} {
+		logs := p6aCaptureLog(t)
+		m := &p6aModel{json: []p6aJSONStep{{resp: p6aRouter(`{"route":"answer","reply":"Chào bạn","tier":"` + tier + `"}`)}}}
+		e := p6aEnv(m)
+		e.say(t, "chào")
+		if got := e.msg.texts(); len(m.toolReqs) != 0 || len(got) != 1 || got[0] != "Chào bạn\n· haiku" {
+			t.Fatalf("answer tier %s: tools=%d sent=%q", tier, len(m.toolReqs), got)
+		}
+		if line := logs.requireTurn(t, 1, routeAnswer, p6aFast); line["router_error"] != "" {
+			t.Fatalf("router_error=%v", line["router_error"])
+		}
+	}
+	for tier, model := range map[string]string{"work": p6aWork, "deep": p6aDeep} {
+		m := &p6aModel{json: []p6aJSONStep{{resp: p6aRouter(`{"route":"escalate","reply":"FAST-REPLY","tier":"` + tier + `"}`)}}}
+		e := p6aEnv(m)
+		e.say(t, "task?")
+		if got := strings.Join(e.msg.texts(), ""); len(m.toolReqs) != 1 || m.toolReqs[0].Model != model || strings.Contains(got, "FAST-REPLY") {
+			t.Fatalf("escalate %s: tools=%d sent=%q", tier, len(m.toolReqs), got)
+		}
 	}
 }
 
 // TC-6A33 (REQ-7, REQ-9): the reply limit is inclusive at 2,000 runes.
 func TestPhase6aRouter_ReplyLimitBoundary(t *testing.T) {
 	reply := strings.Repeat("á", assistantRouterMaxReplyRunes)
-	m := &p6aModel{json: []p6aJSONStep{{resp: p6aRouter(`{"route":"answer","reply":"` + reply + `"}`)}}}
+	m := &p6aModel{json: []p6aJSONStep{{resp: p6aRouter(`{"route":"answer","reply":"` + reply + `","tier":"none"}`)}}}
 	e := p6aEnv(m)
 	if out := e.say(t, "kể một câu chuyện ngắn"); out.code != "assistant_answer" || len(m.toolReqs) != 0 {
 		t.Fatalf("outcome=%+v tools=%d", out, len(m.toolReqs))
@@ -372,7 +423,7 @@ func TestPhase6aRouter_SkipRules(t *testing.T) {
 	})
 	t.Run("no fast model", func(t *testing.T) {
 		logs := p6aCaptureLog(t)
-		m := &p6aModel{json: []p6aJSONStep{{resp: p6aRouter(`{"route":"answer","reply":"FAST-REPLY"}`)}}}
+		m := &p6aModel{json: []p6aJSONStep{{resp: p6aRouter(`{"route":"answer","reply":"FAST-REPLY","tier":"none"}`)}}}
 		e := p6aEnv(m)
 		e.assistant.FastModel = ""
 		if out := e.say(t, "cảm ơn nhé"); out.code != "assistant_answer" || len(m.jsonReqs) != 0 || len(m.toolReqs) != 1 || m.toolReqs[0].Model != p6aWork {
@@ -586,8 +637,8 @@ func TestPhase6aFooterOnlyOnSentAnswers(t *testing.T) {
 func TestPhase6aUsageLogHasNoText(t *testing.T) {
 	logs := p6aCaptureLog(t)
 	m := &p6aModel{json: []p6aJSONStep{
-		{resp: p6aRouter(`{"route":"answer","reply":"BIMAT-REPLY"}`)},
-		{resp: p6aRouter(`{"route":"escalate","tier":"work"}`)},
+		{resp: p6aRouter(`{"route":"answer","reply":"BIMAT-REPLY","tier":"none"}`)},
+		{resp: p6aRouter(`{"route":"escalate","reply":"","tier":"work"}`)},
 	}, tools: nil}
 	e := p6aEnv(m)
 	e.say(t, "BIMAT-OWNER-1 chào")
@@ -602,7 +653,9 @@ func TestPhase6aUsageLogHasNoText(t *testing.T) {
 	allowed := map[string]bool{"time": true, "level": true, "msg": true, "route": true, "model": true, "steps": true,
 		"input_tokens": true, "output_tokens": true, "cache_read_tokens": true, "cache_write_tokens": true, "latency_ms": true,
 		// Fix R-3: router usage fields.
-		"router_model": true, "router_input_tokens": true, "router_output_tokens": true, "router_cache_read_tokens": true, "router_cache_write_tokens": true}
+		"router_model": true, "router_input_tokens": true, "router_output_tokens": true, "router_cache_read_tokens": true, "router_cache_write_tokens": true,
+		// Hotfix: fixed router failure code.
+		"router_error": true}
 	for i, line := range turns {
 		for k := range allowed {
 			if _, ok := line[k]; !ok {
