@@ -59,6 +59,7 @@ func WorkerJobActive(state string) bool {
 const (
 	WorkerEventJobCreated      = "job_created"
 	WorkerEventLeased          = "leased"
+	WorkerEventLeaseReissued   = "lease_reissued"
 	WorkerEventResumed         = "resumed"
 	WorkerEventLeaseLost       = "lease_lost"
 	WorkerEventCancelRequested = "cancel_requested"

@@ -91,6 +91,18 @@ FROM candidate
 WHERE j.id = candidate.id AND j.state = 'WAITING_FOR_WORKER'
 RETURNING j.*;
 
+-- name: ReissueWorkerLease :one
+-- Rotates the lease token of the job the device holds in LEASED state, i.e.
+-- leased but never heartbeated nor reported: the poll response that carried
+-- the first token was lost. Same attempt; RUNNING or CANCELLING jobs are not
+-- touched. The unique index worker_jobs_one_active_per_device keeps it to one
+-- row.
+UPDATE public.worker_jobs
+SET lease_token_hash = sqlc.arg(lease_token_hash), lease_expires_at = sqlc.arg(lease_expires_at),
+    updated_at = sqlc.arg(now)
+WHERE workspace_id = sqlc.arg(workspace_id) AND device_id = sqlc.arg(device_id) AND state = 'LEASED'
+RETURNING *;
+
 -- name: UpdateWorkerJobLease :one
 -- Extends a held lease (heartbeat, progress) and resumes an interrupted job.
 UPDATE public.worker_jobs

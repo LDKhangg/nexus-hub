@@ -94,7 +94,10 @@ func (h *WorkerHandler) recordTelemetry(ctx context.Context, device behavior.Wor
 }
 
 // Poll long-polls (≤ 55 s) for one job. 204 means no job; the worker polls
-// again. A client disconnect ends the wait.
+// again. A client disconnect ends the wait. A device that polls while it
+// holds a LEASED job (never heartbeated or reported) gets that same job back
+// with a new lease token, same attempt: its earlier response was lost. A
+// device holding a RUNNING or CANCELLING job gets 204.
 func (h *WorkerHandler) Poll(c echo.Context) error {
 	device, ok := WorkerDeviceFrom(c)
 	if !ok || h.leases == nil {

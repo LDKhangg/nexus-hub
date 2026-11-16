@@ -403,6 +403,9 @@ func (s *WorkerStore) LeaseJob(ctx context.Context, device behavior.WorkerDevice
 		return behavior.WorkerLease{}, false, err
 	}
 	now := s.now()
+	if lease, found, err := s.reissueLease(ctx, ids, now); err != nil || found {
+		return lease, found, err
+	}
 	s.mu.Lock()
 	th := s.thresholds
 	s.mu.Unlock()
@@ -448,6 +451,45 @@ func (s *WorkerStore) LeaseJob(ctx context.Context, device behavior.WorkerDevice
 		return behavior.WorkerLease{}, false, err
 	}
 	s.notify(ctx, behavior.WorkerChangeLeased, row)
+	return behavior.WorkerLease{Job: mapWorkerJob(row), LeaseToken: token}, true, nil
+}
+
+// reissueLease hands the device the job it already holds in LEASED state
+// (leased, never heartbeated or reported) with a fresh lease token: the poll
+// response carrying the first token was lost (R-1). The old token stops
+// working; the attempt does not change. It runs before the telemetry block
+// because the job is already assigned to this device. RUNNING and CANCELLING
+// jobs are never reissued, and a job is never handed to another device.
+func (s *WorkerStore) reissueLease(ctx context.Context, ids workerDeviceIDs, now time.Time) (behavior.WorkerLease, bool, error) {
+	token, err := randomLeaseToken()
+	if err != nil {
+		return behavior.WorkerLease{}, false, errors.New("lease token generation failed")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return behavior.WorkerLease{}, false, err
+	}
+	defer s.rollback(tx)
+	q := s.q.WithTx(tx)
+	row, err := q.ReissueWorkerLease(ctx, sqlc.ReissueWorkerLeaseParams{
+		LeaseTokenHash: hashSecret(token), LeaseExpiresAt: ts(now.Add(behavior.WorkerLeaseDuration)),
+		Now: ts(now), WorkspaceID: ids.ws, DeviceID: ids.dev,
+	})
+	if err != nil {
+		if isNoRows(err) {
+			return behavior.WorkerLease{}, false, nil
+		}
+		return behavior.WorkerLease{}, false, err
+	}
+	if err := q.InsertWorkerEvent(ctx, workerEvent(ids.ws, ids.dev, row.ID, behavior.WorkerEventLeaseReissued, "")); err != nil {
+		return behavior.WorkerLease{}, false, err
+	}
+	if err := s.refreshDevice(ctx, q, ids.dev, now); err != nil {
+		return behavior.WorkerLease{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return behavior.WorkerLease{}, false, err
+	}
 	return behavior.WorkerLease{Job: mapWorkerJob(row), LeaseToken: token}, true, nil
 }
 
