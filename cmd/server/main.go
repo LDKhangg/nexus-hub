@@ -170,6 +170,7 @@ func run() error {
 		return err
 	}
 	notices.SetStatusObserver(lifecycle.StatusChanged)
+	topics.OnTaskTopicOpen(lifecycle.TopicReopened)
 	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows, lifecycle}
 	// Telegram updates arrive by webhook, or by long polling when the hub
 	// has no public URL (telegram_mode, see settings.TelegramPolling). Both

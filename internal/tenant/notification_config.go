@@ -136,6 +136,10 @@ func OwnerTargetConfig(m map[string]any) map[string]any {
 		conf[k] = v
 	}
 	if chat := TelegramOwnerChatID(m); chat != 0 {
+		if old, _ := chatIDField(m, "chat_id"); old != chat {
+			// The thread belongs to the old chat, not the owner chat.
+			delete(conf, "message_thread_id")
+		}
 		conf["chat_id"] = strconv.FormatInt(chat, 10)
 	}
 	return conf

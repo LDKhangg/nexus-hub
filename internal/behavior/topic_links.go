@@ -139,6 +139,19 @@ func (w *InboxWorker) topicCommand(ctx context.Context, u InboundUpdate, to Chat
 	return w.topicJump(ctx, u, to, id)
 }
 
+// jumpAvailable reports whether a lone task link may take the jump path: the
+// chat is a supergroup (a topic link can exist) and the router does not
+// remember it as a non-forum chat. Otherwise the text goes to the assistant.
+func (w *InboxWorker) jumpAvailable(u InboundUpdate) bool {
+	if _, ok := TopicDeepLink(u.ChatID, 1); !ok {
+		return false
+	}
+	if nf, ok := w.d.Links.(interface{ ChatNonForum(ChatRef) bool }); ok {
+		return !nf.ChatNonForum(ChatRef{WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID})
+	}
+	return true
+}
+
 // topicJump replies with the "Mở topic" button of the task's topic. It is
 // for General only: inside a topic the owner is already in one.
 func (w *InboxWorker) topicJump(ctx context.Context, u InboundUpdate, to ChatRef, taskID string) outcome {

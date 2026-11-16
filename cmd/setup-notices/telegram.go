@@ -199,6 +199,17 @@ func telegramTopics(ctx context.Context, pool *pgxpool.Pool, args []string, out 
 	return json.NewEncoder(out).Encode(map[string]any{"workspace_id": *ws, "count": len(rows), "topics": rows})
 }
 
+// ownerUserIDUnset reports whether owner_telegram_user_id is 0. When the
+// setting cannot be read it returns false (no warning).
+func ownerUserIDUnset(ctx context.Context, pool *pgxpool.Pool) bool {
+	ss, err := storage.NewSettingsStore(pool)
+	if err != nil {
+		return false
+	}
+	s, err := settings.Load(ctx, ss)
+	return err == nil && s.OwnerTelegramUserID == 0
+}
+
 // telegramGroup sets or shows the workspace's forum group chat id on its
 // Telegram control integration.
 func telegramGroup(ctx context.Context, pool *pgxpool.Pool, args []string, out io.Writer) error {
@@ -247,8 +258,12 @@ func telegramGroup(ctx context.Context, pool *pgxpool.Pool, args []string, out i
 	if _, err := integrations.Update(ctx, storage.UpdateIntegrationInput{ID: in.ID, WorkspaceID: *ws, Role: in.Role, Config: conf, IsEnabled: in.IsEnabled}); err != nil {
 		return errors.New("group not stored")
 	}
-	return json.NewEncoder(out).Encode(map[string]any{
+	result := map[string]any{
 		"integration_id": in.ID, "chat_id": id, "status": "set",
 		"note": "a running server may take a short while to use the new chat id",
-	})
+	}
+	if id < 0 && ownerUserIDUnset(ctx, pool) {
+		result["warning"] = "owner_telegram_user_id is not set: messages from a group are ignored until it is set (nh settings set owner_telegram_user_id <your Telegram user id>)"
+	}
+	return json.NewEncoder(out).Encode(result)
 }

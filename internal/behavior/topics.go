@@ -93,6 +93,8 @@ type TopicRouter struct {
 	mu      sync.Mutex
 	blocked map[chatKey]chatBlock
 	now     func() time.Time
+	// onTaskTopic is told when a task's topic was created or reopened.
+	onTaskTopic func(workspaceID, taskID string)
 }
 
 func (r *TopicRouter) clock() time.Time {
@@ -161,6 +163,31 @@ func NewTopicRouter(d TopicRouterDeps) (*TopicRouter, error) {
 		return nil, errors.New("topic router: missing store")
 	}
 	return &TopicRouter{d: d}, nil
+}
+
+// OnTaskTopicOpen registers fn, called (workspace id, task id) after the
+// topic of a ClickUp task was created or reopened for a send. The topic
+// lifecycle uses it to forget that the task was done. Set it before use.
+func (r *TopicRouter) OnTaskTopicOpen(fn func(workspaceID, taskID string)) {
+	if r != nil {
+		r.onTaskTopic = fn
+	}
+}
+
+func (r *TopicRouter) taskTopicOpened(ws, kind, key string) {
+	if r.onTaskTopic != nil && kind == TopicSubjectClickUpTask {
+		r.onTaskTopic(ws, key)
+	}
+}
+
+// ChatNonForum reports whether the router remembers the chat as not a forum
+// (or without topic rights), so no topic link can be made there now.
+func (r *TopicRouter) ChatNonForum(c ChatRef) bool {
+	if r == nil {
+		return false
+	}
+	_, ok := r.blockedCode(c)
+	return ok
 }
 
 // Fallbacks counts the sends that went to General because of a topic step.
@@ -260,6 +287,7 @@ func (r *TopicRouter) Destination(ctx context.Context, base ChatRef, in TopicInt
 		if _, err := r.d.Store.SetTopicState(ctx, base.WorkspaceID, topic.ID, TopicOpen); err != nil {
 			log.Print("telegram topic: reopened, state not stored")
 		}
+		r.taskTopicOpened(base.WorkspaceID, kind, key)
 	}
 	base.ThreadID = topic.ThreadID
 	return base
@@ -299,6 +327,7 @@ func (r *TopicRouter) create(ctx context.Context, base ChatRef, topic Topic, kin
 		// holder (reservation taken over) does not overwrite the binding.
 		log.Print("telegram topic: created, thread id not stored")
 	}
+	r.taskTopicOpened(base.WorkspaceID, kind, key)
 	base.ThreadID = threadID
 	return base
 }

@@ -64,7 +64,7 @@ func (w *InboxWorker) workflowOrAssistant(ctx context.Context, u InboundUpdate, 
 	// A message that is only a ClickUp task link, written in General, gets
 	// the "Mở topic" button of that task's topic.
 	if u.ThreadID == 0 && w.d.Links != nil {
-		if taskID, ok := taskURLRef(trimmed); ok {
+		if taskID, ok := taskURLRef(trimmed); ok && w.jumpAvailable(u) {
 			return w.topicJump(ctx, u, to, taskID)
 		}
 	}

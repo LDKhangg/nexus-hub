@@ -94,11 +94,12 @@ func NewTopicLifecycle(d TopicLifecycleDeps) (*TopicLifecycle, error) {
 	return l, nil
 }
 
-// isDone reports whether a task status counts as done/closed: by the status
-// type when ClickUp sent one, else by name against topic_close_statuses.
+// isDone reports whether a task status counts as done/closed: the status type
+// is done or closed, or the status name (trimmed, case-insensitive) is in
+// topic_close_statuses.
 func (l *TopicLifecycle) isDone(status, statusType string) bool {
-	if t := strings.ToLower(strings.TrimSpace(statusType)); t != "" {
-		return t == "done" || t == "closed"
+	if t := strings.ToLower(strings.TrimSpace(statusType)); t == "done" || t == "closed" {
+		return true
 	}
 	return l.closes[strings.ToLower(strings.TrimSpace(status))]
 }
@@ -117,6 +118,17 @@ func (l *TopicLifecycle) lookup(k lifecycleKey) (taskSeen, bool) {
 	defer l.mu.Unlock()
 	s, ok := l.seen[k]
 	return s, ok
+}
+
+// TopicReopened is called when a send created or reopened the topic of a
+// task: the remembered "done" is dropped, so the sweep does not close the
+// topic again until a new status event arrives or a later task read says the
+// task is done.
+func (l *TopicLifecycle) TopicReopened(workspaceID, taskID string) {
+	if l == nil || workspaceID == "" || !taskIDRe.MatchString(taskID) {
+		return
+	}
+	l.remember(lifecycleKey{workspaceID, taskID}, false)
 }
 
 // StatusChanged handles a ClickUp status event: it remembers whether the

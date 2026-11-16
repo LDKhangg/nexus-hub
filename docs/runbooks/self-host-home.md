@@ -1048,6 +1048,14 @@ nh telegram group set  --workspace-id $WS --integration-id $TG --chat-id -100123
 nh telegram group show --workspace-id $WS --integration-id $TG
 ```
 
+4. Set your Telegram user id, so the hub accepts your messages from the group
+   (with `owner_telegram_user_id` at 0, group messages are ignored; `group set`
+   prints a `warning` in that case):
+
+```sh
+nh settings set owner_telegram_user_id '<your Telegram user id>'
+```
+
 Run `set` again whenever the chat id changes, in particular right after the
 conversion in step 1 (the old id stops working). A running server picks the
 value up within a short while. Without `owner_chat_id` the hub keeps using the
@@ -1096,9 +1104,9 @@ back to General while its topic exists carries an **Mở topic** button.
 ### Lifecycle
 
 A topic closes (never deleted; history stays) when its ClickUp task reaches a
-done or closed status and no workflow bound to the task is active. The status
-type from ClickUp's event is used when present; otherwise the status name is
-matched against the setting `topic_close_statuses` (comma separated, default
+done or closed status and no workflow bound to the task is active. A task counts as done
+when ClickUp's status type is done or closed, or the status name (trimmed, case
+does not matter) is listed in the setting `topic_close_statuses` (comma separated, default
 `complete,closed,done`):
 
 ```sh

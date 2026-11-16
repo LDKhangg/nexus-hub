@@ -501,7 +501,7 @@ func (c telegramPollTargets) TelegramPollTargets(ctx context.Context) ([]telegra
 					if !telegramControl(in) {
 						continue
 					}
-					cfg, err := tenant.ParseTelegramTargetConfig(in.Config)
+					cfg, err := tenant.ParseTelegramTargetConfig(tenant.OwnerTargetConfig(in.Config))
 					if err != nil {
 						continue
 					}

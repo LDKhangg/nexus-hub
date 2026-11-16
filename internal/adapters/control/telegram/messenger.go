@@ -40,7 +40,7 @@ func ControlTokenRef(ctx context.Context, lookup IntegrationLookup, workspaceID,
 	if in.WorkspaceID != workspaceID || tenant.ValidateTelegramControl(in) != nil {
 		return "", &relay.DeliveryError{Code: "invalid_integration"}
 	}
-	cfg, err := tenant.ParseTelegramTargetConfig(in.Config)
+	cfg, err := tenant.ParseTelegramTargetConfig(tenant.OwnerTargetConfig(in.Config))
 	if err != nil {
 		return "", &relay.DeliveryError{Code: "invalid_integration"}
 	}
