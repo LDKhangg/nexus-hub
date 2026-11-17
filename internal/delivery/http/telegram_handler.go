@@ -361,8 +361,15 @@ func (h *TelegramHandler) normalize(ctx context.Context, integration tenant.Webh
 		if m.Text == nil {
 			return u, true, nil
 		}
-		if m.ReplyTo != nil {
-			u.ReplyToMessageID = m.ReplyTo.MessageID
+		// In a forum topic Telegram sets reply_to_message to the topic's
+		// creation message for every message that is not an explicit reply.
+		replyTo := int64(0)
+		if m.ReplyTo != nil && m.ReplyTo.MessageID > 0 &&
+			!(m.IsTopicMessage && m.ReplyTo.MessageID == m.MessageThreadID) {
+			replyTo = m.ReplyTo.MessageID
+		}
+		if replyTo > 0 {
+			u.ReplyToMessageID = replyTo
 		}
 		text := strings.TrimSpace(*m.Text)
 		if strings.HasPrefix(text, "/") {
@@ -392,7 +399,8 @@ func (h *TelegramHandler) normalize(ctx context.Context, integration tenant.Webh
 		if text == "" {
 			return u, true, nil
 		}
-		if m.ReplyTo == nil || m.ReplyTo.MessageID <= 0 {
+		// stageAssistant hands plain text to the assistant, staged in memory.
+		stageAssistant := func() (behavior.InboundUpdate, bool, error) {
 			if h.assistant == nil {
 				return u, true, nil
 			}
@@ -408,18 +416,21 @@ func (h *TelegramHandler) normalize(ctx context.Context, integration tenant.Webh
 			u.Args = behavior.AssistantTextPrefix + key
 			return u, true, nil
 		}
+		if replyTo == 0 {
+			return stageAssistant()
+		}
 		if utf8.RuneCountInString(text) > 4000 {
 			u.Note = behavior.NoteTextTooLong
 			return u, true, nil
 		}
 		// The answer is staged on the approval, never in the update row.
-		nonce, err := h.answers.StageAnswer(ctx, workspaceID, m.ReplyTo.MessageID, text, h.now())
+		nonce, err := h.answers.StageAnswer(ctx, workspaceID, replyTo, text, h.now())
 		if errors.Is(err, behavior.ErrNotFound) {
 			if h.templates == nil {
 				u.Note = behavior.NoteNoOpenReply
 				return u, true, nil
 			}
-			nonce, err = h.templates.StageTemplateReply(ctx, workspaceID, m.ReplyTo.MessageID, text, h.now())
+			nonce, err = h.templates.StageTemplateReply(ctx, workspaceID, replyTo, text, h.now())
 			if errors.Is(err, reporting.ErrTemplatePromptNotFound) {
 				u.Note = behavior.NoteNoOpenReply
 				return u, true, nil
