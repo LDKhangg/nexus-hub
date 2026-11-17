@@ -15,6 +15,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage"
 	"github.com/LDKhangg/nexus-hub/internal/agent"
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
+	"github.com/LDKhangg/nexus-hub/internal/orchestrator"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -69,6 +70,7 @@ var knownWorkflowReasons = func() map[workflow.ReasonCode]struct{} {
 		agent.KnownWorkflowReasons(),
 		behavior.KnownWorkflowReasons(),
 		behavior.KnownLocalTaskReasons(),
+		orchestrator.KnownWorkflowReasons(),
 		storage.KnownSignalReasons(),
 	} {
 		for _, reason := range source {
@@ -103,7 +105,8 @@ func workflowStepKind(k string) string {
 		workflow.StepKindNotify, workflow.StepKindApproval, workflow.StepKindBehaviorContext,
 		workflow.StepKindBehaviorModel, workflow.StepKindBehaviorDispatch, workflow.StepKindBehaviorRunActions,
 		workflow.StepKindAgentTriage, workflow.StepKindAgentInvestigate, workflow.StepKindAgentReport,
-		workflow.StepKindWorkerRun:
+		workflow.StepKindWorkerRun, workflow.StepKindOrchestratorPlan, workflow.StepKindOrchestratorRunTask,
+		workflow.StepKindOrchestratorEvaluate, workflow.StepKindOrchestratorReport:
 		return k
 	default:
 		return "unknown"

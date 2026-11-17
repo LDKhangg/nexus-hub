@@ -446,6 +446,52 @@ func (s *BehaviorStore) CreateWaitApproval(ctx context.Context, f behavior.RunFe
 	return out, nil
 }
 
+// CreateOrchestratorWaitApproval creates an orchestrator_gate approval and
+// binds it to the fenced step (an orchestrated task step, which has no
+// behavior run) as an approval wait, in one transaction.
+func (s *BehaviorStore) CreateOrchestratorWaitApproval(ctx context.Context, f behavior.RunFence, a behavior.NewApproval) (behavior.Approval, error) {
+	if a.Kind != behavior.ApprovalOrchestratorGate || a.RunID != 0 || a.ItemID != 0 {
+		return behavior.Approval{}, invalid("wait approval")
+	}
+	ws, err := parseDBID(f.WorkspaceID)
+	if err != nil {
+		return behavior.Approval{}, err
+	}
+	params, err := createApprovalParams(ws, a)
+	if err != nil {
+		return behavior.Approval{}, err
+	}
+	var out behavior.Approval
+	err = s.withStepFence(ctx, f, func(q *sqlc.Queries, ws pgtype.UUID) error {
+		execution, err := q.GetWorkflowExecution(ctx, sqlc.GetWorkflowExecutionParams{WorkspaceID: ws, ID: f.ExecutionID})
+		if err != nil {
+			return err
+		}
+		if execution.LegacyRunID.Valid {
+			return behavior.ErrWorkflowFence
+		}
+		row, err := q.CreateApproval(ctx, params)
+		if err != nil {
+			if isUniqueViolation(err) {
+				return behavior.ErrConflict
+			}
+			return err
+		}
+		if _, err := q.InsertWorkflowWait(ctx, sqlc.InsertWorkflowWaitParams{
+			WorkspaceID: ws, ExecutionID: f.ExecutionID, StepKey: f.StepKey, ApprovalID: row.ID, WaitKind: "approval",
+		}); err != nil {
+			return err
+		}
+		out = mapApproval(row)
+		out.ExecutionID = f.ExecutionID
+		return nil
+	})
+	if err != nil {
+		return behavior.Approval{}, err
+	}
+	return out, nil
+}
+
 // ListStepWaits lists the step's bound approvals with their signal state.
 func (s *BehaviorStore) ListStepWaits(ctx context.Context, workspaceID string, executionID int64, stepKey string) ([]behavior.StepWait, error) {
 	ws, err := parseDBID(workspaceID)

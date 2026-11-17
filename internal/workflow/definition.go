@@ -48,6 +48,18 @@ const (
 	// uses it.
 	StepKindWorkerRun = "worker.run"
 
+	// Orchestrated task step kinds (Phase 7b). They are internal: only the
+	// built-in orchestrated-task definition uses them. plan proposes the
+	// plan, run_task runs the next ready task, evaluate decides what follows
+	// a task result, and report tells the owner the outcome.
+	StepKindOrchestratorPlan = "orchestrator.plan"
+
+	StepKindOrchestratorRunTask = "orchestrator.run_task"
+
+	StepKindOrchestratorEvaluate = "orchestrator.evaluate"
+
+	StepKindOrchestratorReport = "orchestrator.report"
+
 	CapabilityInProcess = "in_process"
 
 	NotificationHandlerTelegram = "telegram.message"
@@ -62,7 +74,9 @@ var registeredStepKinds = map[string]bool{
 
 var internalStepKinds = map[string]bool{
 	StepKindAgentTriage: true, StepKindAgentInvestigate: true, StepKindAgentReport: true,
-	StepKindWorkerRun: true,
+	StepKindWorkerRun:           true,
+	StepKindOrchestratorPlan:    true,
+	StepKindOrchestratorRunTask: true, StepKindOrchestratorEvaluate: true, StepKindOrchestratorReport: true,
 }
 
 // IsInternalStepKind reports whether kind is reserved for internal built-in

@@ -445,6 +445,7 @@ func (w *InboxWorker) appendWorkflowInstruction(ctx context.Context, u InboundUp
 		return w.reply(ctx, to, msgFailed, "storage")
 	}
 	_ = w.d.Conversations.BindWorkflow(ctx, u.WorkspaceID, state.id, id, "instruction")
+	w.noteInstructionAdded(ctx, u.WorkspaceID, id)
 	if u.MessageID > 0 {
 		_ = w.d.Conversations.BindResource(ctx, workflow.ResourceBinding{WorkspaceID: u.WorkspaceID, ExecutionID: id,
 			Kind: "telegram.message", ExternalID: workflow.TelegramMessageRef(u.IntegrationID, u.ChatID, u.MessageID)})
@@ -652,6 +653,7 @@ func (w *InboxWorker) toolWorkflowNote(ctx context.Context, tt *assistantToolTur
 		return toolErr(err)
 	}
 	_ = w.d.Conversations.BindWorkflow(ctx, tt.u.WorkspaceID, conversation.ID, id, "assistant_instruction")
+	w.noteInstructionAdded(ctx, tt.u.WorkspaceID, id)
 	tt.proposed[toolWorkflowNote] = true
 	return fmt.Sprintf("%s: instruction accepted (v%d).", workflow.FormatRef(id), ins.Version), false
 }

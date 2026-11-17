@@ -475,6 +475,19 @@ type OrchestratorPlanTask struct {
 	UpdatedAt    pgtype.Timestamptz
 }
 
+// Where the messages of an orchestrated task go, and its explicit repo; ids only.
+type OrchestratorRoute struct {
+	WorkspaceID   pgtype.UUID
+	ExecutionID   int64
+	IntegrationID pgtype.UUID
+	ChatID        int64
+	ThreadID      int64
+	Repo          string
+	TaskRef       string
+	ClickupTaskID string
+	CreatedAt     pgtype.Timestamptz
+}
+
 type OutboundAction struct {
 	ID                int64
 	WorkspaceID       pgtype.UUID

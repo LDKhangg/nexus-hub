@@ -18,6 +18,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/config"
 	httpdelivery "github.com/LDKhangg/nexus-hub/internal/delivery/http"
+	"github.com/LDKhangg/nexus-hub/internal/orchestrator"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/secrets"
@@ -154,7 +155,10 @@ func run() error {
 			Devices: workerStore, Telemetry: workerStore, Thresholds: thresholds, Waker: taskStore,
 		})
 		step := &behavior.WorkerRunStep{Jobs: workerStore, Routes: taskStore, Instructions: ag.conversations, Queued: workerNotifier}
-		return step.Register(reg)
+		if err := step.Register(reg); err != nil {
+			return err
+		}
+		return registerOrchestratorSteps(reg, pool, store, s, ag, behaviors, messenger, topics, workerStore, taskStore)
 	})
 	if err != nil {
 		return err
@@ -191,6 +195,7 @@ func run() error {
 		WorkflowCommands: workflows.commands,
 		Topics:           topics,
 		Links:            topics,
+		InstructionWaker: &orchestrator.InstructionWaker{Steps: workflows.store, Waker: taskStore},
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
 	// A done/closed ClickUp task closes its topic once no execution of it is
 	// active (status events and a periodic sweep).

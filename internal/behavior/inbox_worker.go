@@ -84,6 +84,10 @@ type InboxDeps struct {
 	WorkerJobs WorkerJobControl
 	// WorkerNotifier is told when a retried job waits again. Optional.
 	WorkerNotifier WorkerJobQueued
+	// InstructionWaker is told after an owner instruction was added to an
+	// execution, so a step waiting for a clarification answer re-checks.
+	// Optional.
+	InstructionWaker InstructionWaker
 }
 
 // InboxWorker processes stored Telegram updates: built-in commands,
@@ -525,6 +529,12 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 			return msgStale, "stale", true
 		}
 		return w.workerJobCallback(ctx, u, data, a, actor)
+	}
+	if a.Kind == ApprovalOrchestratorGate {
+		if a.Decision != "" || !w.now().Before(a.ExpiresAt) {
+			return msgStale, "stale", true
+		}
+		return w.orchestratorGateCallback(ctx, u, data, a, actor)
 	}
 	if data.Kind.Decides() && (a.Decision != "" || !w.now().Before(a.ExpiresAt)) {
 		return msgStale, "stale", true

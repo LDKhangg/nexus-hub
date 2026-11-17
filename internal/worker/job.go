@@ -576,7 +576,9 @@ func (r *jobRun) appendFollowUps() (bool, error) {
 		// Once journaled, the journal skips the id; if journaling fails,
 		// the id stays out of the ack list (acks come from the journal) and
 		// may be received again.
-		_, _ = r.j.MarkInstruction(in.ID)
+		if _, err := r.j.MarkInstruction(in.ID); err != nil {
+			log.Print("worker: an instruction was not journaled; it may be received again")
+		}
 		r.mu.Lock()
 		delete(r.taken, in.ID)
 		r.mu.Unlock()

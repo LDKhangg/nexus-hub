@@ -48,3 +48,13 @@ ORDER BY p.version, t.id;
 SELECT * FROM public.orchestrator_decisions
 WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id)
 ORDER BY id;
+
+-- name: InsertOrchestratorRoute :exec
+INSERT INTO public.orchestrator_routes (workspace_id, execution_id, integration_id, chat_id, thread_id, repo, task_ref, clickup_task_id)
+VALUES (sqlc.arg(workspace_id), sqlc.arg(execution_id), sqlc.arg(integration_id), sqlc.arg(chat_id), sqlc.arg(thread_id),
+        sqlc.arg(repo), sqlc.arg(task_ref), sqlc.arg(clickup_task_id))
+ON CONFLICT (workspace_id, execution_id) DO NOTHING;
+
+-- name: GetOrchestratorRoute :one
+SELECT * FROM public.orchestrator_routes
+WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id);

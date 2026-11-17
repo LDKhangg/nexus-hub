@@ -11,6 +11,33 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getOrchestratorRoute = `-- name: GetOrchestratorRoute :one
+SELECT workspace_id, execution_id, integration_id, chat_id, thread_id, repo, task_ref, clickup_task_id, created_at FROM public.orchestrator_routes
+WHERE workspace_id = $1 AND execution_id = $2
+`
+
+type GetOrchestratorRouteParams struct {
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+}
+
+func (q *Queries) GetOrchestratorRoute(ctx context.Context, arg GetOrchestratorRouteParams) (OrchestratorRoute, error) {
+	row := q.db.QueryRow(ctx, getOrchestratorRoute, arg.WorkspaceID, arg.ExecutionID)
+	var i OrchestratorRoute
+	err := row.Scan(
+		&i.WorkspaceID,
+		&i.ExecutionID,
+		&i.IntegrationID,
+		&i.ChatID,
+		&i.ThreadID,
+		&i.Repo,
+		&i.TaskRef,
+		&i.ClickupTaskID,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const insertOrchestratorDecision = `-- name: InsertOrchestratorDecision :one
 INSERT INTO public.orchestrator_decisions (workspace_id, execution_id, plan_version, task_key, decision, reason_code, converted_from, evidence_refs)
 VALUES ($1, $2, $3, $4, $5,
@@ -180,6 +207,38 @@ func (q *Queries) InsertOrchestratorPlanTask(ctx context.Context, arg InsertOrch
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const insertOrchestratorRoute = `-- name: InsertOrchestratorRoute :exec
+INSERT INTO public.orchestrator_routes (workspace_id, execution_id, integration_id, chat_id, thread_id, repo, task_ref, clickup_task_id)
+VALUES ($1, $2, $3, $4, $5,
+        $6, $7, $8)
+ON CONFLICT (workspace_id, execution_id) DO NOTHING
+`
+
+type InsertOrchestratorRouteParams struct {
+	WorkspaceID   pgtype.UUID
+	ExecutionID   int64
+	IntegrationID pgtype.UUID
+	ChatID        int64
+	ThreadID      int64
+	Repo          string
+	TaskRef       string
+	ClickupTaskID string
+}
+
+func (q *Queries) InsertOrchestratorRoute(ctx context.Context, arg InsertOrchestratorRouteParams) error {
+	_, err := q.db.Exec(ctx, insertOrchestratorRoute,
+		arg.WorkspaceID,
+		arg.ExecutionID,
+		arg.IntegrationID,
+		arg.ChatID,
+		arg.ThreadID,
+		arg.Repo,
+		arg.TaskRef,
+		arg.ClickupTaskID,
+	)
+	return err
 }
 
 const listOrchestratorDecisions = `-- name: ListOrchestratorDecisions :many

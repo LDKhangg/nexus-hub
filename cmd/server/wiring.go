@@ -27,6 +27,7 @@ import (
 	httpdelivery "github.com/LDKhangg/nexus-hub/internal/delivery/http"
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/memory"
+	"github.com/LDKhangg/nexus-hub/internal/orchestrator"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/secrets"
@@ -675,4 +676,64 @@ func (r *workflowRuntime) startCutOver(ctx context.Context) {
 			log.Printf("workflow starter: workspace %s orphan agent batches not released", ws)
 		}
 	}
+}
+
+// --- orchestrated tasks (Phase 7b) ---
+
+// orchestratorTopics is the topic router as the orchestrator owner adapter
+// uses it.
+type orchestratorTopics interface {
+	Destination(ctx context.Context, base behavior.ChatRef, in behavior.TopicIntent) behavior.ChatRef
+	Recover(ctx context.Context, chat behavior.ChatRef, err error) (behavior.ChatRef, bool)
+	NoteSent(c behavior.ChatRef)
+}
+
+// orchestratorStepSettings maps the orchestrator_* settings.
+func orchestratorStepSettings(s settings.Settings) orchestrator.StepSettings {
+	st := orchestrator.DefaultStepSettings()
+	st.Caps = orchestrator.BudgetCaps{
+		PlanIterations: int(s.OrchestratorMaxPlanIterations), Replans: int(s.OrchestratorMaxReplans),
+		RepairAttempts: int(s.OrchestratorMaxRepairAttempts), Tokens: s.OrchestratorMaxTokens,
+		Wall: time.Duration(s.OrchestratorMaxWallMinutes) * time.Minute,
+	}
+	st.MaxRepair = int(s.OrchestratorMaxRepair)
+	return st
+}
+
+// registerOrchestratorSteps registers the orchestrated task step kinds:
+// plan and evaluate use actor_model, classify uses triage_model; worker
+// jobs go through the 7a job store, owner decisions through bound
+// approvals. No in-process executor is wired yet, so read-only and
+// behavior-action tasks fail with executor_unavailable (never a side
+// effect).
+func registerOrchestratorSteps(reg *workflow.Registry, pool *pgxpool.Pool, store *storage.WorkflowStore, s settings.Settings, ag agentServices,
+	behaviors *storage.BehaviorStore, messenger behavior.Messenger, topics orchestratorTopics, jobs behavior.LocalTaskJobs, tasks *storage.WorkerTaskStore) error {
+	plans, err := storage.NewOrchestratorStore(pool)
+	if err != nil {
+		return err
+	}
+	routes, err := storage.NewOrchestratedTaskStore(pool, store)
+	if err != nil {
+		return err
+	}
+	template := orchestrator.NewOrchestrator(nil, s.ActorModel)
+	template.ClassifyModel = s.TriageModel
+	template.MaxRepair = int(s.OrchestratorMaxRepair)
+	template.MinConfidence = s.OrchestratorMinConfidence
+	steps := &orchestrator.Steps{
+		Runtime: func(ctx context.Context, ws string) (orchestrator.AIRuntime, error) {
+			p, err := ag.provider(ctx, ws)
+			if err != nil {
+				return nil, err
+			}
+			return llm.RuntimeFor(p)
+		},
+		Template: *template, Registry: orchestrator.NewCapabilityRegistry(), Plans: plans, Steps: store,
+		Instructions: ag.conversations, Routes: routes,
+		Repos:    behavior.OrchestratorRepos{Starter: tasks, Memory: tasks},
+		Jobs:     behavior.OrchestratorJobs{Jobs: jobs},
+		Owner:    behavior.NewOrchestratorOwner(messenger, topics, behaviors),
+		Settings: orchestratorStepSettings(s),
+	}
+	return steps.Register(reg)
 }
