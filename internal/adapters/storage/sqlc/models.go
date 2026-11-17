@@ -421,6 +421,60 @@ type NotificationOutbox struct {
 	SentAt              pgtype.Timestamptz
 }
 
+// Audit of every orchestrator decision, including Go conversions; enums, codes and evidence references only.
+type OrchestratorDecision struct {
+	ID            int64
+	WorkspaceID   pgtype.UUID
+	ExecutionID   int64
+	PlanVersion   int32
+	TaskKey       pgtype.Text
+	Decision      string
+	ReasonCode    string
+	ConvertedFrom pgtype.Text
+	EvidenceRefs  []byte
+	CreatedAt     pgtype.Timestamptz
+}
+
+// Versioned orchestrator plans; immutable after insert except status.
+type OrchestratorPlan struct {
+	ID            int64
+	WorkspaceID   pgtype.UUID
+	ExecutionID   int64
+	Version       int32
+	SchemaVersion int32
+	Intent        string
+	TaskType      string
+	Priority      string
+	Complexity    string
+	Confidence    float64
+	Budget        []byte
+	Status        string
+	TokensIn      int64
+	TokensOut     int64
+	CostUsd       float64
+	CreatedAt     pgtype.Timestamptz
+}
+
+// Tasks of an orchestrator plan: sanitized titles, fixed states, bounded evidence references.
+type OrchestratorPlanTask struct {
+	ID           int64
+	WorkspaceID  pgtype.UUID
+	PlanID       int64
+	Key          string
+	Title        string
+	Capabilities []string
+	DependsOn    []string
+	Priority     string
+	Complexity   string
+	Executor     string
+	State        string
+	ResultStepID string
+	Result       []byte
+	EvidenceRefs []byte
+	CreatedAt    pgtype.Timestamptz
+	UpdatedAt    pgtype.Timestamptz
+}
+
 type OutboundAction struct {
 	ID                int64
 	WorkspaceID       pgtype.UUID

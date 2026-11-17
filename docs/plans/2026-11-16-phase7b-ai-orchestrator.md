@@ -56,6 +56,7 @@
 
 ### 1.3 Boundaries
 
+- REQ-1 applies to new orchestrator code: the existing agent and behavior model callers are not migrated to `AIRuntime` in 7b (Lead ruling, P1).
 - No worker slots, scheduler or parallel execution (Phase 8). Tasks run sequentially: in-process executors, or one 7a worker job at a time for `repo.write`.
 - No VPS fallback for code changes: laptop offline → wait.
 - Claude usage statusLine is deferred by the owner (out of scope).
