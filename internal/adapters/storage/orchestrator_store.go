@@ -90,7 +90,9 @@ func mapOrchestratorDecision(r sqlc.OrchestratorDecision) orchestrator.DecisionR
 	}
 }
 
-// InsertPlan stores the plan and all its tasks in one transaction.
+// InsertPlan stores the plan and all its tasks in one transaction. Task
+// state, result step, result and evidence are stored too, so tasks carried
+// into a new plan version keep them; an empty state is PENDING.
 func (s *OrchestratorStore) InsertPlan(ctx context.Context, workspaceID string, plan orchestrator.PlanRecord, tasks []orchestrator.PlanTaskRecord) (orchestrator.PlanRecord, error) {
 	ws, err := parseDBID(workspaceID)
 	if err != nil {
@@ -119,6 +121,7 @@ func (s *OrchestratorStore) InsertPlan(ctx context.Context, workspaceID string, 
 			WorkspaceID: ws, PlanID: row.ID, Key: t.Key, Title: t.Title,
 			Capabilities: nonNil(t.Capabilities), DependsOn: nonNil(t.DependsOn),
 			Priority: defaultStr(t.Priority, "normal"), Complexity: defaultStr(t.Complexity, "m"), Executor: t.Executor,
+			State: defaultStr(t.State, "PENDING"), ResultStepID: t.ResultStepID, Result: rawOrNil(t.Result), EvidenceRefs: refsJSON(t.EvidenceRefs),
 		}); err != nil {
 			return orchestrator.PlanRecord{}, topicError(err)
 		}
@@ -127,6 +130,14 @@ func (s *OrchestratorStore) InsertPlan(ctx context.Context, workspaceID string, 
 		return orchestrator.PlanRecord{}, err
 	}
 	return mapOrchestratorPlan(row), nil
+}
+
+// rawOrNil stores an empty result as SQL NULL.
+func rawOrNil(r json.RawMessage) []byte {
+	if len(r) == 0 {
+		return nil
+	}
+	return []byte(r)
 }
 
 func defaultStr(v, def string) string {

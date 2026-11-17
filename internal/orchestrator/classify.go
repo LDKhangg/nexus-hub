@@ -115,7 +115,7 @@ func (o *Orchestrator) Classify(ctx context.Context, in ClassifyInput) (Classifi
 	}
 	v, err := generateChecked(ctx, o.Runtime, StructuredRequest{
 		Model: o.ClassifyModel, System: classifySystem, Prompt: prompt,
-	}, SchemaClassify, o.maxRepair(), check)
+	}, SchemaClassify, o.maxRepair(), check, o.BeforeAttempt)
 	u := usageOf(v)
 	if err != nil {
 		return Classification{}, u, err

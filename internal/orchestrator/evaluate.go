@@ -134,7 +134,7 @@ func (o *Orchestrator) Evaluate(ctx context.Context, in EvaluateInput) (Decision
 	}
 	v, err := generateChecked(ctx, o.Runtime, StructuredRequest{
 		Model: o.EvaluateModel, System: evaluateSystem, Prompt: prompt,
-	}, SchemaEvaluate, o.maxRepair(), check)
+	}, SchemaEvaluate, o.maxRepair(), check, o.BeforeAttempt)
 	u := usageOf(v)
 	if err != nil {
 		return Decision{}, u, err

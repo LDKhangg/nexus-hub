@@ -120,9 +120,11 @@ func (q *Queries) InsertOrchestratorPlan(ctx context.Context, arg InsertOrchestr
 }
 
 const insertOrchestratorPlanTask = `-- name: InsertOrchestratorPlanTask :one
-INSERT INTO public.orchestrator_plan_tasks (workspace_id, plan_id, key, title, capabilities, depends_on, priority, complexity, executor)
+INSERT INTO public.orchestrator_plan_tasks (workspace_id, plan_id, key, title, capabilities, depends_on, priority, complexity, executor,
+                                            state, result_step_id, result, evidence_refs)
 VALUES ($1, $2, $3, $4, $5::text[], $6::text[],
-        $7, $8, $9)
+        $7, $8, $9,
+        $10, $11, $12, $13)
 RETURNING id, workspace_id, plan_id, key, title, capabilities, depends_on, priority, complexity, executor, state, result_step_id, result, evidence_refs, created_at, updated_at
 `
 
@@ -136,6 +138,10 @@ type InsertOrchestratorPlanTaskParams struct {
 	Priority     string
 	Complexity   string
 	Executor     string
+	State        string
+	ResultStepID string
+	Result       []byte
+	EvidenceRefs []byte
 }
 
 func (q *Queries) InsertOrchestratorPlanTask(ctx context.Context, arg InsertOrchestratorPlanTaskParams) (OrchestratorPlanTask, error) {
@@ -149,6 +155,10 @@ func (q *Queries) InsertOrchestratorPlanTask(ctx context.Context, arg InsertOrch
 		arg.Priority,
 		arg.Complexity,
 		arg.Executor,
+		arg.State,
+		arg.ResultStepID,
+		arg.Result,
+		arg.EvidenceRefs,
 	)
 	var i OrchestratorPlanTask
 	err := row.Scan(

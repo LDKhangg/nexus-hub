@@ -159,7 +159,7 @@ func (o *Orchestrator) Plan(ctx context.Context, in PlanInput) (Plan, Usage, err
 	}
 	v, err := generateChecked(ctx, o.Runtime, StructuredRequest{
 		Model: o.PlanModel, System: planSystem, Prompt: prompt,
-	}, SchemaPlan, o.maxRepair(), check)
+	}, SchemaPlan, o.maxRepair(), check, o.BeforeAttempt)
 	u := usageOf(v)
 	if err != nil {
 		return Plan{}, u, err

@@ -145,16 +145,35 @@ func contains(vals []string, v string) bool {
 	return false
 }
 
-// checkErr joins path/rule messages like Schema.Validate (sorted, max 10).
+// maxItemViolations bounds the item-level messages checkErr feeds back.
+const maxItemViolations = 10
+
+// checkErr joins path/rule messages like Schema.Validate (sorted). Messages
+// on a whole value (no index in the path, such as "$.tasks: allows at most
+// 5 items") are always kept; at most maxItemViolations item-level messages
+// (an index in the path) follow, then one line counting the rest.
 func checkErr(errs []string) error {
 	if len(errs) == 0 {
 		return nil
 	}
 	sort.Strings(errs)
-	if len(errs) > 10 {
-		errs = errs[:10]
+	var whole, items []string
+	for _, e := range errs {
+		path, _, _ := strings.Cut(e, ": ")
+		if strings.Contains(path, "[") {
+			items = append(items, e)
+		} else {
+			whole = append(whole, e)
+		}
 	}
-	return errors.New(strings.Join(errs, "; "))
+	out := whole
+	if len(items) > maxItemViolations {
+		out = append(out, items[:maxItemViolations]...)
+		out = append(out, "$: "+itoa(len(items)-maxItemViolations)+" more item violations not listed")
+	} else {
+		out = append(out, items...)
+	}
+	return errors.New(strings.Join(out, "; "))
 }
 
 func itoa(n int) string {

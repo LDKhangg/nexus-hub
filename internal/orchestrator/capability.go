@@ -108,11 +108,13 @@ func (r *CapabilityRegistry) KnownCapabilities() []string {
 	return out
 }
 
-// Match picks the executor for a task that needs caps. It is deterministic:
-// the recommended executor (the model's proposal) is used only when its
-// profile covers every capability; otherwise the first profile in
-// preference order that covers every capability. Empty caps, an unknown
-// capability or no covering profile return ok=false.
+// Match picks the executor for a task that needs caps. It is deterministic
+// and least-privilege: profiles are tried in their fixed order (least
+// privileged first). The recommended executor (the model's proposal) is
+// honoured only when its profile covers every capability and no earlier
+// profile covers them; otherwise the first covering profile is used, so a
+// model can never raise a task to a more privileged executor. Empty caps, an
+// unknown capability or no covering profile return ok=false.
 func (r *CapabilityRegistry) Match(caps []string, recommended string) (string, bool) {
 	if r == nil {
 		return "", false
@@ -121,17 +123,13 @@ func (r *CapabilityRegistry) Match(caps []string, recommended string) (string, b
 	if len(caps) == 0 {
 		return "", false
 	}
-	if recommended != "" {
-		for _, p := range r.profiles {
-			if p.Name == recommended && p.covers(caps) {
-				return p.Name, true
-			}
-		}
-	}
 	for _, p := range r.profiles {
-		if p.covers(caps) {
-			return p.Name, true
+		if !p.covers(caps) {
+			continue
 		}
+		// p is the least-privilege covering profile: a recommendation
+		// either names p (honoured) or a later profile (ignored).
+		return p.Name, true
 	}
 	return "", false
 }

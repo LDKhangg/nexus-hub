@@ -97,6 +97,10 @@ type Orchestrator struct {
 	// Intents and TaskTypes are the Classify vocabularies; empty uses
 	// DefaultIntents and DefaultTaskTypes.
 	Intents, TaskTypes []string
+	// BeforeAttempt, when set, runs before every repair attempt with the
+	// usage spent so far in this call. A non-nil error stops the call and is
+	// returned with that usage (for example a budget or wall-time guard).
+	BeforeAttempt func(spent Usage) error
 }
 
 // NewOrchestrator returns an Orchestrator that uses model for every

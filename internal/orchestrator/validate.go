@@ -88,7 +88,7 @@ func (n *node) validate(path string, v any, errs *[]string) {
 			p, known := n.Properties[k]
 			if !known {
 				if n.AdditionalProperties == nil || !*n.AdditionalProperties {
-					add("has a property the schema does not allow")
+					add("unexpected property") // the name is model output; never echo it
 				}
 				continue
 			}

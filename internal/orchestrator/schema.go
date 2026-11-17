@@ -151,14 +151,16 @@ type Validated struct {
 // ErrInvalidOutput and the usage spent, so the caller can still charge it.
 // A runtime error is returned at once; it is not repaired.
 func GenerateValidated(ctx context.Context, rt AIRuntime, req StructuredRequest, schema *Schema, maxRepair int) (Validated, error) {
-	return generateChecked(ctx, rt, req, schema, maxRepair, nil)
+	return generateChecked(ctx, rt, req, schema, maxRepair, nil, nil)
 }
 
 // generateChecked is GenerateValidated with an extra Go check that runs on
 // schema-valid output. A failing check is treated exactly like a schema
 // error: it uses the same repair bound and only its error text is fed back.
 // check must return path/rule messages that never repeat output values.
-func generateChecked(ctx context.Context, rt AIRuntime, req StructuredRequest, schema *Schema, maxRepair int, check func(json.RawMessage) error) (Validated, error) {
+// before, when set, runs before every repair attempt with the usage spent so
+// far; a non-nil error stops the loop and is returned with that usage.
+func generateChecked(ctx context.Context, rt AIRuntime, req StructuredRequest, schema *Schema, maxRepair int, check func(json.RawMessage) error, before func(Usage) error) (Validated, error) {
 	if rt == nil || schema == nil {
 		return Validated{}, errors.New("orchestrator: runtime and schema are required")
 	}
@@ -169,6 +171,11 @@ func generateChecked(ctx context.Context, rt AIRuntime, req StructuredRequest, s
 	basePrompt := req.Prompt
 	var out Validated
 	for attempt := 0; attempt <= maxRepair; attempt++ {
+		if attempt > 0 && before != nil {
+			if err := before(usageOf(out)); err != nil {
+				return out, err
+			}
+		}
 		resp, err := rt.Generate(ctx, req)
 		out.Attempts++
 		if err != nil {

@@ -7,9 +7,11 @@ VALUES (sqlc.arg(workspace_id), sqlc.arg(execution_id), sqlc.arg(version), sqlc.
 RETURNING *;
 
 -- name: InsertOrchestratorPlanTask :one
-INSERT INTO public.orchestrator_plan_tasks (workspace_id, plan_id, key, title, capabilities, depends_on, priority, complexity, executor)
+INSERT INTO public.orchestrator_plan_tasks (workspace_id, plan_id, key, title, capabilities, depends_on, priority, complexity, executor,
+                                            state, result_step_id, result, evidence_refs)
 VALUES (sqlc.arg(workspace_id), sqlc.arg(plan_id), sqlc.arg(key), sqlc.arg(title), sqlc.arg(capabilities)::text[], sqlc.arg(depends_on)::text[],
-        sqlc.arg(priority), sqlc.arg(complexity), sqlc.arg(executor))
+        sqlc.arg(priority), sqlc.arg(complexity), sqlc.arg(executor),
+        sqlc.arg(state), sqlc.arg(result_step_id), sqlc.arg(result), sqlc.arg(evidence_refs))
 RETURNING *;
 
 -- name: SetOrchestratorPlanStatus :one

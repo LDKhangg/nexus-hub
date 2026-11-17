@@ -291,7 +291,7 @@ func (r *jobRun) takeInstructions(list []behavior.WorkerInstruction) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, in := range list {
-		if in.ID == "" || strings.TrimSpace(in.Text) == "" || r.j.State().Instrs[in.ID] || len(in.ID) > 128 {
+		if in.ID == "" || strings.TrimSpace(in.Text) == "" || r.j.State().Instrs[in.ID] || r.taken[in.ID] || len(in.ID) > 128 {
 			continue
 		}
 		dup := false
@@ -573,7 +573,13 @@ func (r *jobRun) appendFollowUps() (bool, error) {
 			requeue(list[i:])
 			return i > 0, err
 		}
+		// Once journaled, the journal skips the id; if journaling fails,
+		// the id stays out of the ack list (acks come from the journal) and
+		// may be received again.
 		_, _ = r.j.MarkInstruction(in.ID)
+		r.mu.Lock()
+		delete(r.taken, in.ID)
+		r.mu.Unlock()
 	}
 	return true, nil
 }
