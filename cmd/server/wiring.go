@@ -49,6 +49,9 @@ type agentServices struct {
 	conversations workflow.ConversationStore
 	// provider returns the workspace's default LLM provider.
 	provider func(ctx context.Context, ws string) (domain.LLMProvider, error)
+	// investigators returns the workspace's Tier-2 investigator (nil when
+	// the provider has no tool calling).
+	investigators func(ctx context.Context, ws string) (agent.Investigator, error)
 }
 
 // ensurePrivateDirs creates the managed-clone and git tmp directories 0700.
@@ -164,6 +167,10 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		}
 		return agent.NewTier1Router(c.Default(), s.TriageModel), inv, nil
 	}
+	investigators := func(ctx context.Context, ws string) (agent.Investigator, error) {
+		_, inv, err := models(ctx, ws)
+		return inv, err
+	}
 	provider := func(ctx context.Context, ws string) (domain.LLMProvider, error) {
 		c, err := client(ctx, ws)
 		if err != nil {
@@ -179,7 +186,7 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
 	})
 	worker := relay.NewActionWorker(actions, sender, relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout}, conversations)
-	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, people: directory, store: store, conversations: conversations}, nil
+	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, investigators: investigators, people: directory, store: store, conversations: conversations}, nil
 }
 
 // buildBehaviorEngine wires the behavior run executor and the action
@@ -703,11 +710,13 @@ func orchestratorStepSettings(s settings.Settings) orchestrator.StepSettings {
 // registerOrchestratorSteps registers the orchestrated task step kinds:
 // plan and evaluate use actor_model, classify uses triage_model; worker
 // jobs go through the 7a job store, owner decisions through bound
-// approvals. No in-process executor is wired yet, so read-only and
-// behavior-action tasks fail with executor_unavailable (never a side
-// effect).
+// approvals. Read-only tasks run in process on the investigate executor
+// (the Tier-2 read loop under the ClickUp source's tool policy, read tools
+// only). The behavior-actions executor is not wired (Phase 8), so Plan is
+// never offered clickup.write or telegram.notify.
 func registerOrchestratorSteps(reg *workflow.Registry, pool *pgxpool.Pool, store *storage.WorkflowStore, s settings.Settings, ag agentServices,
-	behaviors *storage.BehaviorStore, messenger behavior.Messenger, topics orchestratorTopics, jobs behavior.LocalTaskJobs, tasks *storage.WorkerTaskStore) error {
+	behaviors *storage.BehaviorStore, messenger behavior.Messenger, topics orchestratorTopics, jobs behavior.LocalTaskJobs, tasks *storage.WorkerTaskStore,
+	integrations *storage.IntegrationRepository, redactor *agent.Redactor) error {
 	plans, err := storage.NewOrchestratorStore(pool)
 	if err != nil {
 		return err
@@ -730,9 +739,17 @@ func registerOrchestratorSteps(reg *workflow.Registry, pool *pgxpool.Pool, store
 		},
 		Template: *template, Registry: orchestrator.NewCapabilityRegistry(), Plans: plans, Steps: store,
 		Instructions: ag.conversations, Routes: routes,
-		Repos:    behavior.OrchestratorRepos{Starter: tasks, Memory: tasks},
-		Jobs:     behavior.OrchestratorJobs{Jobs: jobs},
-		Owner:    behavior.NewOrchestratorOwner(messenger, topics, behaviors),
+		Repos: behavior.OrchestratorRepos{Starter: tasks, Memory: tasks},
+		Jobs:  behavior.OrchestratorJobs{Jobs: jobs},
+		Owner: behavior.NewOrchestratorOwner(messenger, topics, behaviors),
+		Executors: map[string]orchestrator.TaskExecutor{
+			orchestrator.ExecutorInvestigate: &behavior.OrchestratorInvestigate{
+				Policies:      behaviorPolicies{integrations: integrations, known: ag.known},
+				Investigators: ag.investigators,
+				Registry:      ag.reg, Sanitizer: redactor, Limits: ag.limits,
+				MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
+			},
+		},
 		Settings: orchestratorStepSettings(s),
 	}
 	return steps.Register(reg)

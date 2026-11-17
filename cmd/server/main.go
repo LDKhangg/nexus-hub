@@ -158,7 +158,7 @@ func run() error {
 		if err := step.Register(reg); err != nil {
 			return err
 		}
-		return registerOrchestratorSteps(reg, pool, store, s, ag, behaviors, messenger, topics, workerStore, taskStore)
+		return registerOrchestratorSteps(reg, pool, store, s, ag, behaviors, messenger, topics, workerStore, taskStore, integrations, redactor)
 	})
 	if err != nil {
 		return err

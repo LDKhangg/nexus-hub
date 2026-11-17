@@ -173,7 +173,7 @@ var specs = map[string]spec{
 	"orchestrator_max_replans":         {kind: kInt, def: int64(2), min: 0, max: 10, set: func(s *Settings, v any) { s.OrchestratorMaxReplans = v.(int64) }},
 	"orchestrator_max_repair_attempts": {kind: kInt, def: int64(2), min: 0, max: 20, set: func(s *Settings, v any) { s.OrchestratorMaxRepairAttempts = v.(int64) }},
 	"orchestrator_max_tokens":          {kind: kInt, def: int64(80000), min: 1000, max: 2_000_000, set: func(s *Settings, v any) { s.OrchestratorMaxTokens = v.(int64) }},
-	"orchestrator_max_wall_minutes":    {kind: kInt, def: int64(20), min: 1, max: 1440, set: func(s *Settings, v any) { s.OrchestratorMaxWallMinutes = v.(int64) }},
+	"orchestrator_max_wall_minutes":    {kind: kInt, def: int64(90), min: 1, max: 1440, set: func(s *Settings, v any) { s.OrchestratorMaxWallMinutes = v.(int64) }},
 	"telegram_mode":                    {kind: kEnum, def: TelegramModeAuto, enum: []string{TelegramModeAuto, TelegramModeWebhook, TelegramModePoll}, set: func(s *Settings, v any) { s.TelegramMode = v.(string) }},
 }
 

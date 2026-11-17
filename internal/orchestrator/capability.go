@@ -108,6 +108,29 @@ func (r *CapabilityRegistry) KnownCapabilities() []string {
 	return out
 }
 
+// CapabilitiesFor returns the capabilities covered by the profiles for
+// which available reports true, sorted. Steps use it to offer Plan only the
+// capabilities of wired executors, so a plan naming a capability without a
+// wired executor fails the known-capability check (repair).
+func (r *CapabilityRegistry) CapabilitiesFor(available func(ExecutorProfile) bool) []string {
+	if r == nil {
+		return nil
+	}
+	var out []string
+	for _, p := range r.profiles {
+		if available != nil && !available(p) {
+			continue
+		}
+		for _, c := range p.Capabilities {
+			if !slices.Contains(out, c) {
+				out = append(out, c)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Match picks the executor for a task that needs caps. It is deterministic
 // and least-privilege: profiles are tried in their fixed order (least
 // privileged first). The recommended executor (the model's proposal) is

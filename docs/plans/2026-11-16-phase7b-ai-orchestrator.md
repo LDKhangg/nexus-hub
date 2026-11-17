@@ -52,7 +52,7 @@
 | O2 | Does the comment pipeline's Tier-1 triage switch to the orchestrator classifier (FR-043–046)? | **a)** yes, same output contract, same routing, a fake-provider equivalence test · b) no, keep Phase 2 triage until Phase 8 |
 | O3 | `DELEGATE` before real workers (Phase 8) — updated for 7a | **a)** static capability registry: `repo.write` = the 7a local worker (job through the `local-task` machinery); in-process executors for read-only work (`clickup.read`, `github.read`, `repo.read`) and behavior actions (`clickup.write`, `telegram.notify` under policy); Phase 8 adds worker slots · b) `DELEGATE` always blocks with "needs worker" until Phase 8 |
 | O4 | Budget exhausted | **a)** block: `WAITING_FOR_USER` with buttons "Thêm 1 vòng" / "Huỷ" (expires → `FAILED`) · b) always `FAILED` with reason `planning_budget_exceeded` |
-| O5 | Models and default budgets (setting keys, changeable later) | **a)** plan + evaluate = `actor_model` (Sonnet class), classifier = `triage_model`; max 3 plan iterations, 2 replans, 2 repair attempts, 80k tokens, 20 min per execution · b) plan on an Opus-class model, others as a) |
+| O5 | Models and default budgets (setting keys, changeable later) | **a)** plan + evaluate = `actor_model` (Sonnet class), classifier = `triage_model`; max 3 plan iterations, 2 replans, 2 repair attempts, 80k tokens, 90 min per execution (was 20 min; Lead ruling 2026-11-17: a 7a worker job may run 60 min) · b) plan on an Opus-class model, others as a) |
 
 ### 1.3 Boundaries
 

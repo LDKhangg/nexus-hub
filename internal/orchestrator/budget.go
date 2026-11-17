@@ -23,7 +23,8 @@ const (
 	DefaultMaxReplans        = 2
 	DefaultMaxRepairAttempts = 2
 	DefaultMaxTokens         = int64(80000)
-	DefaultMaxWall           = 20 * time.Minute
+	// DefaultMaxWall leaves room for one 7a worker job (60 min wall).
+	DefaultMaxWall = 90 * time.Minute
 )
 
 // Budget extension ("Thêm 1 vòng", O4a) limits.

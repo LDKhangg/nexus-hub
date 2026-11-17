@@ -306,6 +306,12 @@ type TaskRun struct {
 	Task        PlanTask
 	Route       Route
 	Fence       Fence
+	// Request is the owner's request (untrusted text); executors bound it
+	// and pass it only as data.
+	Request string
+	// TokensLeft is what the execution's token budget has left when the
+	// task starts; an executor never plans to spend more.
+	TokensLeft int64
 }
 
 // TaskOutcome is an in-process executor's structured result. Evidence must
@@ -315,6 +321,9 @@ type TaskOutcome struct {
 	ReasonCode string
 	Evidence   []EvidenceRef
 	Usage      Usage
+	// Summary is a short untrusted result text; it is stored bounded in the
+	// task result.
+	Summary string
 }
 
 // TaskExecutor runs one task in process. An executor never performs a side
@@ -335,6 +344,9 @@ type StepSettings struct {
 	// PlanEstimate and EvaluateEstimate are the tokens a call is expected
 	// to spend; a call is not started when they do not fit.
 	PlanEstimate, EvaluateEstimate int64
+	// ExecuteEstimate is the tokens an in-process executor is expected to
+	// spend; the task is not started when they do not fit.
+	ExecuteEstimate int64
 	// GateTTL is how long the owner has to decide; <= 0 means 24 h.
 	GateTTL time.Duration
 }
@@ -343,7 +355,7 @@ type StepSettings struct {
 func DefaultStepSettings() StepSettings {
 	return StepSettings{
 		Caps: DefaultBudgetCaps(), MaxRepair: DefaultMaxRepair,
-		PlanEstimate: 4000, EvaluateEstimate: 2000, GateTTL: 24 * time.Hour,
+		PlanEstimate: 4000, EvaluateEstimate: 2000, ExecuteEstimate: 4000, GateTTL: 24 * time.Hour,
 	}
 }
 
@@ -363,12 +375,26 @@ type Steps struct {
 	Jobs         WorkerJobs
 	Owner        Owner
 	// Executors are the in-process executors by executor name
-	// (ExecutorInvestigate, ExecutorBehaviorActions). A missing one fails
-	// its tasks with executor_unavailable.
+	// (ExecutorInvestigate, ExecutorBehaviorActions). Plan is offered only
+	// the capabilities of wired executors; a missing one fails its tasks
+	// with executor_unavailable.
 	Executors map[string]TaskExecutor
 	Settings  StepSettings
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
+}
+
+// offeredCapabilities are the capabilities Plan may use: only those of
+// executors that are wired (an in-process executor in Executors, a worker
+// profile when Jobs is set). Unwired executors' capabilities are never
+// offered.
+func (s *Steps) offeredCapabilities() []string {
+	return s.Registry.CapabilitiesFor(func(p ExecutorProfile) bool {
+		if p.Worker {
+			return s.Jobs != nil
+		}
+		return s.Executors[p.Name] != nil
+	})
 }
 
 func (s *Steps) now() time.Time {

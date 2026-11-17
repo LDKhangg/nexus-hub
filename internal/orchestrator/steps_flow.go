@@ -661,7 +661,7 @@ func (r *stepRun) request() (string, error) {
 
 func (r *stepRun) planInput(request string) PlanInput {
 	return PlanInput{
-		Request: request, Capabilities: r.s.Registry.KnownCapabilities(), MaxTasks: r.s.Settings.MaxTasks,
+		Request: request, Capabilities: r.s.offeredCapabilities(), MaxTasks: r.s.Settings.MaxTasks,
 		Caps: r.budget.Snapshot().Caps.PlanCaps(),
 	}
 }
@@ -931,14 +931,23 @@ func (r *stepRun) runTask(t PlanTaskRecord, explicitRepo string) (workflow.StepR
 		}
 		return r.success()
 	}
-	if err := r.budget.CheckWall(); err != nil {
+	if err := r.budget.CanCall(r.s.Settings.ExecuteEstimate); err != nil {
 		return r.budgetGate(err)
+	}
+	request, err := r.request()
+	if err != nil {
+		code, retry := stepErr(err)
+		return r.failStep(code, retry)
 	}
 	t.State, t.ResultStepID = TaskRunning, r.key
 	if err := r.putTask(t); err != nil {
 		return r.failStep(ReasonStorageUnavailable, true)
 	}
-	out, err := ex.RunTask(r.ctx, TaskRun{WorkspaceID: r.ws, ExecutionID: r.id, StepKey: r.key, Task: planFromRecords([]PlanTaskRecord{t}).Tasks[0], Route: r.route, Fence: r.fence()})
+	snap := r.budget.Snapshot()
+	out, err := ex.RunTask(r.ctx, TaskRun{
+		WorkspaceID: r.ws, ExecutionID: r.id, StepKey: r.key, Task: planFromRecords([]PlanTaskRecord{t}).Tasks[0], Route: r.route, Fence: r.fence(),
+		Request: request, TokensLeft: max(snap.Caps.Tokens-snap.Used.Tokens, 0),
+	})
 	r.recordUsage(out.Usage)
 	if err != nil {
 		if r.ctx.Err() != nil {
@@ -950,7 +959,11 @@ func (r *stepRun) runTask(t PlanTaskRecord, explicitRepo string) (workflow.StepR
 	for _, e := range out.Evidence {
 		evidence = append(evidence, e.ID)
 	}
-	if err := r.finishTask(t, out.Succeeded, out.ReasonCode, evidence, nil); err != nil {
+	var extra map[string]string
+	if out.Summary != "" {
+		extra = map[string]string{"summary": out.Summary}
+	}
+	if err := r.finishTask(t, out.Succeeded, out.ReasonCode, evidence, extra); err != nil {
 		return r.failStep(ReasonStorageUnavailable, true)
 	}
 	return r.success()
