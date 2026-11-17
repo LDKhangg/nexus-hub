@@ -568,7 +568,7 @@ func TestSender_RetriesInOrderWithSameKey(t *testing.T) {
 	_ = j.EnqueueProgress(PhasePushing, behavior.WorkerProgressCounts{})
 	_ = j.EnqueueResult(behavior.WorkerResult{Status: "succeeded"})
 	hub := &scriptHub{failFor: func(op string, n int) error {
-		if n <= 3 {
+		if op == "progress" && n <= 3 {
 			return []error{ErrRetry, ErrRetry, ErrRetry}[n-1]
 		}
 		return nil
