@@ -416,15 +416,6 @@ func (h *TelegramHandler) normalize(ctx context.Context, integration tenant.Webh
 			u.Args = behavior.AssistantTextPrefix + key
 			return u, true, nil
 		}
-		// unanswerable: a reply with no open approval or template prompt is a
-		// normal question for the assistant; without one, keep the note.
-		unanswerable := func() (behavior.InboundUpdate, bool, error) {
-			if h.assistant == nil {
-				u.Note = behavior.NoteNoOpenReply
-				return u, true, nil
-			}
-			return stageAssistant()
-		}
 		if replyTo == 0 {
 			return stageAssistant()
 		}
@@ -436,11 +427,13 @@ func (h *TelegramHandler) normalize(ctx context.Context, integration tenant.Webh
 		nonce, err := h.answers.StageAnswer(ctx, workspaceID, replyTo, text, h.now())
 		if errors.Is(err, behavior.ErrNotFound) {
 			if h.templates == nil {
-				return unanswerable()
+				u.Note = behavior.NoteNoOpenReply
+				return u, true, nil
 			}
 			nonce, err = h.templates.StageTemplateReply(ctx, workspaceID, replyTo, text, h.now())
 			if errors.Is(err, reporting.ErrTemplatePromptNotFound) {
-				return unanswerable()
+				u.Note = behavior.NoteNoOpenReply
+				return u, true, nil
 			}
 			if err == nil {
 				u.Args = "report-template:" + nonce
