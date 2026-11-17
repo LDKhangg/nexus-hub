@@ -10,4 +10,5 @@ Status: OPEN.
   - TD-TT-4 (REQ-4): `/task` remembered repo, explicit repo wins, unregistered remembered repo falls back to the usage reply.
   - TD-TT-5 (REQ-5): notices for a task keep going to its topic.
   - TD-TT-6: migration 00027 Up/Down.
+  - TD-TT-7: topic root-reply — plain text in a forum topic arrives with `reply_to_message` == the topic root and must route as plain text, not as a reply; fixed in `9b761d5`, no regression test.
 - Pay first in the next Phase Brief.
