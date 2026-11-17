@@ -1,0 +1,161 @@
+package orchestrator
+
+import (
+	"slices"
+	"sort"
+)
+
+// Capability names (O3a). Plans may only use KnownCapabilities.
+const (
+	CapRepoRead       = "repo.read"
+	CapRepoWrite      = "repo.write"
+	CapClickUpRead    = "clickup.read"
+	CapGitHubRead     = "github.read"
+	CapClickUpWrite   = "clickup.write"
+	CapTelegramNotify = "telegram.notify"
+)
+
+// Executor names of the static registry (O3a).
+const (
+	// ExecutorInvestigate runs read-only work in process.
+	ExecutorInvestigate = "investigate"
+	// ExecutorBehaviorActions runs behavior actions in process, under the
+	// existing action authorizer and approval path.
+	ExecutorBehaviorActions = "behavior-actions"
+	// ExecutorLocalWorker is the Phase 7a local worker (a job through the
+	// local-task machinery).
+	ExecutorLocalWorker = "local-worker"
+)
+
+// ExecutorProfile is one executor and the capabilities it covers.
+type ExecutorProfile struct {
+	Name         string
+	Capabilities []string
+	// Worker is true when the executor runs as a 7a worker job instead of
+	// in process.
+	Worker bool
+}
+
+func (p ExecutorProfile) covers(caps []string) bool {
+	for _, c := range caps {
+		if !slices.Contains(p.Capabilities, c) {
+			return false
+		}
+	}
+	return true
+}
+
+// CapabilityRegistry holds static executor profiles in a fixed preference
+// order: least privileged first. Go, not the model, chooses executors from
+// it (REQ-5). The zero value has no profiles; use NewCapabilityRegistry.
+type CapabilityRegistry struct {
+	profiles []ExecutorProfile
+}
+
+// NewCapabilityRegistry returns the static O3a registry. Preference order:
+// investigate (read-only, in process), behavior-actions (in process, under
+// policy), local-worker (repo.write; also covers repo.read).
+func NewCapabilityRegistry() *CapabilityRegistry {
+	return &CapabilityRegistry{profiles: []ExecutorProfile{
+		{Name: ExecutorInvestigate, Capabilities: []string{CapClickUpRead, CapGitHubRead, CapRepoRead}},
+		{Name: ExecutorBehaviorActions, Capabilities: []string{CapClickUpWrite, CapTelegramNotify}},
+		{Name: ExecutorLocalWorker, Capabilities: []string{CapRepoWrite, CapRepoRead}, Worker: true},
+	}}
+}
+
+// Profiles returns a copy of the profiles in preference order.
+func (r *CapabilityRegistry) Profiles() []ExecutorProfile {
+	if r == nil {
+		return nil
+	}
+	out := make([]ExecutorProfile, len(r.profiles))
+	for i, p := range r.profiles {
+		p.Capabilities = slices.Clone(p.Capabilities)
+		out[i] = p
+	}
+	return out
+}
+
+// Profile returns the profile named name.
+func (r *CapabilityRegistry) Profile(name string) (ExecutorProfile, bool) {
+	if r == nil {
+		return ExecutorProfile{}, false
+	}
+	for _, p := range r.profiles {
+		if p.Name == name {
+			p.Capabilities = slices.Clone(p.Capabilities)
+			return p, true
+		}
+	}
+	return ExecutorProfile{}, false
+}
+
+// KnownCapabilities returns every capability some profile covers, sorted.
+// It is the Capabilities input of a Plan call.
+func (r *CapabilityRegistry) KnownCapabilities() []string {
+	if r == nil {
+		return nil
+	}
+	var out []string
+	for _, p := range r.profiles {
+		for _, c := range p.Capabilities {
+			if !slices.Contains(out, c) {
+				out = append(out, c)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Match picks the executor for a task that needs caps. It is deterministic:
+// the recommended executor (the model's proposal) is used only when its
+// profile covers every capability; otherwise the first profile in
+// preference order that covers every capability. Empty caps, an unknown
+// capability or no covering profile return ok=false.
+func (r *CapabilityRegistry) Match(caps []string, recommended string) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	caps = uniqueNonEmpty(caps)
+	if len(caps) == 0 {
+		return "", false
+	}
+	if recommended != "" {
+		for _, p := range r.profiles {
+			if p.Name == recommended && p.covers(caps) {
+				return p.Name, true
+			}
+		}
+	}
+	for _, p := range r.profiles {
+		if p.covers(caps) {
+			return p.Name, true
+		}
+	}
+	return "", false
+}
+
+// AssignExecutors returns a copy of plan with every task's Executor set by
+// Match, and the keys (plan task order) of tasks no profile covers. A
+// blocked task's Executor is cleared, so it is never assigned. The input
+// plan is not modified.
+func (r *CapabilityRegistry) AssignExecutors(plan Plan) (Plan, []string) {
+	out := plan
+	out.Tasks = make([]PlanTask, len(plan.Tasks))
+	out.Order = slices.Clone(plan.Order)
+	var blocked []string
+	for i, t := range plan.Tasks {
+		t.Capabilities = slices.Clone(t.Capabilities)
+		t.DependsOn = slices.Clone(t.DependsOn)
+		exec, ok := r.Match(t.Capabilities, t.Executor)
+		if ok {
+			t.Executor = exec
+		} else {
+			t.Executor = ""
+			blocked = append(blocked, t.Key)
+		}
+		out.Tasks[i] = t
+	}
+	return out, blocked
+}
