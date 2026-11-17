@@ -80,7 +80,8 @@ func (e *ClaudeExecutor) Run(ctx context.Context, req ExecRequest) (ExecResult, 
 	args := []string{"-p", prompt, "--output-format", "json", "--max-turns", strconv.Itoa(max(req.MaxTurns, 1)),
 		"--permission-mode", "acceptEdits",
 		"--allowedTools", strings.Join(e.AllowedTools, ","),
-		"--disallowedTools", strings.Join(claudeDisallowedTools, ",")}
+		"--disallowedTools", strings.Join(claudeDisallowedTools, ","),
+		"--settings", claudeSettingsJSON}
 	if e.Model != "" {
 		args = append(args, "--model", e.Model)
 	}

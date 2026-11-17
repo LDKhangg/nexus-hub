@@ -1244,6 +1244,13 @@ fallback: with the laptop offline the job waits and the topic says so.
    tools (`mcp__…`). The worker runs the repository's `test_command` itself
    after the executor finishes.
 
+   File reads are confined to the worktree: the worker passes
+   `--settings` with `permissions.blockReadsOutsideWorkingDirectories`
+   and always denies `Read` on `~/.ssh`, `~/.config`, `~/.local/state`,
+   `~/.gnupg`, `~/.aws` and `/etc` (this also covers `Glob` and `Grep`).
+   The config refuses `allowed_tools` entries with absolute, `~/` or `..`
+   paths. This is a permission rule inside `claude`, not an OS sandbox.
+
    The worker's own git commands in a worktree (status, add, diff, commit,
    push) run with `core.fsmonitor=false` and `core.hooksPath=/dev/null` at
    command-line precedence, and refuse to run when the worktree's `.git`

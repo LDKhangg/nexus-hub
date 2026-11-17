@@ -61,7 +61,16 @@ var claudeDisallowedTools = []string{
 	"Bash", "Bash(git push:*)", "Bash(git commit:*)", "Bash(git reset:*)", "Bash(git checkout:*)",
 	"Bash(git switch:*)", "Bash(git rebase:*)", "Bash(git merge:*)", "Bash(gh:*)",
 	"WebFetch", "WebSearch",
+	// Bare Read/Glob/Grep match any path; these keep credential and system
+	// directories out of reach (`~/` = home, `//` = absolute). Read deny
+	// rules also cover Glob and Grep.
+	"Read(~/.ssh/**)", "Read(~/.config/**)", "Read(~/.local/state/**)",
+	"Read(~/.gnupg/**)", "Read(~/.aws/**)", "Read(//etc/**)",
 }
+
+// claudeSettingsJSON is passed inline as `claude --settings`: reads outside
+// the working directory are blocked. Permission-based, not an OS sandbox.
+const claudeSettingsJSON = `{"permissions":{"blockReadsOutsideWorkingDirectories":true}}`
 
 // Config is ~/.config/nexus-hub/worker.yaml. It never holds a secret: the
 // hub device token lives in worker-token and the ClickUp token in the file
@@ -265,6 +274,9 @@ func (c *Config) normalize(home string) error {
 	for _, t := range c.Claude.AllowedTools {
 		if !allowedToolRE.MatchString(t) || forbiddenClaudeTool(t) {
 			return bad("claude.allowed_tools (file tools only: no Bash, web or MCP tools)")
+		}
+		if strings.Contains(t, "//") || strings.Contains(t, "~/") || strings.Contains(t, "..") {
+			return bad("claude.allowed_tools (no absolute, home or .. paths)")
 		}
 	}
 	if len(c.Claude.AllowedTools) == 0 {
