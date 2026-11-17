@@ -41,7 +41,7 @@ func (w *InboxWorker) taskCommand(ctx context.Context, u InboundUpdate, to ChatR
 	if err != nil {
 		return w.reply(ctx, to, msgFailed, "handler_failed")
 	}
-	repo, rest, out := w.taskRepo(ctx, to, repos, rest)
+	repo, rest, out := w.taskRepo(ctx, to, u.WorkspaceID, canonical, repos, rest)
 	if out != nil {
 		return *out
 	}
@@ -99,8 +99,10 @@ func (w *InboxWorker) taskTarget(ctx context.Context, u InboundUpdate, args stri
 }
 
 // taskRepo picks the repository: an explicit registered owner/repo first
-// word, else the only registered one. A non-nil outcome is the reply to send.
-func (w *InboxWorker) taskRepo(ctx context.Context, to ChatRef, repos []string, rest string) (string, string, *outcome) {
+// word, else the repository of the task's last local task when it is still
+// registered, else the only registered one. A non-nil outcome is the reply
+// to send.
+func (w *InboxWorker) taskRepo(ctx context.Context, to ChatRef, workspaceID, clickUpTaskID string, repos []string, rest string) (string, string, *outcome) {
 	first, tail, _ := strings.Cut(strings.TrimSpace(rest), " ")
 	if tenant.ValidRepo(first) {
 		for _, r := range repos {
@@ -109,15 +111,37 @@ func (w *InboxWorker) taskRepo(ctx context.Context, to ChatRef, repos []string, 
 			}
 		}
 	}
-	switch len(repos) {
-	case 0:
+	if len(repos) == 0 {
 		out := w.reply(ctx, to, msgTaskNoRepo, "no_repo")
 		return "", "", &out
-	case 1:
+	}
+	if r := w.rememberedRepo(ctx, workspaceID, clickUpTaskID, repos); r != "" {
+		return r, rest, nil
+	}
+	if len(repos) == 1 {
 		return repos[0], rest, nil
 	}
 	out := w.reply(ctx, to, "Có nhiều repo: "+strings.Join(repos, ", ")+"\n"+usageTask, "usage")
 	return "", "", &out
+}
+
+// rememberedRepo returns the repository of the task's last local task when
+// it is still registered, else "". Read errors count as no memory.
+func (w *InboxWorker) rememberedRepo(ctx context.Context, workspaceID, clickUpTaskID string, repos []string) string {
+	mem, ok := w.d.LocalTasks.(LocalTaskRepoMemory)
+	if !ok || clickUpTaskID == "" {
+		return ""
+	}
+	last, err := mem.LastTaskRepo(ctx, workspaceID, clickUpTaskID)
+	if err != nil || last == "" {
+		return ""
+	}
+	for _, r := range repos {
+		if strings.EqualFold(r, last) {
+			return r
+		}
+	}
+	return ""
 }
 
 // retryCommand queues the local job of a workflow again: "/retry WF-n", or

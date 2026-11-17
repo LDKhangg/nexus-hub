@@ -54,6 +54,10 @@ type TaskState struct {
 	// markdown description the engine writes blocks into.
 	Description string
 	Markdown    string
+	// CustomID is the task's custom id (such as FC-6583), empty without
+	// one; URL is the task link ClickUp gives.
+	CustomID string
+	URL      string
 }
 
 // client does authenticated ClickUp calls.
@@ -129,6 +133,8 @@ func (c client) readTask(ctx context.Context, token, taskID string) (TaskState, 
 	}
 	var task struct {
 		ID                  string
+		CustomID            string `json:"custom_id"`
+		URL                 string `json:"url"`
 		Name                string
 		Description         string
 		MarkdownDescription *string `json:"markdown_description"`
@@ -138,7 +144,8 @@ func (c client) readTask(ctx context.Context, token, taskID string) (TaskState, 
 	if err := json.Unmarshal(data, &task); err != nil || task.ID == "" {
 		return TaskState{}, toolErr("invalid_response", false)
 	}
-	st := TaskState{ID: task.ID, Name: task.Name, Status: task.Status.Status, StatusType: task.Status.Type, Description: task.Description}
+	st := TaskState{ID: task.ID, Name: task.Name, Status: task.Status.Status, StatusType: task.Status.Type, Description: task.Description,
+		CustomID: task.CustomID, URL: task.URL}
 	if task.MarkdownDescription != nil {
 		st.Markdown = *task.MarkdownDescription
 	} else {

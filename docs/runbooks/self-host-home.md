@@ -1079,6 +1079,17 @@ at most 128 bytes) and are never stored or logged; the database keeps only
 subject keys, thread ids, state and times. Reports, approval prompts,
 clarifications and failure notices of a run all follow the same rule.
 
+A ClickUp task topic is named `<custom id> · <task title>` (for example
+`FC-6583 · Login`), or `<task id> · <task title>` when the task has no custom
+id. Right after the topic is created the bot posts one message with the same
+text and a **Mở task ClickUp** button to the task, and pins it; pinning needs
+the bot's **Pin messages** admin right (without it the message stays,
+unpinned, and the log says `telegram topic: task link not pinned`). Topics made
+before this change keep their old name until you run
+`nh telegram topics rename --workspace-id $WS`: it renames every task topic,
+posts and pins the missing links in open topics, prints counts only
+(`renamed`, `linked`, `failed`) and is safe to run again.
+
 ### Fallback
 
 A message is never lost because of a topic. If the chat is not a forum, the bot
@@ -1182,6 +1193,14 @@ port, no fixed IP, and it keeps working when you change networks.
 
 Nothing ever runs on the hub, on GitHub Actions or with the API key as a
 fallback: with the laptop offline the job waits and the topic says so.
+
+`/task` remembers the repository per ClickUp task: without `owner/repo` it
+uses the repository of the task's last local task, as long as that repository
+is still registered; naming one explicitly makes it the remembered one.
+
+When Cloudflare Access protects the hub's host, add a Bypass Access
+application for `<host>/worker/v1`: the worker authenticates with its own
+device token and cannot pass an Access login.
 
 ### What the laptop needs
 

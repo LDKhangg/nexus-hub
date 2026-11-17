@@ -86,3 +86,10 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND platform = 'clickup' AND role IN
 UPDATE public.worker_task_routes
 SET instruction_version = sqlc.arg(version)::bigint
 WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id);
+
+-- name: GetLastWorkerTaskRepo :one
+-- The repository of the newest local task of one ClickUp task.
+SELECT repo FROM public.worker_task_routes
+WHERE workspace_id = sqlc.arg(workspace_id) AND clickup_task_id = sqlc.arg(clickup_task_id)
+ORDER BY created_at DESC, execution_id DESC
+LIMIT 1;

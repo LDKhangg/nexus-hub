@@ -27,6 +27,8 @@ func NewMessenger(client *Client, integrations IntegrationLookup) *Messenger {
 
 var _ behavior.Messenger = (*Messenger)(nil)
 var _ behavior.MessageEditor = (*Messenger)(nil)
+var _ behavior.TopicLinkPoster = (*Messenger)(nil)
+var _ behavior.TopicRenamer = (*Messenger)(nil)
 
 // ControlTokenRef returns the bot token reference of an eligible Telegram
 // control integration in the workspace.
@@ -68,6 +70,25 @@ func (m *Messenger) CreateTopic(ctx context.Context, to behavior.ChatRef, name s
 		return 0, err
 	}
 	return m.client.CreateForumTopic(ctx, to.WorkspaceID, ref, chatIDString(to.ChatID), name)
+}
+
+// RenameTopic renames a forum topic; changed is false when it already had
+// that name.
+func (m *Messenger) RenameTopic(ctx context.Context, to behavior.ChatRef, threadID int64, name string) (bool, error) {
+	ref, err := ControlTokenRef(ctx, m.integrations, to.WorkspaceID, to.IntegrationID)
+	if err != nil {
+		return false, err
+	}
+	return m.client.EditForumTopic(ctx, to.WorkspaceID, ref, chatIDString(to.ChatID), threadID, name)
+}
+
+// PinMessage pins a message the bot sent, without a notification.
+func (m *Messenger) PinMessage(ctx context.Context, to behavior.ChatRef, messageID int64) error {
+	ref, err := ControlTokenRef(ctx, m.integrations, to.WorkspaceID, to.IntegrationID)
+	if err != nil {
+		return err
+	}
+	return m.client.PinChatMessage(ctx, to.WorkspaceID, ref, chatIDString(to.ChatID), messageID)
 }
 
 // CloseTopic closes a forum topic.

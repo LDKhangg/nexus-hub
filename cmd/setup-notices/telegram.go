@@ -15,6 +15,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/adapters/control/telegram"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/netguard"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage"
+	clickuptools "github.com/LDKhangg/nexus-hub/internal/adapters/tools/clickup"
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/settings"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
@@ -23,6 +24,7 @@ import (
 
 const telegramUsage = `usage: telegram webhook set|status|delete --workspace-id <uuid> --integration-id <uuid>
        telegram topics --workspace-id <uuid>
+       telegram topics rename --workspace-id <uuid>
        telegram send --workspace-id <uuid> [--topic general|<fixed name>]
        telegram group set|show --workspace-id <uuid> --integration-id <uuid> [--chat-id <id>]
   set     generate a new secret, store it encrypted and register
@@ -36,6 +38,9 @@ send    read a plain-text message from stdin (1-4000 characters, never argv)
         topic given by --topic. Prints {"status":"sent","message_id":n}.
 topics  list the workspace's forum topics: subject kind and key, thread id,
         state and times (topic and task names are never stored or shown)
+        rename  rename every ClickUp task topic to "<custom id> · <title>" and
+                post and pin the task link where it is missing; prints counts
+                only (renamed, linked, failed); safe to run again
 group   set  store the workspace's forum group chat id (owner_chat_id) on the
              Telegram control integration; use it again after Telegram turns
              the group into a supergroup (the chat id changes)
@@ -51,6 +56,9 @@ func telegramCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 	if len(args) >= 1 {
 		switch args[0] {
 		case "topics":
+			if len(args) >= 2 && args[1] == "rename" {
+				return telegramTopicsRename(ctx, pool, args[2:], out, lookup)
+			}
 			return telegramTopics(ctx, pool, args[1:], out)
 		case "group":
 			return telegramGroup(ctx, pool, args[1:], out)
@@ -203,6 +211,70 @@ func telegramTopics(ctx context.Context, pool *pgxpool.Pool, args []string, out 
 		rows = append(rows, row)
 	}
 	return json.NewEncoder(out).Encode(map[string]any{"workspace_id": *ws, "count": len(rows), "topics": rows})
+}
+
+// telegramTopicsRename renames the workspace's ClickUp task topics to
+// "<custom id> · <title>" and posts and pins the task link where it was
+// never posted. Output is counts only: no names, titles or links.
+func telegramTopicsRename(ctx context.Context, pool *pgxpool.Pool, args []string, out io.Writer, lookup func(string) (string, bool)) error {
+	f := commandFlags("telegram topics rename")
+	ws := f.String("workspace-id", "", "workspace UUID")
+	if f.Parse(args) != nil || f.NArg() != 0 || !tenant.ValidUUID(*ws) {
+		return errors.New("telegram topics rename requires a valid --workspace-id\n" + telegramUsage)
+	}
+	store, err := storage.NewTelegramTopicStore(pool)
+	if err != nil {
+		return err
+	}
+	integrations, err := storage.NewIntegrationRepository(pool)
+	if err != nil {
+		return err
+	}
+	resolver, _, err := openResolver(pool, lookup)
+	if err != nil {
+		return err
+	}
+	messenger := telegram.NewMessenger(telegram.NewClient(telegramHTTP(), resolver), integrations)
+	reader := clickuptools.NewTaskReader(telegramHTTP(), resolver)
+	known := knownTools()
+	router, err := behavior.NewTopicRouter(behavior.TopicRouterDeps{
+		Store: store, Client: messenger,
+		TaskInfo: func(ctx context.Context, workspaceID, _, taskID string) (behavior.TaskTopicInfo, error) {
+			tokenRef, err := clickUpTokenRef(ctx, integrations, workspaceID, known)
+			if err != nil {
+				return behavior.TaskTopicInfo{}, err
+			}
+			st, err := reader.ReadTask(ctx, workspaceID, tokenRef, taskID)
+			return behavior.TaskTopicInfo{Title: st.Name, CustomID: st.CustomID, URL: st.URL}, err
+		},
+	})
+	if err != nil {
+		return errors.New("topic router unavailable")
+	}
+	n, err := router.RefreshTaskTopics(ctx, *ws)
+	if err != nil {
+		return errors.New("topics not listed")
+	}
+	return json.NewEncoder(out).Encode(map[string]any{"workspace_id": *ws, "renamed": n.Renamed, "linked": n.Linked, "failed": n.Failed})
+}
+
+// clickUpTokenRef returns the ClickUp token reference of the workspace's
+// first enabled ClickUp source, like the server's task reads.
+func clickUpTokenRef(ctx context.Context, integrations *storage.IntegrationRepository, ws string, known map[string]tenant.Tier) (string, error) {
+	list, err := integrations.List(ctx, ws, 100, 0)
+	if err != nil {
+		return "", errors.New("integrations not listed")
+	}
+	for _, in := range list {
+		if in.IsEnabled && in.Platform == "clickup" && (in.Role == tenant.IntegrationRoleSource || in.Role == tenant.IntegrationRoleBoth) {
+			cfg, err := tenant.ParseAgentConfig(in.Config, known)
+			if err != nil {
+				return "", errors.New("ClickUp source config is invalid")
+			}
+			return cfg.ClickUpTokenRef, nil
+		}
+	}
+	return "", errors.New("no ClickUp source in workspace")
 }
 
 // ownerUserIDUnset reports whether owner_telegram_user_id is 0. When the

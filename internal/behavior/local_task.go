@@ -146,6 +146,12 @@ type LocalTaskStarter interface {
 	RegisteredRepos(ctx context.Context, workspaceID string) ([]string, error)
 }
 
+// LocalTaskRepoMemory is implemented by a LocalTaskStarter that remembers
+// the repository of a ClickUp task's last local task; "" when none.
+type LocalTaskRepoMemory interface {
+	LastTaskRepo(ctx context.Context, workspaceID, clickUpTaskID string) (string, error)
+}
+
 // LocalTaskRoutes persists the routes. GetRoute is ErrNotFound when the
 // execution is not a local task.
 type LocalTaskRoutes interface {

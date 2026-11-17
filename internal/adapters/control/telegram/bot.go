@@ -73,7 +73,7 @@ func keyboard(rows [][]Button) ([][]inlineButton, error) {
 		r := make([]inlineButton, 0, len(row))
 		for _, b := range row {
 			if b.URL != "" {
-				if b.Text == "" || units(b.Text) > 64 || b.Data != "" || len(b.URL) > 512 || !strings.HasPrefix(b.URL, "https://t.me/") || !utf8.ValidString(b.URL) {
+				if b.Text == "" || units(b.Text) > 64 || b.Data != "" || len(b.URL) > 512 || !allowedButtonURL(b.URL) || !utf8.ValidString(b.URL) {
 					return nil, errBadButton
 				}
 				r = append(r, inlineButton{Text: b.Text, URL: b.URL})
@@ -87,6 +87,12 @@ func keyboard(rows [][]Button) ([][]inlineButton, error) {
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// allowedButtonURL reports whether a URL button may open u: a Telegram
+// link (topic jump) or a ClickUp task link.
+func allowedButtonURL(u string) bool {
+	return strings.HasPrefix(u, "https://t.me/") || strings.HasPrefix(u, "https://app.clickup.com/")
 }
 
 // token resolves the bot token; errors carry only a safe code.
@@ -385,6 +391,35 @@ func (c *Client) CreateForumTopic(ctx context.Context, workspaceID, tokenRef, ch
 		return 0, &relay.DeliveryError{Code: "invalid_response"}
 	}
 	return result.ThreadID, nil
+}
+
+// EditForumTopic renames a topic. changed is false when the topic already
+// had that name. The name is never logged.
+func (c *Client) EditForumTopic(ctx context.Context, workspaceID, tokenRef, chatID string, threadID int64, name string) (bool, error) {
+	token, err := c.token(ctx, workspaceID, tokenRef)
+	if err != nil {
+		return false, err
+	}
+	if units(name) > 128 {
+		name = clip(name, 128)
+	}
+	err = c.do(ctx, token, "editForumTopic", map[string]any{"chat_id": chatID, "message_thread_id": threadID, "name": name}, nil)
+	if ErrorCode(err) == CodeTopicNotChanged {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// PinChatMessage pins one message of the chat without a notification.
+func (c *Client) PinChatMessage(ctx context.Context, workspaceID, tokenRef, chatID string, messageID int64) error {
+	token, err := c.token(ctx, workspaceID, tokenRef)
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, token, "pinChatMessage", map[string]any{"chat_id": chatID, "message_id": messageID, "disable_notification": true}, nil)
 }
 
 // CloseForumTopic closes a topic; closing a closed topic succeeds.

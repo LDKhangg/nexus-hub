@@ -374,3 +374,25 @@ func retryableWorkerState(state string) bool {
 	}
 	return false
 }
+
+var _ behavior.LocalTaskRepoMemory = (*WorkerTaskStore)(nil)
+
+// LastTaskRepo returns the repository of the newest local task of the
+// ClickUp task in the workspace, or "" when there is none.
+func (s *WorkerTaskStore) LastTaskRepo(ctx context.Context, workspaceID, clickUpTaskID string) (string, error) {
+	ws, err := parseDBID(workspaceID)
+	if err != nil {
+		return "", invalid("workspace_id")
+	}
+	if clickUpTaskID == "" || len(clickUpTaskID) > 64 {
+		return "", nil
+	}
+	repo, err := s.q.GetLastWorkerTaskRepo(ctx, sqlc.GetLastWorkerTaskRepoParams{WorkspaceID: ws, ClickupTaskID: clickUpTaskID})
+	if isNoRows(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return repo, nil
+}

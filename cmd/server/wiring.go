@@ -287,8 +287,9 @@ func (o ownerChats) OwnerChat(ctx context.Context, workspaceID string, t behavio
 }
 
 // buildTopicRouter wires the Telegram topic router: the topic store, the bot
-// for forum calls, the ClickUp task title for topic names and the
-// execution's resource bindings. The title is read only to name a topic.
+// for forum calls, the ClickUp task title, custom id and URL for topic names
+// and the pinned task link, and the execution's resource bindings. The task
+// is read only to name a topic and build its link; nothing is stored.
 func buildTopicRouter(pool *pgxpool.Pool, s settings.Settings, integrations *storage.IntegrationRepository, ag agentServices, resolver *secrets.Resolver, messenger behavior.TopicClient) (*behavior.TopicRouter, error) {
 	store, err := storage.NewTelegramTopicStore(pool)
 	if err != nil {
@@ -298,13 +299,13 @@ func buildTopicRouter(pool *pgxpool.Pool, s settings.Settings, integrations *sto
 	reader := clickuptools.NewTaskReader(netguard.Client(s.ToolTimeout, netguard.DefaultHosts), resolver)
 	deps := behavior.TopicRouterDeps{
 		Store: store, Client: messenger,
-		TaskName: func(ctx context.Context, workspaceID, integrationID, taskID string) (string, error) {
+		TaskInfo: func(ctx context.Context, workspaceID, integrationID, taskID string) (behavior.TaskTopicInfo, error) {
 			cfg, err := policies.RunPolicy(ctx, workspaceID, integrationID)
 			if err != nil {
-				return "", err
+				return behavior.TaskTopicInfo{}, err
 			}
 			st, err := reader.ReadTask(ctx, workspaceID, cfg.ClickUpTokenRef, taskID)
-			return st.Name, err
+			return behavior.TaskTopicInfo{Title: st.Name, CustomID: st.CustomID, URL: st.URL}, err
 		},
 		// A custom task ID (FC-6583) is read with the team of the task URL or,
 		// without one, of the workspace's ClickUp source; both must agree.

@@ -11,6 +11,27 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const claimTelegramTopicLink = `-- name: ClaimTelegramTopicLink :execrows
+UPDATE public.telegram_topics
+SET link_message_id = 0
+WHERE workspace_id = $1 AND id = $2
+  AND thread_id IS NOT NULL AND link_message_id IS NULL
+`
+
+type ClaimTelegramTopicLinkParams struct {
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+// Claims the task link message of a created topic once (NULL to 0).
+func (q *Queries) ClaimTelegramTopicLink(ctx context.Context, arg ClaimTelegramTopicLinkParams) (int64, error) {
+	result, err := q.db.Exec(ctx, claimTelegramTopicLink, arg.WorkspaceID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteTelegramTopic = `-- name: DeleteTelegramTopic :execrows
 DELETE FROM public.telegram_topics
 WHERE workspace_id = $1 AND id = $2
@@ -31,7 +52,7 @@ func (q *Queries) DeleteTelegramTopic(ctx context.Context, arg DeleteTelegramTop
 }
 
 const getTelegramTopicBySubject = `-- name: GetTelegramTopicBySubject :one
-SELECT id, workspace_id, integration_id, chat_id, thread_id, subject_kind, subject_key, state, reserved_at, created_at, updated_at, closed_at FROM public.telegram_topics
+SELECT id, workspace_id, integration_id, chat_id, thread_id, subject_kind, subject_key, state, reserved_at, created_at, updated_at, closed_at, link_message_id FROM public.telegram_topics
 WHERE workspace_id = $1 AND integration_id = $2
   AND chat_id = $3 AND subject_kind = $4 AND subject_key = $5
 `
@@ -66,12 +87,13 @@ func (q *Queries) GetTelegramTopicBySubject(ctx context.Context, arg GetTelegram
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ClosedAt,
+		&i.LinkMessageID,
 	)
 	return i, err
 }
 
 const getTelegramTopicByThread = `-- name: GetTelegramTopicByThread :one
-SELECT id, workspace_id, integration_id, chat_id, thread_id, subject_kind, subject_key, state, reserved_at, created_at, updated_at, closed_at FROM public.telegram_topics
+SELECT id, workspace_id, integration_id, chat_id, thread_id, subject_kind, subject_key, state, reserved_at, created_at, updated_at, closed_at, link_message_id FROM public.telegram_topics
 WHERE workspace_id = $1 AND integration_id = $2
   AND chat_id = $3 AND thread_id = $4
 `
@@ -104,12 +126,13 @@ func (q *Queries) GetTelegramTopicByThread(ctx context.Context, arg GetTelegramT
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ClosedAt,
+		&i.LinkMessageID,
 	)
 	return i, err
 }
 
 const listTelegramTopics = `-- name: ListTelegramTopics :many
-SELECT id, workspace_id, integration_id, chat_id, thread_id, subject_kind, subject_key, state, reserved_at, created_at, updated_at, closed_at FROM public.telegram_topics
+SELECT id, workspace_id, integration_id, chat_id, thread_id, subject_kind, subject_key, state, reserved_at, created_at, updated_at, closed_at, link_message_id FROM public.telegram_topics
 WHERE workspace_id = $1
 ORDER BY id
 `
@@ -136,6 +159,7 @@ func (q *Queries) ListTelegramTopics(ctx context.Context, workspaceID pgtype.UUI
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.ClosedAt,
+			&i.LinkMessageID,
 		); err != nil {
 			return nil, err
 		}
@@ -154,7 +178,7 @@ WHERE workspace_id = $1 AND integration_id = $2
   AND chat_id = $3 AND subject_kind = $4 AND subject_key = $5
   AND thread_id IS NULL
   AND reserved_at <= now() - make_interval(secs => $6::float8)
-RETURNING id, workspace_id, integration_id, chat_id, thread_id, subject_kind, subject_key, state, reserved_at, created_at, updated_at, closed_at
+RETURNING id, workspace_id, integration_id, chat_id, thread_id, subject_kind, subject_key, state, reserved_at, created_at, updated_at, closed_at, link_message_id
 `
 
 type ReclaimTelegramTopicReservationParams struct {
@@ -190,8 +214,29 @@ func (q *Queries) ReclaimTelegramTopicReservation(ctx context.Context, arg Recla
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ClosedAt,
+		&i.LinkMessageID,
 	)
 	return i, err
+}
+
+const releaseTelegramTopicLink = `-- name: ReleaseTelegramTopicLink :execrows
+UPDATE public.telegram_topics
+SET link_message_id = NULL
+WHERE workspace_id = $1 AND id = $2 AND link_message_id = 0
+`
+
+type ReleaseTelegramTopicLinkParams struct {
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+// Gives a claim back after a send that surely was not delivered.
+func (q *Queries) ReleaseTelegramTopicLink(ctx context.Context, arg ReleaseTelegramTopicLinkParams) (int64, error) {
+	result, err := q.db.Exec(ctx, releaseTelegramTopicLink, arg.WorkspaceID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const releaseTelegramTopicReservation = `-- name: ReleaseTelegramTopicReservation :execrows
@@ -217,7 +262,7 @@ const reserveTelegramTopic = `-- name: ReserveTelegramTopic :one
 INSERT INTO public.telegram_topics (workspace_id, integration_id, chat_id, subject_kind, subject_key)
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (workspace_id, integration_id, chat_id, subject_kind, subject_key) DO NOTHING
-RETURNING id, workspace_id, integration_id, chat_id, thread_id, subject_kind, subject_key, state, reserved_at, created_at, updated_at, closed_at
+RETURNING id, workspace_id, integration_id, chat_id, thread_id, subject_kind, subject_key, state, reserved_at, created_at, updated_at, closed_at, link_message_id
 `
 
 type ReserveTelegramTopicParams struct {
@@ -252,8 +297,30 @@ func (q *Queries) ReserveTelegramTopic(ctx context.Context, arg ReserveTelegramT
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ClosedAt,
+		&i.LinkMessageID,
 	)
 	return i, err
+}
+
+const setTelegramTopicLink = `-- name: SetTelegramTopicLink :execrows
+UPDATE public.telegram_topics
+SET link_message_id = $1::bigint
+WHERE workspace_id = $2 AND id = $3 AND link_message_id = 0
+`
+
+type SetTelegramTopicLinkParams struct {
+	MessageID   int64
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+// Records the posted link message id of a claimed topic.
+func (q *Queries) SetTelegramTopicLink(ctx context.Context, arg SetTelegramTopicLinkParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setTelegramTopicLink, arg.MessageID, arg.WorkspaceID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const setTelegramTopicState = `-- name: SetTelegramTopicState :one
@@ -262,7 +329,7 @@ SET state = $1::text,
     closed_at = CASE WHEN $1::text = 'closed' THEN now() ELSE NULL END,
     updated_at = now()
 WHERE workspace_id = $2 AND id = $3
-RETURNING id, workspace_id, integration_id, chat_id, thread_id, subject_kind, subject_key, state, reserved_at, created_at, updated_at, closed_at
+RETURNING id, workspace_id, integration_id, chat_id, thread_id, subject_kind, subject_key, state, reserved_at, created_at, updated_at, closed_at, link_message_id
 `
 
 type SetTelegramTopicStateParams struct {
@@ -287,6 +354,7 @@ func (q *Queries) SetTelegramTopicState(ctx context.Context, arg SetTelegramTopi
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ClosedAt,
+		&i.LinkMessageID,
 	)
 	return i, err
 }
@@ -296,7 +364,7 @@ UPDATE public.telegram_topics
 SET thread_id = $1, updated_at = now()
 WHERE workspace_id = $2 AND id = $3 AND thread_id IS NULL
   AND reserved_at = $4
-RETURNING id, workspace_id, integration_id, chat_id, thread_id, subject_kind, subject_key, state, reserved_at, created_at, updated_at, closed_at
+RETURNING id, workspace_id, integration_id, chat_id, thread_id, subject_kind, subject_key, state, reserved_at, created_at, updated_at, closed_at, link_message_id
 `
 
 type SetTelegramTopicThreadParams struct {
@@ -329,6 +397,7 @@ func (q *Queries) SetTelegramTopicThread(ctx context.Context, arg SetTelegramTop
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ClosedAt,
+		&i.LinkMessageID,
 	)
 	return i, err
 }
