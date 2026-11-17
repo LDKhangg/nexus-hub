@@ -19,6 +19,9 @@ const (
 type ContextPacket struct {
 	Title, TaskURL, Summary string
 	Recent, NewBatch        []Message
+	// Omitted counts new external_user messages the batch budget left out
+	// of NewBatch (the oldest ones).
+	Omitted int
 }
 
 // BuildPacket selects the new external_user batch (messages after
@@ -49,6 +52,7 @@ func BuildPacket(title, taskURL, summary string, history []Message, lastTriagedI
 	}
 	p.Recent = earlier
 	p.NewBatch = budgetBatch(batch)
+	p.Omitted = len(batch) - len(p.NewBatch)
 	return p
 }
 

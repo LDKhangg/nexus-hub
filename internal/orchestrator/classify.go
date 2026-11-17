@@ -25,10 +25,24 @@ type TaskRef struct {
 
 // ClassifyInput is one request to classify. Request and task titles are
 // untrusted text. Source is a fixed label such as "telegram".
+//
+// The optional fields let another pipeline reuse Classify without changing
+// the /plan defaults: Intents replaces the intent vocabulary for this call
+// only (invalid labels are dropped; none left uses the configured or default
+// vocabulary), Guide and Context are trusted parameter lines (code
+// constants and owner configuration, never untrusted text), Omitted counts
+// older items the caller left out of Request, and Notes asks for a summary
+// and goal (schema classify v2).
 type ClassifyInput struct {
 	Request string
 	Source  string
 	Tasks   []TaskRef
+
+	Intents []string
+	Guide   string
+	Context string
+	Omitted int
+	Notes   bool
 }
 
 // Classification is a validated Classify output. Threshold is the
@@ -40,6 +54,8 @@ type Classification struct {
 	Complexity string
 	Confidence float64
 	Threshold  float64
+	// Summary and Goal are set only when ClassifyInput.Notes was set.
+	Summary, Goal string
 }
 
 // NeedsClarification reports whether confidence is below the threshold.
@@ -52,6 +68,8 @@ type classifyOutput struct {
 	Priority   string  `json:"priority"`
 	Complexity string  `json:"complexity"`
 	Confidence float64 `json:"confidence"`
+	Summary    string  `json:"summary"`
+	Goal       string  `json:"goal"`
 }
 
 func vocab(configured, def []string) []string {
@@ -79,15 +97,32 @@ func (o *Orchestrator) Classify(ctx context.Context, in ClassifyInput) (Classifi
 		return Classification{}, Usage{}, errors.Join(ErrInvalidInput, errors.New("request is empty"))
 	}
 	intents := vocab(o.Intents, DefaultIntents)
+	if in.Intents != nil {
+		intents = vocab(in.Intents, intents)
+	}
 	taskTypes := vocab(o.TaskTypes, DefaultTaskTypes)
 	source := ""
 	if labelRe.MatchString(in.Source) {
 		source = in.Source
 	}
-	prompt := buildPrompt([]param{
+	params := []param{
 		{"intent vocabulary", intents},
 		{"task_type vocabulary", taskTypes},
-	}, struct {
+	}
+	if g := sanitizeText(in.Guide, maxGuideRunes); g != "" {
+		params = append(params, param{"intent guide", g})
+	}
+	if c := sanitizeText(in.Context, maxGuideRunes); c != "" {
+		params = append(params, param{"team context", c})
+	}
+	if in.Omitted > 0 {
+		params = append(params, param{"older items left out of the data", in.Omitted})
+	}
+	schema, system := SchemaClassify, classifySystem
+	if in.Notes {
+		schema, system = SchemaClassifyNotes, classifyNotesSystem
+	}
+	prompt := buildPrompt(params, struct {
 		Source  string    `json:"source,omitempty"`
 		Request string    `json:"request"`
 		Tasks   []TaskRef `json:"tasks,omitempty"`
@@ -111,11 +146,14 @@ func (o *Orchestrator) Classify(ctx context.Context, in ClassifyInput) (Classifi
 		}
 		result = Classification{Intent: c.Intent, TaskType: c.TaskType, Priority: c.Priority,
 			Complexity: c.Complexity, Confidence: c.Confidence}
+		if in.Notes {
+			result.Summary, result.Goal = strings.TrimSpace(c.Summary), strings.TrimSpace(c.Goal)
+		}
 		return nil
 	}
 	v, err := generateChecked(ctx, o.Runtime, StructuredRequest{
-		Model: o.ClassifyModel, System: classifySystem, Prompt: prompt,
-	}, SchemaClassify, o.maxRepair(), check, o.BeforeAttempt)
+		Model: o.ClassifyModel, System: system, Prompt: prompt,
+	}, schema, o.maxRepair(), check, o.BeforeAttempt)
 	u := usageOf(v)
 	if err != nil {
 		return Classification{}, u, err

@@ -825,18 +825,38 @@ func (r *stepRun) sayPlan() {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s: kế hoạch v%d (%d việc)", workflow.FormatRef(r.id), r.plan.Version, len(r.tasks))
-	for i, t := range planFromRecords(r.tasks).Order {
+	caps := r.budget.Snapshot().Caps
+	fmt.Fprintf(&b, "\nGiới hạn: %d vòng lập kế hoạch · %d lần lập lại · %d token · %d phút",
+		caps.PlanIterations, caps.Replans, caps.Tokens, int64(caps.Wall/time.Minute))
+	order := planFromRecords(r.tasks).Order
+	for i, t := range order {
 		rec, _ := r.task(t)
 		executor := rec.Executor
 		if executor == "" {
 			executor = "không có executor phù hợp"
 		}
-		fmt.Fprintf(&b, "\n%d. %s [%s]", i+1, capText(rec.Title, MaxTitleRunes), executor)
+		line := fmt.Sprintf("\n%d. %s · %s [%s]", i+1, sanitizeText(rec.Key, 32), sanitizeText(rec.Title, MaxTitleRunes), executor)
+		if len(rec.DependsOn) > 0 {
+			deps := make([]string, 0, len(rec.DependsOn))
+			for _, d := range rec.DependsOn {
+				deps = append(deps, sanitizeText(d, 32))
+			}
+			line += " ← " + strings.Join(deps, ", ")
+		}
+		// Keep room for the "+N" line so the message stays under the limit.
+		if rest := len(order) - i; utf8.RuneCountInString(b.String())+utf8.RuneCountInString(line) > maxReportRunes-planMoreReserve && rest > 0 {
+			fmt.Fprintf(&b, "\n… +%d việc nữa", rest)
+			break
+		}
+		b.WriteString(line)
 	}
 	if err := r.s.Owner.Say(r.ctx, r.route, capText(b.String(), maxReportRunes)); err != nil {
 		log.Printf("orchestrator execution %d: plan message not sent", r.id)
 	}
 }
+
+// planMoreReserve is the room kept for the "+N more tasks" line.
+const planMoreReserve = 40
 
 // --- tasks ---
 

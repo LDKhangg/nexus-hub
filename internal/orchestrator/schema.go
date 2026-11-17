@@ -97,6 +97,22 @@ var (
     "confidence":{"type":"number","minimum":0,"maximum":1}
   }}`)
 
+	// SchemaClassifyNotes is the Classify output with a short summary and
+	// goal (classify v2). Only callers that set ClassifyInput.Notes use it;
+	// the comment pipeline's Tier-1 triage needs both for its report.
+	SchemaClassifyNotes = register("classify", 2, `{
+  "type":"object","additionalProperties":false,
+  "required":["intent","task_type","priority","complexity","confidence","summary"],
+  "properties":{
+    "intent":{"type":"string","pattern":"^[a-z][a-z0-9_]{0,63}$"},
+    "task_type":{"type":"string","pattern":"^[a-z][a-z0-9_]{0,63}$"},
+    "priority":{"type":"string","enum":`+enumJSON(Priorities)+`},
+    "complexity":{"type":"string","enum":`+enumJSON(Complexities)+`},
+    "confidence":{"type":"number","minimum":0,"maximum":1},
+    "summary":{"type":"string","maxLength":200},
+    "goal":{"type":"string","maxLength":300}
+  }}`)
+
 	// SchemaPlan is the Plan output (FR-047, FR-048, FR-050, FR-056).
 	SchemaPlan = register("plan", 1, `{
   "type":"object","additionalProperties":false,

@@ -165,7 +165,13 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		if tc := c.ToolCalling(); tc != nil {
 			inv = agent.NewTier2Actor(tc, s.ActorModel)
 		}
-		return agent.NewTier1Router(c.Default(), s.TriageModel), inv, nil
+		// Tier-1 triage goes through orchestrator Classify (REQ-12); a
+		// provider without structured output keeps the plain text prompt.
+		var tr agent.Triager = agent.NewTier1Router(c.Default(), s.TriageModel)
+		if rt, err := llm.RuntimeFor(c.Default()); err == nil {
+			tr = agent.NewClassifyTier1Router(rt, s.TriageModel)
+		}
+		return tr, inv, nil
 	}
 	investigators := func(ctx context.Context, ws string) (agent.Investigator, error) {
 		_, inv, err := models(ctx, ws)

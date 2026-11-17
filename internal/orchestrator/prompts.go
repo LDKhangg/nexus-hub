@@ -25,6 +25,7 @@ const (
 	maxContextTasks = 50
 	maxNextAction   = 300
 	maxReasonRunes  = 64
+	maxGuideRunes   = 1000
 )
 
 const systemRules = `Rules:
@@ -35,6 +36,9 @@ const systemRules = `Rules:
 
 const classifyRole = `You classify one incoming request for a task orchestrator.
 Return the intent and task type from the vocabularies in the parameters, a priority proposal, a complexity estimate, and your confidence from 0 to 1 that the classification is right. Use a low confidence when the request is ambiguous or missing information.`
+
+const classifyNotesRole = classifyRole + `
+Also return a short neutral summary of the request (at most 200 characters) and, when an intent guide asks for one, a concrete goal for the follow-up work (at most 300 characters). Follow the intent guide in the parameters when one is given.`
 
 const planRole = `You plan the work for one request in a task orchestrator.
 Split the work into a small number of tasks. Each task has a unique key, a short title, the capabilities it needs (only from the known capabilities in the parameters), the keys of the tasks it depends on (no cycles), a priority and a complexity, and optionally an acceptance hint. Return the initial decision for the plan (not REPLAN and not COMPLETE) and a budget request within the caps in the parameters. When a previous plan and a replan reason are given, return a corrected plan.`
@@ -52,9 +56,10 @@ func buildSystem(role string, s *Schema) string {
 
 // Fixed system prompts; they never contain untrusted text.
 var (
-	classifySystem = buildSystem(classifyRole, SchemaClassify)
-	planSystem     = buildSystem(planRole, SchemaPlan)
-	evaluateSystem = buildSystem(evaluateRole, SchemaEvaluate)
+	classifySystem      = buildSystem(classifyRole, SchemaClassify)
+	classifyNotesSystem = buildSystem(classifyNotesRole, SchemaClassifyNotes)
+	planSystem          = buildSystem(planRole, SchemaPlan)
+	evaluateSystem      = buildSystem(evaluateRole, SchemaEvaluate)
 )
 
 // param is one trusted parameter line (from configuration or code).
