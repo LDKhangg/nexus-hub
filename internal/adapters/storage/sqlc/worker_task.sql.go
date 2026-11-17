@@ -11,6 +11,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getLastWorkerTaskRepo = `-- name: GetLastWorkerTaskRepo :one
+SELECT repo FROM public.worker_task_routes
+WHERE workspace_id = $1 AND clickup_task_id = $2
+ORDER BY created_at DESC, execution_id DESC
+LIMIT 1
+`
+
+type GetLastWorkerTaskRepoParams struct {
+	WorkspaceID   pgtype.UUID
+	ClickupTaskID string
+}
+
+// The repository of the newest local task of one ClickUp task.
+func (q *Queries) GetLastWorkerTaskRepo(ctx context.Context, arg GetLastWorkerTaskRepoParams) (string, error) {
+	row := q.db.QueryRow(ctx, getLastWorkerTaskRepo, arg.WorkspaceID, arg.ClickupTaskID)
+	var repo string
+	err := row.Scan(&repo)
+	return repo, err
+}
+
 const getWorkerJobForStep = `-- name: GetWorkerJobForStep :one
 SELECT id, workspace_id, execution_id, step_id, required_capabilities, state, device_id, lease_token_hash, lease_expires_at, attempt, result, idempotency_key, payload, progress, progress_seq, leased_at, interrupted_at, created_at, updated_at, finished_at FROM public.worker_jobs
 WHERE workspace_id = $1 AND execution_id = $2 AND step_id = $3

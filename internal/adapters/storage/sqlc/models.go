@@ -526,6 +526,8 @@ type TelegramTopic struct {
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 	ClosedAt    pgtype.Timestamptz
+	// Telegram message id of the pinned task link; NULL never posted, 0 claimed. Ids only.
+	LinkMessageID pgtype.Int8
 }
 
 // Inbound update dedupe and work queue; holds a short command and its arguments, never full message text.

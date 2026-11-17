@@ -112,11 +112,8 @@ func (r *TopicRouter) TaskTopicLink(ctx context.Context, base ChatRef, taskID st
 		return "", ErrTopicUnavailable
 	}
 	base.ThreadID, base.topic = 0, nil
-	if r.d.TaskName != nil {
-		nctx, cancel := context.WithTimeout(ctx, taskNameTimeout)
-		_, err := r.d.TaskName(nctx, base.WorkspaceID, "", taskID)
-		cancel()
-		if err != nil {
+	if r.d.TaskInfo != nil || r.d.TaskName != nil {
+		if _, ok := r.taskInfo(ctx, base.WorkspaceID, "", taskID); !ok {
 			return "", ErrTaskUnreadable
 		}
 	}

@@ -250,3 +250,60 @@ func (s *TelegramTopicStore) DeleteTopic(ctx context.Context, workspaceID string
 	_, err = s.q.DeleteTelegramTopic(ctx, sqlc.DeleteTelegramTopicParams{WorkspaceID: ws, ID: id})
 	return topicError(err)
 }
+
+var _ behavior.TopicLinkStore = (*TelegramTopicStore)(nil)
+
+func topicLinkIDs(workspaceID string, id int64) (pgtype.UUID, error) {
+	ws, err := parseDBID(workspaceID)
+	if err != nil {
+		return pgtype.UUID{}, topicInvalid("workspace_id")
+	}
+	if id <= 0 {
+		return pgtype.UUID{}, topicInvalid("id")
+	}
+	return ws, nil
+}
+
+// ClaimTopicLink claims the task link message of a created topic; only one
+// caller ever gets true for a topic.
+func (s *TelegramTopicStore) ClaimTopicLink(ctx context.Context, workspaceID string, id int64) (bool, error) {
+	ws, err := topicLinkIDs(workspaceID, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := s.q.ClaimTelegramTopicLink(ctx, sqlc.ClaimTelegramTopicLinkParams{WorkspaceID: ws, ID: id})
+	if err != nil {
+		return false, topicError(err)
+	}
+	return n == 1, nil
+}
+
+// SetTopicLink records the posted link message id of a claimed topic.
+func (s *TelegramTopicStore) SetTopicLink(ctx context.Context, workspaceID string, id, messageID int64) error {
+	ws, err := topicLinkIDs(workspaceID, id)
+	if err != nil {
+		return err
+	}
+	if messageID <= 0 {
+		return topicInvalid("message_id")
+	}
+	n, err := s.q.SetTelegramTopicLink(ctx, sqlc.SetTelegramTopicLinkParams{WorkspaceID: ws, ID: id, MessageID: messageID})
+	if err != nil {
+		return topicError(err)
+	}
+	if n == 0 {
+		return behavior.ErrConflict
+	}
+	return nil
+}
+
+// ReleaseTopicLink gives a claim back after a send that was surely not
+// delivered, so a later run may post the link.
+func (s *TelegramTopicStore) ReleaseTopicLink(ctx context.Context, workspaceID string, id int64) error {
+	ws, err := topicLinkIDs(workspaceID, id)
+	if err != nil {
+		return err
+	}
+	_, err = s.q.ReleaseTelegramTopicLink(ctx, sqlc.ReleaseTelegramTopicLinkParams{WorkspaceID: ws, ID: id})
+	return topicError(err)
+}

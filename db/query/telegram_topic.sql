@@ -57,3 +57,22 @@ ORDER BY id;
 -- Forgets a binding whose Telegram thread no longer exists.
 DELETE FROM public.telegram_topics
 WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id);
+
+-- name: ClaimTelegramTopicLink :execrows
+-- Claims the task link message of a created topic once (NULL to 0).
+UPDATE public.telegram_topics
+SET link_message_id = 0
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id)
+  AND thread_id IS NOT NULL AND link_message_id IS NULL;
+
+-- name: SetTelegramTopicLink :execrows
+-- Records the posted link message id of a claimed topic.
+UPDATE public.telegram_topics
+SET link_message_id = sqlc.arg(message_id)::bigint
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND link_message_id = 0;
+
+-- name: ReleaseTelegramTopicLink :execrows
+-- Gives a claim back after a send that surely was not delivered.
+UPDATE public.telegram_topics
+SET link_message_id = NULL
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND link_message_id = 0;

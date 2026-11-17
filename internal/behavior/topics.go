@@ -75,11 +75,14 @@ type TopicIntent struct {
 }
 
 // TopicRouterDeps are the router's collaborators. Client may be nil (every
-// send goes to General); TaskName and Resources are optional.
+// send goes to General); TaskName, TaskInfo and Resources are optional.
 type TopicRouterDeps struct {
-	Store     TopicStore
-	Client    TopicClient
-	TaskName  TopicNamer
+	Store    TopicStore
+	Client   TopicClient
+	TaskName TopicNamer
+	// TaskInfo returns a task's title, custom id and URL for the topic name
+	// and the pinned link; optional, preferred over TaskName.
+	TaskInfo  TopicTaskInfo
 	Resources workflow.ResourceLister
 	// ResolveTask turns a custom task ID into the canonical ID; optional.
 	ResolveTask func(ctx context.Context, workspaceID string, ref TaskRef) (string, error)
@@ -307,7 +310,12 @@ func (r *TopicRouter) create(ctx context.Context, base ChatRef, topic Topic, kin
 		r.fallback("topic_unavailable")
 		return base
 	}
-	name := r.name(ctx, base, kind, key, in)
+	var info TaskTopicInfo
+	var infoOK bool
+	if kind == TopicSubjectClickUpTask {
+		info, infoOK = r.taskInfo(ctx, base.WorkspaceID, in.TaskSource, key)
+	}
+	name := r.nameWith(kind, key, in, info, infoOK)
 	threadID, err := r.d.Client.CreateTopic(ctx, base, name)
 	if err != nil || threadID <= 0 {
 		code := "topic_create_failed"
@@ -324,35 +332,29 @@ func (r *TopicRouter) create(ctx context.Context, base ChatRef, topic Topic, kin
 		return base
 	}
 	r.unblock(base)
+	stored := true
 	if _, err := r.d.Store.SetTopicThread(context.WithoutCancel(ctx), base.WorkspaceID, topic.ID, threadID, topic.ReservedAt); err != nil {
 		// The topic exists in Telegram; use it for this message. A stale
 		// holder (reservation taken over) does not overwrite the binding.
 		log.Print("telegram topic: created, thread id not stored")
+		stored = false
 	}
 	r.taskTopicOpened(base.WorkspaceID, kind, key)
 	base.ThreadID = threadID
+	if kind == TopicSubjectClickUpTask && stored {
+		r.postTaskLink(ctx, base, topic.ID, key, info, infoOK)
+	}
 	return base
 }
 
-// name builds the topic name. It is sanitized, never stored and never
-// logged.
-func (r *TopicRouter) name(ctx context.Context, base ChatRef, kind, key string, in TopicIntent) string {
+// nameWith builds the topic name from an already read task (ok false: the
+// task could not be read). It is sanitized, never stored and never logged.
+func (r *TopicRouter) nameWith(kind, key string, in TopicIntent, info TaskTopicInfo, ok bool) string {
 	switch kind {
 	case TopicSubjectFixed:
 		return sanitizeTopicName(key, MaxTopicNameBytes)
 	case TopicSubjectClickUpTask:
-		if r.d.TaskName != nil {
-			src := in.TaskSource
-			nctx, cancel := context.WithTimeout(ctx, taskNameTimeout)
-			title, err := r.d.TaskName(nctx, base.WorkspaceID, src, key)
-			cancel()
-			if err == nil {
-				if t := sanitizeTopicName(title, MaxTopicNameBytes); t != "" {
-					return sanitizeTopicName(key+" · "+t, MaxTopicNameBytes)
-				}
-			}
-		}
-		return sanitizeTopicName(key, MaxTopicNameBytes)
+		return TaskTopicName(key, info, ok)
 	}
 	name := strings.TrimSpace(in.BehaviorName)
 	if name == "" {
