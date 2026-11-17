@@ -276,10 +276,10 @@ func TestPlan_ExecutorOnlyProposal(t *testing.T) {
 	if tk.Executor != "local-worker" {
 		t.Fatalf("executor %q", tk.Executor)
 	}
-	// ...and the registry, not the proposal, decides.
+	// ...and the registry, not the proposal, decides (least privilege: repo.read is investigate).
 	out, blocked := NewCapabilityRegistry().AssignExecutors(p)
 	got, _ := out.Task("a")
-	if got.Executor != ExecutorLocalWorker || len(blocked) != 0 {
+	if got.Executor != ExecutorInvestigate || len(blocked) != 0 {
 		t.Fatalf("assigned %q", got.Executor)
 	}
 }

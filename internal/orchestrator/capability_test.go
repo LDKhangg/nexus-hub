@@ -140,7 +140,7 @@ func TestAssignExecutors(t *testing.T) {
 		t.Fatalf("blocked %v", blocked)
 	}
 	get := func(k string) string { tk, _ := out.Task(k); return tk.Executor }
-	if get("a") != ExecutorLocalWorker || get("b") != ExecutorLocalWorker || get("c") != "" || get("d") != "" || get("e") != "" {
+	if get("a") != ExecutorInvestigate || get("b") != ExecutorLocalWorker || get("c") != "" || get("d") != "" || get("e") != "" {
 		t.Fatalf("executors a=%q b=%q c=%q d=%q e=%q", get("a"), get("b"), get("c"), get("d"), get("e"))
 	}
 	if out.Decision != DecisionExecute || out.Budget != in.Budget || !slices.Equal(out.Order, in.Order) {
