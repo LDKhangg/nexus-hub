@@ -222,8 +222,15 @@ func (c *Config) normalize(home string) error {
 	if c.Executor == "" {
 		c.Executor = ExecutorClaude
 	}
-	if c.Executor != ExecutorClaude && c.Executor != ExecutorOpencode {
-		return bad("executor (claude or opencode)")
+	if c.Executor == ExecutorOpencode {
+		// R-B-2: opencode has no permission sandbox the worker can impose
+		// reliably (a repository's own opencode config or agent files, and
+		// files the executor writes before a --continue run, can grant
+		// shell and web access). Refused until it has one.
+		return errors.New("worker config: executor opencode is not supported yet (no enforceable permission sandbox); use claude")
+	}
+	if c.Executor != ExecutorClaude {
+		return bad("executor (claude)")
 	}
 	p := &c.ExecutorPaths
 	for _, x := range []struct {

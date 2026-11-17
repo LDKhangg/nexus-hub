@@ -1186,7 +1186,9 @@ fallback: with the laptop offline the job waits and the topic says so.
 ### What the laptop needs
 
 - `git`, `gh` (logged in as you: `gh auth status`), and `claude` (logged in
-  with your subscription) or `opencode`.
+  with your subscription). `executor: opencode` is refused for now: the
+  worker cannot impose a permission sandbox on opencode that a repository's
+  own opencode config (or files written during a run) cannot loosen.
 - A ClickUp read-only token in a file of mode 0600 (the worker reads the task
   title, description and recent comments itself; the hub never sends it a
   secret).
@@ -1215,7 +1217,7 @@ fallback: with the laptop offline the job waits and the topic says so.
    ```yaml
    hub_url: https://hub.example.com
    repos_dir: ~/Dev/nexus-repos        # clones and per-job worktrees live here
-   executor: claude                    # or opencode
+   executor: claude                    # the only supported executor
    clickup:
      token_file: ~/.config/nexus-hub/clickup-token
    claude:
