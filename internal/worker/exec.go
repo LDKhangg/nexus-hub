@@ -142,7 +142,10 @@ func GitEnv(env []string) []string {
 
 // dropCredentialKey reports variables that hand the owner's git, GitHub or
 // SSH credentials to a child: agent sockets, askpass helpers, gh and
-// GitHub settings, git config redirections and credential managers.
+// GitHub settings, git config redirections and credential managers. This
+// removes environment routes only: OpenSSH still reads the passwd home
+// (`~/.ssh`) whatever HOME says, so unprotected key files stay reachable
+// by a child that runs as the same user.
 func dropCredentialKey(k string) bool {
 	u := strings.ToUpper(k)
 	switch {

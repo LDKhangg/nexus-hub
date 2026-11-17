@@ -1266,7 +1266,7 @@ fallback: with the laptop offline the job waits and the topic says so.
 
    Credentials stay with the worker. `claude` and the `test_command` get
    the scrubbed environment (no `NEXUS_*`, `*_TOKEN`, `*_KEY`, secrets) and
-   additionally no git/GitHub/SSH route: no `SSH_AUTH_SOCK`, no askpass
+   additionally no git/GitHub/SSH environment route: no `SSH_AUTH_SOCK`, no askpass
    helper, no `GH_*`/`GITHUB_*`, `GH_CONFIG_DIR` pointing to an empty
    directory, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
    `GIT_TERMINAL_PROMPT=0`. `claude` keeps your real `HOME` (its
@@ -1278,8 +1278,12 @@ fallback: with the laptop offline the job waits and the topic says so.
    toolchains whose caches default under `HOME` (cargo, npm, …) need their
    cache variable set in the service environment. This is environment
    isolation, not an OS sandbox: the test command still runs as your user
-   and can read files your user can read. Only configure a `test_command`
-   for repositories whose task sources you trust.
+   and can read files your user can read. OpenSSH reads keys from the
+   passwd home (`~/.ssh`) even with an empty `HOME`, so an unprotected key
+   is not hidden from the test command. For repositories that use a
+   `test_command`, use passphrase-protected keys with ssh-agent only (the
+   agent socket is not passed on), or a read-only deploy key. Only configure
+   a `test_command` for repositories whose task sources you trust.
 5. Check: `nh worker status`, then `/worker` in Telegram (one card per device).
 
 ### Run it as a user service
