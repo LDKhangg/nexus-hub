@@ -98,6 +98,25 @@ func decodeSnapshot(v string) (BudgetSnapshot, bool) {
 	return s, true
 }
 
+// LatestBudgetSnapshot returns the budget snapshot of the newest step that
+// has one (read-only; /status shows it). ok is false when no step has one.
+func LatestBudgetSnapshot(steps []workflow.Step) (BudgetSnapshot, bool) {
+	var (
+		snap BudgetSnapshot
+		ok   bool
+		best = -1
+	)
+	for _, st := range steps {
+		if st.Position <= best {
+			continue
+		}
+		if v, found := decodeSnapshot(refValue(st.Checkpoint, CheckpointBudget)); found {
+			snap, ok, best = v, true, st.Position
+		}
+	}
+	return snap, ok
+}
+
 // load reads the durable state of the execution: the budget (the step's own
 // checkpoint, else the newest earlier step's, else new), the route and the
 // plan rows.

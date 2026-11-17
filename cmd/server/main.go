@@ -144,6 +144,7 @@ func run() error {
 	var (
 		taskStore      *storage.WorkerTaskStore
 		workerNotifier *behavior.WorkerNotifier
+		orchPorts      orchestratorPorts
 	)
 	workflows, err := buildWorkflowRuntime(pool, s, ag, behaviors, runs, engine, func(reg *workflow.Registry, store *storage.WorkflowStore) error {
 		var err error
@@ -158,7 +159,7 @@ func run() error {
 		if err := step.Register(reg); err != nil {
 			return err
 		}
-		return registerOrchestratorSteps(reg, pool, store, s, ag, behaviors, messenger, topics, workerStore, taskStore, integrations, redactor)
+		return registerOrchestratorSteps(&orchPorts, reg, pool, store, s, ag, behaviors, messenger, topics, workerStore, taskStore, integrations, redactor)
 	})
 	if err != nil {
 		return err
@@ -186,16 +187,17 @@ func run() error {
 		Workers: workerStore, WorkerTelemetry: workerStore, LocalTasks: taskStore, WorkerJobs: workerStore, WorkerNotifier: workerNotifier,
 		Inbox: behaviors, Approvals: behaviors, Defs: behaviors, Messenger: messenger,
 		Commands: commands, Undoer: engine, Callbacks: engine,
-		Tracer:           &behavior.TraceService{Store: behaviors, Profiles: behaviors, People: ag.people},
-		People:           ag.people,
-		Reports:          reportSettings,
-		Assistant:        assistant,
-		Conversations:    ag.conversations,
-		Workflows:        workflows.store,
-		WorkflowCommands: workflows.commands,
-		Topics:           topics,
-		Links:            topics,
-		InstructionWaker: &orchestrator.InstructionWaker{Steps: workflows.store, Waker: taskStore},
+		Tracer:            &behavior.TraceService{Store: behaviors, Profiles: behaviors, People: ag.people},
+		People:            ag.people,
+		Reports:           reportSettings,
+		Assistant:         assistant,
+		Conversations:     ag.conversations,
+		Workflows:         workflows.store,
+		WorkflowCommands:  workflows.commands,
+		Topics:            topics,
+		Links:             topics,
+		InstructionWaker:  &orchestrator.InstructionWaker{Steps: workflows.store, Waker: taskStore},
+		OrchestratedTasks: orchPorts.Tasks, OrchestratorPlans: orchPorts.Plans,
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
 	// A done/closed ClickUp task closes its topic once no execution of it is
 	// active (status events and a periodic sweep).

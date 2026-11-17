@@ -12,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/LDKhangg/nexus-hub/internal/orchestrator"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
 )
 
@@ -508,6 +509,13 @@ func (w *InboxWorker) workflowStatus(ctx context.Context, u InboundUpdate, to Ch
 	}
 	if d.LiveJob != nil {
 		lines = append(lines, "Bước hiện tại: "+d.LiveJob.StepKey)
+	}
+	if w.d.OrchestratorPlans != nil && d.References.SourceKind == orchestrator.WorkflowSourceOrchestratedTask {
+		steps, err := r.ListSteps(ctx, u.WorkspaceID, id)
+		if err != nil {
+			steps = nil
+		}
+		lines = append(lines, w.orchestratedStatusLines(ctx, u.WorkspaceID, d, steps)...)
 	}
 	if len(d.Waits) > 0 {
 		waits := make([]string, 0, len(d.Waits))

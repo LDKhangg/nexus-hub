@@ -714,7 +714,7 @@ func orchestratorStepSettings(s settings.Settings) orchestrator.StepSettings {
 // (the Tier-2 read loop under the ClickUp source's tool policy, read tools
 // only). The behavior-actions executor is not wired (Phase 8), so Plan is
 // never offered clickup.write or telegram.notify.
-func registerOrchestratorSteps(reg *workflow.Registry, pool *pgxpool.Pool, store *storage.WorkflowStore, s settings.Settings, ag agentServices,
+func registerOrchestratorSteps(ports *orchestratorPorts, reg *workflow.Registry, pool *pgxpool.Pool, store *storage.WorkflowStore, s settings.Settings, ag agentServices,
 	behaviors *storage.BehaviorStore, messenger behavior.Messenger, topics orchestratorTopics, jobs behavior.LocalTaskJobs, tasks *storage.WorkerTaskStore,
 	integrations *storage.IntegrationRepository, redactor *agent.Redactor) error {
 	plans, err := storage.NewOrchestratorStore(pool)
@@ -756,5 +756,17 @@ func registerOrchestratorSteps(reg *workflow.Registry, pool *pgxpool.Pool, store
 		},
 		Settings: orchestratorStepSettings(s),
 	}
-	return steps.Register(reg)
+	if err := steps.Register(reg); err != nil {
+		return err
+	}
+	ports.Tasks, ports.Plans = routes, plans
+	return nil
+}
+
+// orchestratorPorts are the orchestrator stores the Telegram inbox uses
+// (/plan, start_task, /status). Both stay nil when the orchestrator is not
+// registered.
+type orchestratorPorts struct {
+	Tasks behavior.OrchestratedTaskStarter
+	Plans behavior.OrchestratorPlanReader
 }

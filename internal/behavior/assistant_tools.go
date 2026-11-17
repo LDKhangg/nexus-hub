@@ -41,6 +41,7 @@ const (
 	toolWorkflowJobs    = "workflow_jobs"
 	toolWorkflowNote    = "workflow_note"
 	toolOpenTaskTopic   = "open_task_topic"
+	toolStartTaskName   = "start_task"
 
 	toolContactAlias   = "contact_alias"
 	toolReportStyle    = "report_style"
@@ -126,6 +127,15 @@ var openTaskTopicTool = domain.ToolDef{Name: toolOpenTaskTopic,
 		"The task is a task ID, a custom task ID such as FC-6583, or a ClickUp task URL. The result only says whether the button was sent. It is safe: it changes nothing but this group's topics.",
 	InputSchema: toolSchema(`"task":{"type":"string","description":"task ID, custom task ID or ClickUp task URL"}`, "task")}
 
+// startTaskTool starts an orchestrated task (the same path as /plan). It is
+// offered only when the orchestrator is wired.
+var startTaskTool = domain.ToolDef{Name: toolStartTaskName,
+	Description: "Start an AI-planned task: the hub plans the request, runs the steps and reports in the task's topic. " +
+		"Use it when the owner asks to do, investigate or fix something on a ClickUp task. " +
+		"The task is a task ID, a custom task ID such as FC-6583, or a ClickUp task URL; it may be left out inside a task topic. " +
+		"The repo is an optional registered owner/repo. The result only has a status and the workflow ID (WF-n).",
+	InputSchema: toolSchema(`"request":{"type":"string","description":"what the owner wants done, in the owner's words"},"task":{"type":"string","description":"task ID, custom task ID or ClickUp task URL; optional inside a task topic"},"repo":{"type":"string","description":"registered owner/repo, optional"}`, "request")}
+
 // topicToolAvailable reports whether open_task_topic is offered for u: the
 // topics feature is wired and the chat is a forum-capable supergroup.
 func (w *InboxWorker) topicToolAvailable(u InboundUpdate) bool {
@@ -138,6 +148,9 @@ func (w *InboxWorker) assistantToolDefsFor(u InboundUpdate) []domain.ToolDef {
 	out := w.assistantToolDefs()
 	if w.topicToolAvailable(u) {
 		out = append(out, openTaskTopicTool)
+	}
+	if w.startTaskAvailable() {
+		out = append(out, startTaskTool)
 	}
 	return out
 }
@@ -314,6 +327,8 @@ func (w *InboxWorker) runAssistantTool(ctx context.Context, tt *assistantToolTur
 		text, isErr = w.toolWorkflowNote(hctx, tt, args)
 	case toolOpenTaskTopic:
 		text, isErr = w.toolOpenTaskTopic(hctx, tt, args)
+	case toolStartTaskName:
+		text, isErr = w.toolStartTask(hctx, tt, args)
 	case toolContactAlias, toolReportStyle, toolWorkflowCancel, toolWorkflowResume, toolWorkflowRetry:
 		// The confirmation is sent with the turn's context, not the
 		// handler timeout, like a reply.
