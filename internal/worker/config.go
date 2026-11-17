@@ -47,17 +47,18 @@ const (
 )
 
 // DefaultClaudeAllowedTools is the allow-list passed to `claude -p
-// --allowedTools` when the config names none: file tools plus read-only
-// git. Anything else (network, push, gh, arbitrary shell) is denied in
-// headless mode because no one can approve it.
+// --allowedTools` when the config names none: file tools only. No shell at
+// all: Bash prefix rules cannot be made safe (`git diff --no-index` reads
+// any file, `git log --output` writes anywhere, a written .git/config runs
+// code in the worker's own git calls). Anything else is denied in headless
+// mode because no one can approve it.
 var DefaultClaudeAllowedTools = []string{
 	"Read", "Edit", "MultiEdit", "Write", "Glob", "Grep", "LS", "TodoWrite",
-	"Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
 }
 
 // claudeDisallowedTools are always denied, whatever the allow-list says.
 var claudeDisallowedTools = []string{
-	"Bash(git push:*)", "Bash(git commit:*)", "Bash(git reset:*)", "Bash(git checkout:*)",
+	"Bash", "Bash(git push:*)", "Bash(git commit:*)", "Bash(git reset:*)", "Bash(git checkout:*)",
 	"Bash(git switch:*)", "Bash(git rebase:*)", "Bash(git merge:*)", "Bash(gh:*)",
 	"WebFetch", "WebSearch",
 }
@@ -255,8 +256,8 @@ func (c *Config) normalize(home string) error {
 		return bad("claude.allowed_tools")
 	}
 	for _, t := range c.Claude.AllowedTools {
-		if !allowedToolRE.MatchString(t) || t == "Bash" || strings.HasPrefix(t, "Bash(gh") || strings.HasPrefix(t, "Bash(git push") {
-			return bad("claude.allowed_tools (no bare Bash, gh or git push)")
+		if !allowedToolRE.MatchString(t) || forbiddenClaudeTool(t) {
+			return bad("claude.allowed_tools (file tools only: no Bash, web or MCP tools)")
 		}
 	}
 	if len(c.Claude.AllowedTools) == 0 {
@@ -348,6 +349,17 @@ func (c *Config) normalize(home string) error {
 		return bad("token_file (must be an absolute path)")
 	}
 	return nil
+}
+
+// forbiddenClaudeTool reports a tool rule the worker never allows: any
+// Bash rule (shell), web access and MCP tools.
+func forbiddenClaudeTool(rule string) bool {
+	name, _, _ := strings.Cut(rule, "(")
+	switch strings.ToLower(name) {
+	case "bash", "webfetch", "websearch":
+		return true
+	}
+	return strings.HasPrefix(strings.ToLower(name), "mcp__")
 }
 
 func isLoopback(host string) bool {

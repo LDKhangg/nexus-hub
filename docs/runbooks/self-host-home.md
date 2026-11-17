@@ -1220,7 +1220,7 @@ fallback: with the laptop offline the job waits and the topic says so.
      token_file: ~/.config/nexus-hub/clickup-token
    claude:
      model: ""                         # empty: the CLI default
-     # allowed_tools: [Read, Edit, MultiEdit, Write, Glob, Grep, LS, TodoWrite, "Bash(go build:*)"]
+     # allowed_tools: [Read, Edit, MultiEdit, Write, Glob, Grep, LS, TodoWrite]   # the default
    repos:
      owner/name:
        test_command: ["go", "test", "./..."]   # argv, no shell
@@ -1233,11 +1233,21 @@ fallback: with the laptop offline the job waits and the topic says so.
    ```
 
    Claude Code runs headless (`claude -p`), so nobody can approve a tool
-   prompt. It may only use the allow-list: file tools plus read-only git by
-   default. `git push`, `git commit`, `gh`, web access and arbitrary shell stay
-   denied whatever you list. Add narrow entries (for example
-   `"Bash(go build:*)"`) under `claude.allowed_tools` when the repository's
-   work needs them.
+   prompt. It may only use the allow-list: file tools only (`Read`, `Edit`,
+   `MultiEdit`, `Write`, `Glob`, `Grep`, `LS`, `TodoWrite`). It gets **no
+   shell at all**, not even "read-only" git: a prefix rule such as
+   `Bash(git diff:*)` also allows `git diff --no-index` (reads any file,
+   for example the worker token) and `git log --output=` (writes anywhere).
+   The config refuses every `Bash` rule, `WebFetch`, `WebSearch` and MCP
+   tools (`mcp__…`). The worker runs the repository's `test_command` itself
+   after the executor finishes.
+
+   The worker's own git commands in a worktree (status, add, diff, commit,
+   push) run with `core.fsmonitor=false` and `core.hooksPath=/dev/null` at
+   command-line precedence, and refuse to run when the worktree's `.git`
+   link no longer points into `<clone>/.git/worktrees/`, so files the
+   executor writes cannot make the worker run code. Nested `.git`
+   directories are never staged.
 5. Check: `nh worker status`, then `/worker` in Telegram (one card per device).
 
 ### Run it as a user service

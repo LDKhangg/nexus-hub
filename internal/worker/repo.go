@@ -45,12 +45,85 @@ func (r *Repos) env() []string {
 }
 
 // run runs a git/gh command and returns its exit code and bounded stdout.
+// Inside a job worktree it first checks that the worktree's .git link
+// still points to its own git directory, and every command runs with
+// repository settings that execute code turned off (gitSafetyEnv): the
+// executor can write files in the worktree, never code the worker runs.
 func (r *Repos) run(ctx context.Context, dir, bin string, args ...string) (int, string, error) {
+	if err := r.checkGitLink(dir); err != nil {
+		return -1, "", err
+	}
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
 	out := newCapBuffer(1 << 20)
-	exit, err := r.Runner.Run(ctx, Cmd{Dir: dir, Name: bin, Args: args, Env: r.env(), Stdout: out})
+	exit, err := r.Runner.Run(ctx, Cmd{Dir: dir, Name: bin, Args: args, Env: gitSafetyEnv(r.env()), Stdout: out})
 	return exit, out.String(), err
+}
+
+// gitSafetyEnv overrides, with command-line precedence (GIT_CONFIG_COUNT),
+// the git settings that make git run a program on add, diff, commit or
+// push: core.fsmonitor and hooks. Inherited config overrides, GIT_DIR and
+// GIT_WORK_TREE are dropped so the worktree's own git directory is used.
+func gitSafetyEnv(env []string) []string {
+	out := make([]string, 0, len(env)+5)
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		u := strings.ToUpper(k)
+		if u == "GIT_CONFIG_COUNT" || u == "GIT_CONFIG_PARAMETERS" || u == "GIT_DIR" || u == "GIT_WORK_TREE" ||
+			strings.HasPrefix(u, "GIT_CONFIG_KEY_") || strings.HasPrefix(u, "GIT_CONFIG_VALUE_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "GIT_CONFIG_COUNT=2",
+		"GIT_CONFIG_KEY_0=core.fsmonitor", "GIT_CONFIG_VALUE_0=false",
+		"GIT_CONFIG_KEY_1=core.hooksPath", "GIT_CONFIG_VALUE_1="+os.DevNull)
+}
+
+var errGitLink = errors.New("the worktree git link was changed")
+
+// checkGitLink refuses a command inside a job worktree whose .git is not
+// the regular file git wrote, pointing into <clone>/.git/worktrees/. An
+// executor that rewrote it could point git at a directory it controls
+// (with its own config and hooks).
+func (r *Repos) checkGitLink(dir string) error {
+	if r.ReposDir == "" || dir == "" {
+		return nil
+	}
+	sep := string(filepath.Separator)
+	root := filepath.Join(r.ReposDir, worktreesSubdir) + sep
+	clean := filepath.Clean(dir)
+	if !strings.HasPrefix(clean, root) {
+		return nil // not inside a job worktree
+	}
+	first, _, _ := strings.Cut(strings.TrimPrefix(clean, root), sep)
+	if first == "" {
+		return nil
+	}
+	wt := root + first
+	link := filepath.Join(wt, ".git")
+	fi, err := os.Lstat(link)
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() > 4096 {
+		return errGitLink
+	}
+	data, err := os.ReadFile(link)
+	if err != nil {
+		return errGitLink
+	}
+	p, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir:")
+	p = strings.TrimSpace(p)
+	if !ok || p == "" || strings.ContainsAny(p, "\n\r\x00") {
+		return errGitLink
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(wt, p)
+	}
+	p = filepath.Clean(p)
+	if !strings.HasPrefix(p, filepath.Clean(r.ReposDir)+sep) || strings.HasPrefix(p+sep, root) ||
+		!strings.Contains(p, sep+".git"+sep+"worktrees"+sep) {
+		return errGitLink
+	}
+	return nil
 }
 
 func (r *Repos) git(ctx context.Context, dir string, args ...string) (string, error) {
@@ -227,7 +300,8 @@ func (d DiffStat) Changed() int64 { return d.Added + d.Removed }
 // StageAndDiff stages every change except .nexus and returns the diff
 // against base (committed by the executor or not).
 func (r *Repos) StageAndDiff(ctx context.Context, wt, base string) (DiffStat, error) {
-	if _, err := r.git(ctx, wt, "add", "--all", "--", ".", ":(exclude)"+privateDirName); err != nil {
+	if _, err := r.git(ctx, wt, "add", "--all", "--", ".", ":(exclude)"+privateDirName,
+		":(exclude,glob)**/.git", ":(exclude,glob)**/.git/**"); err != nil {
 		return DiffStat{}, err
 	}
 	out, err := r.git(ctx, wt, "diff", "--cached", "--numstat", "--no-renames", base, "--")
