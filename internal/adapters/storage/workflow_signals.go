@@ -75,6 +75,14 @@ func waitKindOf(kind behavior.ApprovalKind) (string, bool) {
 // a running step re-checks its signals before it waits.
 func wakeWaitingStepTx(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, executionID int64, stepKey string,
 	at time.Time, reason workflow.ReasonCode, idempotencyKey string) (sqlc.WorkflowExecution, bool, error) {
+	return wakeStepTx(ctx, q, ws, executionID, stepKey, at, reason, idempotencyKey, true)
+}
+
+// wakeStepTx is wakeWaitingStepTx; requireSignal false queues the waiting
+// step without a recorded signal (a worker job that ended, see
+// WakeWorkerStep).
+func wakeStepTx(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, executionID int64, stepKey string,
+	at time.Time, reason workflow.ReasonCode, idempotencyKey string, requireSignal bool) (sqlc.WorkflowExecution, bool, error) {
 	row, err := q.LockWorkflowExecution(ctx, sqlc.LockWorkflowExecutionParams{WorkspaceID: ws, ID: executionID})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -100,9 +108,11 @@ func wakeWaitingStepTx(ctx context.Context, q *sqlc.Queries, ws pgtype.UUID, exe
 	if workflow.StepState(step.State) != workflow.StepWaiting {
 		return row, false, nil
 	}
-	pending, err := q.CountPendingStepSignals(ctx, sqlc.CountPendingStepSignalsParams{WorkspaceID: ws, ExecutionID: executionID, StepKey: stepKey})
-	if err != nil || pending == 0 {
-		return row, false, err
+	if requireSignal {
+		pending, err := q.CountPendingStepSignals(ctx, sqlc.CountPendingStepSignalsParams{WorkspaceID: ws, ExecutionID: executionID, StepKey: stepKey})
+		if err != nil || pending == 0 {
+			return row, false, err
+		}
 	}
 	if _, err := q.GetActiveWorkflowJobForExecution(ctx, sqlc.GetActiveWorkflowJobForExecutionParams{WorkspaceID: ws, ExecutionID: executionID}); err == nil {
 		return row, false, nil

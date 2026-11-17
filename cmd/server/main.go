@@ -22,6 +22,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/secrets"
 	"github.com/LDKhangg/nexus-hub/internal/settings"
+	"github.com/LDKhangg/nexus-hub/internal/workflow"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -128,10 +129,36 @@ func run() error {
 	// in legacy runtime mode (the runtime-mode fence keeps them apart). The
 	// outbound, digest, chat-poll and Telegram assistant workers are
 	// unchanged.
-	workflows, err := buildWorkflowRuntime(pool, s, ag, behaviors, runs, engine)
+	// Local worker bridge: jobs, thresholds, and the local-task step that
+	// hands one job to a worker and waits for it.
+	workerStore, err := storage.NewWorkerStore(pool)
+	if err != nil {
+		return errors.New("worker store startup failed")
+	}
+	thresholds := behavior.WorkerThresholds{
+		MinClaudeLeftPct: s.WorkerMinClaudeLeft, MinDiskFreeBytes: s.WorkerMinDiskFree, MaxRAMUsedPct: s.WorkerMaxRAMUsed,
+	}
+	workerStore.SetAssignmentThresholds(thresholds)
+	var (
+		taskStore      *storage.WorkerTaskStore
+		workerNotifier *behavior.WorkerNotifier
+	)
+	workflows, err := buildWorkflowRuntime(pool, s, ag, behaviors, runs, engine, func(reg *workflow.Registry, store *storage.WorkflowStore) error {
+		var err error
+		if taskStore, err = storage.NewWorkerTaskStore(pool, workerStore, store); err != nil {
+			return err
+		}
+		workerNotifier = behavior.NewWorkerNotifier(behavior.WorkerNotifierDeps{
+			Routes: taskStore, Messenger: messenger, Topics: topics, Approvals: behaviors,
+			Devices: workerStore, Telemetry: workerStore, Thresholds: thresholds, Waker: taskStore,
+		})
+		step := &behavior.WorkerRunStep{Jobs: workerStore, Routes: taskStore, Instructions: ag.conversations, Queued: workerNotifier}
+		return step.Register(reg)
+	})
 	if err != nil {
 		return err
 	}
+	workerStore.SetObserver(workerNotifier)
 	// The Telegram assistant keeps the owner's conversation in memory and
 	// uses the configured provider's tool-calling path. Workflow reads and
 	// commands share the durable runtime store; writes still require the
@@ -151,6 +178,7 @@ func run() error {
 		telegramHandler.WithAssistant(assistant.Inbox)
 	}
 	inbox := behavior.NewInboxWorker(behavior.InboxDeps{
+		Workers: workerStore, WorkerTelemetry: workerStore, LocalTasks: taskStore, WorkerJobs: workerStore, WorkerNotifier: workerNotifier,
 		Inbox: behaviors, Approvals: behaviors, Defs: behaviors, Messenger: messenger,
 		Commands: commands, Undoer: engine, Callbacks: engine,
 		Tracer:           &behavior.TraceService{Store: behaviors, Profiles: behaviors, People: ag.people},
@@ -171,7 +199,7 @@ func run() error {
 	}
 	notices.SetStatusObserver(lifecycle.StatusChanged)
 	topics.OnTaskTopicOpen(lifecycle.TopicReopened)
-	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows, lifecycle}
+	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows, lifecycle, &behavior.WorkerSweeper{Store: workerStore}, workerNotifier, &behavior.WorkerTaskSweeper{Store: taskStore}}
 	// Telegram updates arrive by webhook, or by long polling when the hub
 	// has no public URL (telegram_mode, see settings.TelegramPolling). Both
 	// paths end in the same handler.
@@ -188,6 +216,7 @@ func run() error {
 	e.Use(middleware.Recover())
 	e.Use(middleware.BodyLimit(bodyLimit))
 	e.Server.ReadHeaderTimeout = 5 * time.Second
+	httpdelivery.NewWorkerHandler(workerStore, workerStore).WithLeases(workerStore, &behavior.LocalTaskInstructions{Routes: taskStore, Reader: ag.conversations}).Register(e)
 	e.POST("/webhook/telegram/:integrationID", telegramHandler.Handle)
 	e.POST("/webhook/:source/:integrationID", handler.HandleWebhook)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

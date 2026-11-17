@@ -1,8 +1,8 @@
-# Phase 7 — AI Orchestrator Implementation Plan
+# Phase 7b — AI Orchestrator Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `executing-plans` for an assigned task. The role boundaries and sequential handoff process in `AGENTS.md` override generic implementation/TDD instructions. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** DRAFT 2026-11-16 — waiting for the owner's decisions O1–O5 (§1.2).
+**Status:** DRAFT 2026-11-16 — waiting for the owner's decisions O1–O5 (§1.2). Renamed from Phase 7 to Phase 7b on 2026-11-16 (owner decision W1): Phase 7a (local worker bridge, `docs/plans/2026-11-16-phase7a-local-worker.md`) goes first. Before approval, re-check O1, O3 and §1.3 against the merged 7a: `/task` already starts the 7a `local-task` workflow, and `DELEGATE` now targets the 7a local worker instead of waiting for Phase 8.
 
 **Goal:** A request is no longer one-shot triage. The hub turns it into a structured, validated plan (intent, type, priority, complexity, capabilities, tasks with dependencies, budget), runs the tasks through the Phase 5 durable engine, evaluates each result, and decides one of seven next actions. It completes only with evidence, asks when it is unsure, waits for the owner's OK on risky actions, and stops (never loops) when a budget is spent.
 
@@ -10,12 +10,13 @@
 
 **Tech Stack:** Go (go.mod version), PostgreSQL, pgx v5, sqlc, goose. No new service or dependency.
 
-**Spec:** `docs/product/PCC-001.md` EPIC 05 (FR-043–FR-056, the seven decisions, the acceptance criteria), ARCH-002, ARCH-004; scope in `docs/product/ROADMAP.md` §Phase 7 and carry-over §6 (batch budget hiding older comments). The contract is read-only.
+**Spec:** `docs/product/PCC-001.md` EPIC 05 (FR-043–FR-056, the seven decisions, the acceptance criteria), ARCH-002, ARCH-004; scope in `docs/product/ROADMAP.md` §Phase 7b and carry-over §6 (batch budget hiding older comments). The contract is read-only.
 
 ## Global Constraints
 
 - Code, documentation and commits are English; owner-facing discussion is Vietnamese.
-- Baseline: `develop` after the Phase 6b merge (Telegram topics). Orchestrated-task messages use `report.topic: task` (or `workflow` without a ClickUp task). Branch `feature/phase7`. Next migration number is `00026` (Phase 6b uses `00025`).
+- Baseline: `develop` after the Phase 7a merge (local worker bridge). Orchestrated-task messages use `report.topic: task` (or `workflow` without a ClickUp task). Branch `feature/phase7b`. Next migration number is `00027` (Phase 7a uses `00026`).
+- Carry-ins from Phase 6b and hotfix 6b.1 (ROADMAP §Phase 7b): router tuning (route-eval 13/15 and 12/15); 6b R7 (`Recover` reopening a closed topic skips the lifecycle hook); lowercase custom task IDs (`fc-6583`); command behaviors addressed with a custom ID (`FC-…`); append the route-eval result to `docs/product/reports/2026-11-16-phase6b-report.md`.
 - One handoff at a time per shared working tree. Implementer changes production only; Tester changes tests only; Reviewer is read-only.
 - Lead/Implementer never run `go test`. Checks: `go build ./...`, `go vet ./...`, `gofmt -l cmd internal`, `make generate` (second run clean), `goose -dir db/migrations validate`. The suite runs only in CI.
 - Never edit old migrations or hand-edit sqlc output. New tables are workspace-scoped with composite foreign keys and RLS like their precedents.
@@ -48,7 +49,7 @@
 |---|---|---|
 | O1 | Where does the orchestrator run in Phase 7? | **a)** new built-in `orchestrated-task` workflow started from Telegram (`/task`, assistant tool); behaviors untouched · b) also replace `behavior.model` in every behavior · c) only the ClickUp comment pipeline |
 | O2 | Does the comment pipeline's Tier-1 triage switch to the orchestrator classifier (FR-043–046)? | **a)** yes, same output contract, same routing, a fake-provider equivalence test · b) no, keep Phase 2 triage until Phase 8 |
-| O3 | `DELEGATE` before real workers (Phase 8) | **a)** a static capability registry of in-process executors (read-only investigate loop = `clickup.read`, `github.read`, `repo.read`; behavior actions = `clickup.write`, `telegram.notify` under policy); Phase 8 swaps in worker slots · b) `DELEGATE` always blocks with "needs worker" until Phase 8 |
+| O3 | `DELEGATE` before real workers (Phase 8) — revisit: Phase 7a now provides a local worker | **a)** a static capability registry of in-process executors (read-only investigate loop = `clickup.read`, `github.read`, `repo.read`; behavior actions = `clickup.write`, `telegram.notify` under policy); Phase 8 swaps in worker slots · b) `DELEGATE` always blocks with "needs worker" until Phase 8 |
 | O4 | Budget exhausted | **a)** block: `WAITING_FOR_USER` with buttons "Thêm 1 vòng" / "Huỷ" (expires → `FAILED`) · b) always `FAILED` with reason `planning_budget_exceeded` |
 | O5 | Models and default budgets (setting keys, changeable later) | **a)** plan + evaluate = `actor_model` (Sonnet class), classifier = `triage_model`; max 3 plan iterations, 2 replans, 2 repair attempts, 80k tokens, 20 min per execution · b) plan on an Opus-class model, others as a) |
 
@@ -75,11 +76,11 @@
 | REQ-10 | Budgets per execution (plan iterations, replans, repair attempts, tokens, wall time) are checkpointed; any limit reached ends in the O4 outcome, never another model call. Restart resumes with the same counters. | FR-056, EPIC 05 AC 6 | P3, P4 |
 | REQ-11 | Built-in workflow `orchestrated-task` starts from `/task <text>` or the assistant tool `start_task`, shows the plan in Telegram with `WF-n`, runs tasks in dependency order through the durable engine, and reports the result with evidence links. `/status WF-n` adds plan version, task states, last decision and budget used (metadata only). | FR-048, FR-050, FR-051 | P5 |
 | REQ-12 | (O2a) The comment pipeline's Tier-1 triage uses `Classify`; routing, report and dedupe behave as before (equivalence test with the fake provider). Carry-over: when the batch budget drops older comments the plan/report says so. | FR-043, FR-045 | P5 |
-| REQ-13 | Persistence: plans, plan tasks and decisions are stored as sanitized structured rows (migration `00026`), workspace-scoped, RLS; CLI `nh workflow show WF-n` lists plan versions, tasks, decisions, usage (no text beyond titles); runbook section "Orchestrated tasks (Phase 7)". | FR-055, NFR-034 | P1, P6 |
+| REQ-13 | Persistence: plans, plan tasks and decisions are stored as sanitized structured rows (migration `00027`), workspace-scoped, RLS; CLI `nh workflow show WF-n` lists plan versions, tasks, decisions, usage (no text beyond titles); runbook section "Orchestrated tasks (Phase 7b)". | FR-055, NFR-034 | P1, P6 |
 
 ## 3. Domain and interface decisions
 
-### 3.1 Tables (migration `00026_orchestrator.sql`)
+### 3.1 Tables (migration `00027_orchestrator.sql`)
 
 - `orchestrator_plans` (workspace_id, execution_id, version, schema_version, classification enums, confidence, budget json, status, usage tokens/cost, created_at); unique (execution_id, version); immutable after insert except `status`.
 - `orchestrator_plan_tasks` (plan id, key, title ≤ 200, capabilities text[], depends_on text[], priority, complexity, executor, state, result_step_id, evidence refs jsonb bounded).
@@ -103,7 +104,7 @@
 |---|---|
 | Runtime + fake | `internal/orchestrator/runtime.go`, `fake.go` (new); `internal/adapters/llm` adapters implement it |
 | Orchestrator | `internal/orchestrator/{classify,plan,evaluate,schema,budget,capability}.go` (new) |
-| Migration + storage | `db/migrations/00026_orchestrator.sql`, `db/query/orchestrator.sql`, sqlc output, `internal/adapters/storage/orchestrator_store.go` (new) |
+| Migration + storage | `db/migrations/00027_orchestrator.sql`, `db/query/orchestrator.sql`, sqlc output, `internal/adapters/storage/orchestrator_store.go` (new) |
 | Workflow wiring | `internal/workflow/definition.go`, `internal/workflow/vocabulary.go` (reasons), new executor in `internal/orchestrator/steps.go`, `cmd/server/wiring.go` |
 | Telegram + assistant | `internal/behavior/commands.go` (`/task`, `/status` extras), `assistant_tools.go` (`start_task`) |
 | Comment pipeline | `internal/agent/tier1_router.go`, `orchestrator.go` (O2a) |
@@ -112,7 +113,7 @@
 ## 5. Task packets
 
 ### P1 — AI runtime, fake provider, schemas and storage
-**REQ:** 1, 2, 13 (storage). `AIRuntime` + adapters, scripted fake provider, schema registry with repair loop, migration 00026 + store. Commit `feat(orchestrator): provider-neutral AI runtime, schemas and plan storage`.
+**REQ:** 1, 2, 13 (storage). `AIRuntime` + adapters, scripted fake provider, schema registry with repair loop, migration 00027 + store. Commit `feat(orchestrator): provider-neutral AI runtime, schemas and plan storage`.
 
 ### P2 — Classify, Plan, Evaluate
 **REQ:** 2, 3, 4, 6. Pure orchestrator functions, fixed prompts, Go plan checks (keys, capabilities, DAG, limits, clamp). Commit `feat(orchestrator): classify, plan and evaluate with validated outputs`.

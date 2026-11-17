@@ -140,6 +140,28 @@ func (c *Client) SendMessage(ctx context.Context, workspaceID, tokenRef, chatID 
 	return result.MessageID, nil
 }
 
+// EditMessageText replaces the text of one message of the bot, keeping its
+// inline keyboard unless buttons are given. Telegram's "message is not
+// modified" (identical text) counts as success.
+func (c *Client) EditMessageText(ctx context.Context, workspaceID, tokenRef, chatID string, messageID int64, text string, buttons [][]Button) error {
+	token, err := c.token(ctx, workspaceID, tokenRef)
+	if err != nil {
+		return err
+	}
+	if units(text) > MaxTextUnits {
+		text = clip(text, MaxTextUnits-12) + " [truncated]"
+	}
+	payload := map[string]any{"chat_id": chatID, "message_id": messageID, "text": text}
+	if len(buttons) > 0 {
+		kb, err := keyboard(buttons)
+		if err != nil {
+			return err
+		}
+		payload["reply_markup"] = replyMarkup{InlineKeyboard: kb}
+	}
+	return c.do(ctx, token, "editMessageText", payload, nil)
+}
+
 // EditReplyMarkup replaces a message's inline keyboard; nil buttons remove
 // it.
 func (c *Client) EditReplyMarkup(ctx context.Context, workspaceID, tokenRef, chatID string, messageID int64, buttons [][]Button) error {
@@ -295,6 +317,9 @@ func (c *Client) doLimit(ctx context.Context, token, method string, payload any,
 		return fail("server", true, 0)
 	case code == http.StatusConflict && method == "getUpdates":
 		return fail("conflict", true, 0)
+	case code == http.StatusBadRequest && method == "editMessageText" &&
+		strings.Contains(strings.ToLower(envelope.Desc), "message is not modified"):
+		return nil // the message already shows this text: the edit is done
 	case (code == http.StatusBadRequest || code == http.StatusForbidden) && topicCode(envelope.Desc) != "":
 		return fail(topicCode(envelope.Desc), false, 0)
 	case code < 200 || code >= 300:

@@ -68,6 +68,7 @@ var knownWorkflowReasons = func() map[workflow.ReasonCode]struct{} {
 		workflow.KnownReasons(),
 		agent.KnownWorkflowReasons(),
 		behavior.KnownWorkflowReasons(),
+		behavior.KnownLocalTaskReasons(),
 		storage.KnownSignalReasons(),
 	} {
 		for _, reason := range source {
@@ -101,7 +102,8 @@ func workflowStepKind(k string) string {
 	case workflow.StepKindCollectContext, workflow.StepKindModel, workflow.StepKindActions,
 		workflow.StepKindNotify, workflow.StepKindApproval, workflow.StepKindBehaviorContext,
 		workflow.StepKindBehaviorModel, workflow.StepKindBehaviorDispatch, workflow.StepKindBehaviorRunActions,
-		workflow.StepKindAgentTriage, workflow.StepKindAgentInvestigate, workflow.StepKindAgentReport:
+		workflow.StepKindAgentTriage, workflow.StepKindAgentInvestigate, workflow.StepKindAgentReport,
+		workflow.StepKindWorkerRun:
 		return k
 	default:
 		return "unknown"
@@ -159,6 +161,7 @@ func workflowStoreErr(err error) error {
 type workflowCLI struct {
 	store         *storage.WorkflowStore
 	conversations *storage.ConversationStore
+	workers       *storage.WorkerStore
 	ws            string
 	out           io.Writer
 }
@@ -242,7 +245,11 @@ func workflowCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 	if err != nil {
 		return errors.New("database operation failed")
 	}
-	c := workflowCLI{store: store, conversations: conversations, ws: *ws, out: out}
+	workers, err := storage.NewWorkerStore(pool)
+	if err != nil {
+		return errors.New("database operation failed")
+	}
+	c := workflowCLI{store: store, conversations: conversations, workers: workers, ws: *ws, out: out}
 	if err := store.CheckWorkspace(ctx, *ws); err != nil {
 		if errors.Is(err, workflow.ErrNotFound) {
 			return errors.New("workspace not found")
@@ -376,6 +383,20 @@ func (c workflowCLI) show(ctx context.Context, id int64) error {
 	}
 	if d.LiveJob != nil {
 		m["live_job"] = jobSummary(*d.LiveJob)
+	}
+	if c.workers != nil {
+		// A local task shows its worker job: fixed state and codes only.
+		if job, ok, err := c.workers.JobForStep(ctx, c.ws, id, behavior.StepKeyWorkerRun); err == nil && ok {
+			wj := map[string]any{"id": job.ID, "state": job.State, "attempt": job.Attempt, "device_id": job.DeviceID,
+				"created_at": workflowTimeV(job.CreatedAt), "updated_at": workflowTimeV(job.UpdatedAt)}
+			if job.Progress != nil {
+				wj["phase"] = job.Progress.Phase
+			}
+			if job.Result != nil {
+				wj["status"], wj["reason_code"] = job.Result.Status, job.Result.ReasonCode
+			}
+			m["worker_job"] = wj
+		}
 	}
 	waits := make([]map[string]any, 0, len(d.Waits))
 	for _, w := range d.Waits {

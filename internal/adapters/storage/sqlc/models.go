@@ -610,6 +610,108 @@ type UserProfile struct {
 	UpdatedAt    pgtype.Timestamptz
 }
 
+// Enrolled local worker devices; only the SHA-256 hash of the device token is stored.
+type WorkerDevice struct {
+	ID           pgtype.UUID
+	WorkspaceID  pgtype.UUID
+	Name         string
+	TokenHash    []byte
+	Capabilities []byte
+	State        string
+	LastSeenAt   pgtype.Timestamptz
+	CreatedAt    pgtype.Timestamptz
+	RevokedAt    pgtype.Timestamptz
+}
+
+// One-time worker enrollment codes; only the SHA-256 hash is stored.
+type WorkerEnrollCode struct {
+	ID          int64
+	WorkspaceID pgtype.UUID
+	CodeHash    []byte
+	ExpiresAt   pgtype.Timestamptz
+	UsedAt      pgtype.Timestamptz
+	CreatedBy   string
+	CreatedAt   pgtype.Timestamptz
+}
+
+// Worker audit trail: fixed kind and reason codes only, no free text.
+type WorkerEvent struct {
+	ID          int64
+	WorkspaceID pgtype.UUID
+	DeviceID    pgtype.UUID
+	JobID       pgtype.UUID
+	Kind        string
+	ReasonCode  string
+	CreatedAt   pgtype.Timestamptz
+}
+
+// Jobs leased to local workers; identifiers, fixed states and the structured result only.
+type WorkerJob struct {
+	ID                   pgtype.UUID
+	WorkspaceID          pgtype.UUID
+	ExecutionID          pgtype.Int8
+	StepID               string
+	RequiredCapabilities []byte
+	State                string
+	DeviceID             pgtype.UUID
+	LeaseTokenHash       []byte
+	LeaseExpiresAt       pgtype.Timestamptz
+	Attempt              int32
+	Result               []byte
+	IdempotencyKey       pgtype.Text
+	Payload              []byte
+	Progress             []byte
+	ProgressSeq          int64
+	LeasedAt             pgtype.Timestamptz
+	InterruptedAt        pgtype.Timestamptz
+	CreatedAt            pgtype.Timestamptz
+	UpdatedAt            pgtype.Timestamptz
+	FinishedAt           pgtype.Timestamptz
+}
+
+// Where the topic messages of a local task go, and what it works on; ids and counters only.
+type WorkerTaskRoute struct {
+	WorkspaceID        pgtype.UUID
+	ExecutionID        int64
+	IntegrationID      pgtype.UUID
+	ChatID             int64
+	ThreadID           int64
+	Repo               string
+	TaskRef            string
+	ClickupTaskID      string
+	ProgressMessageID  int64
+	ProgressJobAttempt int32
+	WaitingNotice      string
+	InstructionVersion int64
+	CreatedAt          pgtype.Timestamptz
+}
+
+// Latest bounded telemetry snapshot per worker device.
+type WorkerTelemetry struct {
+	DeviceID    pgtype.UUID
+	WorkspaceID pgtype.UUID
+	Snapshot    []byte
+	ReceivedAt  pgtype.Timestamptz
+}
+
+// Hourly worker telemetry rollups (30-day retention).
+type WorkerTelemetryHourly struct {
+	DeviceID             pgtype.UUID
+	Hour                 pgtype.Timestamptz
+	WorkspaceID          pgtype.UUID
+	Samples              int32
+	CpuLoadSum           float64
+	CpuLoadMax           pgtype.Float8
+	RamUsedPctMax        pgtype.Float8
+	DiskFreeMinBytes     pgtype.Int8
+	ClaudeSessionLeftMin pgtype.Int2
+	ClaudeWeeklyLeftMin  pgtype.Int2
+	JobsTotal            pgtype.Int8
+	FailuresTotal        pgtype.Int8
+	ExecutorTokensTotal  pgtype.Int8
+	BusySecondsTotal     pgtype.Int8
+}
+
 type WorkflowExecution struct {
 	ID                int64
 	WorkspaceID       pgtype.UUID

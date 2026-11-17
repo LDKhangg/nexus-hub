@@ -566,7 +566,7 @@ type workflowRuntime struct {
 
 // buildWorkflowRuntime registers the behavior and agent step executors
 // (behavior approvals become durable waits) and builds the runtime.
-func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServices, behaviors *storage.BehaviorStore, runs *behavior.RunWorker, engine *behavior.Engine) (*workflowRuntime, error) {
+func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServices, behaviors *storage.BehaviorStore, runs *behavior.RunWorker, engine *behavior.Engine, extra func(*workflow.Registry, *storage.WorkflowStore) error) (*workflowRuntime, error) {
 	store, err := storage.NewWorkflowStore(pool)
 	if err != nil {
 		return nil, errors.New("workflow store startup failed")
@@ -592,6 +592,11 @@ func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServi
 	}
 	if err := agentSteps.Register(reg); err != nil {
 		return nil, errors.New("agent workflow steps registration failed")
+	}
+	if extra != nil {
+		if err := extra(reg, store); err != nil {
+			return nil, errors.New("local task step startup failed")
+		}
 	}
 	// The behavior run executors plus one for the comment pipeline, which
 	// the legacy agent worker ran on its own.

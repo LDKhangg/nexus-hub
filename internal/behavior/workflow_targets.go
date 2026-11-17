@@ -502,6 +502,9 @@ func (w *InboxWorker) workflowStatus(ctx context.Context, u InboundUpdate, to Ch
 		return w.reply(ctx, to, msgNotFound, "not_found")
 	}
 	lines := []string{fmt.Sprintf("%s · %s · %s", workflow.FormatRef(id), oneLine(d.BehaviorName, 60), d.State)}
+	if line := w.localJobLine(ctx, u.WorkspaceID, id); line != "" {
+		lines = append(lines, line)
+	}
 	if d.LiveJob != nil {
 		lines = append(lines, "Bước hiện tại: "+d.LiveJob.StepKey)
 	}

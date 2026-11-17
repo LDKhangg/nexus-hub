@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -257,11 +256,11 @@ func (w *workspace) checkDisk(dir string) error {
 	if w.maxCloneBytes <= 0 {
 		return nil
 	}
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(dir, &st); err != nil {
+	avail, err := availableBytes(dir)
+	if err != nil {
 		return toolErr("disk_low")
 	}
-	if uint64(st.Bavail)*uint64(st.Bsize) < uint64(w.maxCloneBytes)+diskReserveBytes {
+	if avail < uint64(w.maxCloneBytes)+diskReserveBytes {
 		return toolErr("disk_low")
 	}
 	return nil

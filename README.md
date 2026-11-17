@@ -18,6 +18,7 @@ to run and use it, and where to read more.
 | PR auto-approve | someone DMs you a PR link in ClickUp Chat → the hub approves it with your GitHub account, reacts ✅, reports on Telegram | Phase 3d |
 | Intent check and mentions | the AI reads the message before approving ("review giúp em" yes, "đừng merge" no); you get a Telegram summary when someone tags you in ClickUp | Phase 3e |
 | People and report style | names instead of ids ("anh Định", not `clickup 1234567`), short reports, your own templates | Phase 4 (in progress) |
+| Local worker | `/task` in a task topic: your laptop edits the code in a worktree and opens a draft PR; the topic shows progress and the result | Phase 7a |
 
 The full product goal is `docs/product/PCC-001.md`; the phase plan is
 `docs/product/ROADMAP.md`.
@@ -76,6 +77,7 @@ the list, or `nh <command>` for its usage.
 | Behaviors | `behavior import / validate / publish / enable / disable / list / export / stats` |
 | Watching | `runs`, `trace` |
 | People and reports (Phase 4) | `contact`, `report-prefs`, `report-template` |
+| Local worker (Phase 7a) | `worker enroll / run / status / clean` (laptop), `worker devices / jobs / revoke` (hub); Telegram `/task`, `/worker`, `/retry` |
 
 A typical behavior change:
 

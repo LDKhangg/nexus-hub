@@ -255,7 +255,7 @@ func (r *Runner) Run(ctx context.Context, c Call) (*Result, error) {
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	cmd.WaitDelay = waitDelay
 	// No Pdeathsig: it fires when the forking OS thread exits, which Go may do.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 
 	start := time.Now()
 	if err := cmd.Start(); err != nil {
@@ -328,7 +328,7 @@ func (r *Runner) followUp(ctx context.Context, dir string, env, args []string) e
 	sink := &capWriter{max: followUpOutputBytes}
 	cmd.Stdout, cmd.Stderr = sink, sink
 	cmd.WaitDelay = waitDelay
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 	if cmd.Start() != nil {
 		return ErrFollowUp
 	}
@@ -364,8 +364,6 @@ func signalOf(ee *exec.ExitError) syscall.Signal {
 	}
 	return 0
 }
-
-func killGroup(pid int) { _ = syscall.Kill(-pid, syscall.SIGKILL) }
 
 // capWriter keeps the first max bytes and discards the rest.
 type capWriter struct {

@@ -1,0 +1,11 @@
+# Test debt — Phase 7a local worker
+
+Status: OPEN.
+
+- Code head: `c85e9ca` on `feature/phase7a` (CI 44009727911 green, Review APPROVE).
+- Unproven (open):
+  - TD-7A-1: live check on the owner's laptop — enroll, `/task` from a task topic opens a draft PR, offline → waiting message, lid closed mid-job → interrupted/resume (plan §6). Runs after deploy.
+  - TD-7A-2: no regression test for D-B-5 (`/task please do X` outside a topic replies usage; ef7df99).
+  - TD-7A-3: no local-task-specific test that topic text during a running job becomes an instruction (heartbeat/ack part is covered by TestB3Store_FollowupsOverHeartbeat).
+  - TD-7A-4: telemetry threshold texts with real worker telemetry, and Sender 401 during flush, are not covered.
+- Pay first in the Phase 7b Phase Brief.

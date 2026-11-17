@@ -107,6 +107,9 @@ const (
 	// ApprovalWorkflowTarget lets the owner choose the execution for one
 	// otherwise ambiguous instruction or control command.
 	ApprovalWorkflowTarget ApprovalKind = "workflow_target"
+	// ApprovalWorkerJob holds the Retry and Cancel buttons of a failed or
+	// interrupted local worker job.
+	ApprovalWorkerJob ApprovalKind = "worker_job"
 )
 
 // Decision is an approval's outcome.

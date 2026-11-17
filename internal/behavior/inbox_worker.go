@@ -72,6 +72,18 @@ type InboxDeps struct {
 	// Links makes "Mở topic" jump links (a pasted task link, /topic, /list).
 	// Nil turns them off.
 	Links TopicLinks
+	// Workers backs /worker (enroll, list, revoke). Nil answers "not available".
+	Workers WorkerAdmin
+	// WorkerTelemetry adds telemetry to the /worker cards; nil shows "không rõ".
+	WorkerTelemetry WorkerTelemetryReader
+	// LocalTasks backs /task (start a local task, registered repos). Nil
+	// answers "not available".
+	LocalTasks LocalTaskStarter
+	// WorkerJobs backs the Retry and Cancel buttons, /retry and the job line
+	// of /status. Nil turns them off.
+	WorkerJobs WorkerJobControl
+	// WorkerNotifier is told when a retried job waits again. Optional.
+	WorkerNotifier WorkerJobQueued
 }
 
 // InboxWorker processes stored Telegram updates: built-in commands,
@@ -370,6 +382,12 @@ func (w *InboxWorker) command(ctx context.Context, u InboundUpdate, to ChatRef, 
 		return w.deepCommand(ctx, u, to, actor, corr)
 	case "/topic":
 		return w.topicCommand(ctx, u, to)
+	case "/worker":
+		reply, err = w.workerCommand(hctx, u.WorkspaceID, args, actor)
+	case "/task":
+		return w.taskCommand(ctx, u, to, args)
+	case "/retry":
+		reply, err = w.retryCommand(hctx, u, args)
 	case "/status", "/list", "/cancel", "/resume", "/note":
 		return w.workflowControlCommand(hctx, u, to, actor, corr)
 	default:
@@ -395,6 +413,8 @@ func (w *InboxWorker) helpText(ctx context.Context, workspaceID string) string {
 	b.WriteString("/undo <run id>: hoàn tác một lần chạy")
 	b.WriteString("\n/contacts [tìm kiếm]: danh bạ\n/alias <platform:id> <tên>: đặt tên")
 	b.WriteString("\n/status [WF-id]: trạng thái workflow\n/list: workflow đang hoạt động")
+	b.WriteString("\n/worker [enroll|list|revoke <tên>]: máy local làm việc")
+	b.WriteString("\n/task [TASK-ID] <yêu cầu>: giao việc cho máy local\n/retry [WF-id]: thử lại việc của máy local")
 	b.WriteString("\n/note [WF-id] <nội dung>: bổ sung yêu cầu\n/cancel [WF-id]: đề nghị huỷ\n/resume [WF-id]: đề nghị tiếp tục")
 	if w.d.Defs == nil {
 		return b.String()
@@ -500,6 +520,12 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 		}
 		return w.workflowTargetCallback(ctx, u, to, data, a, actor, corr)
 	}
+	if a.Kind == ApprovalWorkerJob {
+		if a.Decision != "" || !w.now().Before(a.ExpiresAt) {
+			return msgStale, "stale", true
+		}
+		return w.workerJobCallback(ctx, u, data, a, actor)
+	}
 	if data.Kind.Decides() && (a.Decision != "" || !w.now().Before(a.ExpiresAt)) {
 		return msgStale, "stale", true
 	}
@@ -558,4 +584,57 @@ func (w *InboxWorker) freeText(ctx context.Context, u InboundUpdate, to ChatRef,
 		code = firstCode(code, "clear_failed")
 	}
 	return w.reply(ctx, to, text, code)
+}
+
+const usageWorker = "Cách dùng: /worker | /worker enroll | /worker list | /worker revoke <tên máy>"
+
+// workerCommand handles /worker enroll|list|revoke. Replies carry the one-time
+// code only on enroll; no token ever passes through chat.
+func (w *InboxWorker) workerCommand(ctx context.Context, workspaceID, args, actor string) (string, error) {
+	if w.d.Workers == nil {
+		return "", ErrNotAvailable
+	}
+	f := strings.Fields(args)
+	sub := "card"
+	if len(f) > 0 {
+		sub = strings.ToLower(f[0])
+	}
+	switch {
+	case sub == "card" && len(f) == 0:
+		return w.workerCards(ctx, workspaceID)
+	case sub == "enroll" && len(f) <= 1:
+		code, expires, err := w.d.Workers.CreateEnrollCode(ctx, workspaceID, actor)
+		if err != nil {
+			return "", err
+		}
+		mins := int(expires.Sub(w.now()).Round(time.Minute) / time.Minute)
+		if mins < 1 {
+			mins = 1
+		}
+		return fmt.Sprintf("Mã ghép nối máy local: %s\nDùng một lần, hết hạn sau %d phút.\nTrên máy local chạy: nh worker enroll --hub <url>", code, mins), nil
+	case sub == "list" && len(f) <= 1:
+		devices, err := w.d.Workers.ListDevices(ctx, workspaceID)
+		if err != nil {
+			return "", err
+		}
+		if len(devices) == 0 {
+			return "Chưa có máy local nào. Dùng /worker enroll để ghép nối.", nil
+		}
+		now := w.now()
+		lines := make([]string, 0, len(devices))
+		for _, d := range devices {
+			seen := "chưa từng kết nối"
+			if d.LastSeenAt != nil {
+				seen = "lần cuối " + d.LastSeenAt.UTC().Format("2006-01-02 15:04") + " UTC"
+			}
+			lines = append(lines, fmt.Sprintf("%s · %s · %s", d.Name, d.DisplayState(now), seen))
+		}
+		return strings.Join(lines, "\n"), nil
+	case sub == "revoke" && len(f) == 2:
+		if err := w.d.Workers.RevokeDevice(ctx, workspaceID, f[1]); err != nil {
+			return "", err
+		}
+		return "Đã thu hồi máy " + f[1] + ". Token cũ không còn dùng được.", nil
+	}
+	return "", &UsageError{Usage: usageWorker}
 }

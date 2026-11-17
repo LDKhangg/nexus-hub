@@ -1170,6 +1170,237 @@ the expected and got route, tier, `router_error` and token counts, never the
 reply or the message text. The exit status is not 0 when any case does not
 match or the router fails. It needs `llm_provider` `anthropic`.
 
+## Local worker (Phase 7a)
+
+The hub (on the VPS or at home) stays the orchestrator. Heavy work (clone,
+edit, build, test, run Claude Code) runs on your own laptop when it is
+online, with your own `claude` and `gh` logins. From a task topic you send
+`/task <what to do>`; the laptop works in an isolated git worktree, pushes a
+branch, opens a draft PR from your account, and the result appears in the same
+topic. The laptop always connects **out** to the hub over HTTPS: no inbound
+port, no fixed IP, and it keeps working when you change networks.
+
+Nothing ever runs on the hub, on GitHub Actions or with the API key as a
+fallback: with the laptop offline the job waits and the topic says so.
+
+### What the laptop needs
+
+- `git`, `gh` (logged in as you: `gh auth status`), and `claude` (logged in
+  with your subscription). `executor: opencode` is refused for now: the
+  worker cannot impose a permission sandbox on opencode that a repository's
+  own opencode config (or files written during a run) cannot loosen.
+- A ClickUp read-only token in a file of mode 0600 (the worker reads the task
+  title, description and recent comments itself; the hub never sends it a
+  secret).
+- The `nh` binary built for the laptop (`go build -o ~/.local/bin/nh
+  ./cmd/setup-notices`; `nh` also builds for macOS and Windows).
+
+### Install and enroll
+
+1. Register the repositories on the hub (`nh github-repo ...`). Only
+   registered repositories can be worked on.
+2. In Telegram send `/worker enroll`. The bot answers with a one-time code
+   (single use, valid 10 minutes).
+3. On the laptop:
+
+   ```sh
+   nh worker enroll --hub https://hub.example.com --name laptop \
+     --capabilities repo.write,executor.claude
+   ```
+
+   `nh` asks for the code on the terminal (it never goes in argv). It stores
+   the device token in `~/.config/nexus-hub/worker-token` (mode 0600); the
+   hub keeps only its hash. A local task needs the capability `repo.write`,
+   so enroll with at least that one.
+4. Write `~/.config/nexus-hub/worker.yaml` (no secret inside):
+
+   ```yaml
+   hub_url: https://hub.example.com
+   repos_dir: ~/Dev/nexus-repos        # clones and per-job worktrees live here
+   executor: claude                    # the only supported executor
+   clickup:
+     token_file: ~/.config/nexus-hub/clickup-token
+   claude:
+     model: ""                         # empty: the CLI default
+     # allowed_tools: [Read, Edit, MultiEdit, Write, Glob, Grep, LS, TodoWrite]   # the default
+   repos:
+     owner/name:
+       test_command: ["go", "test", "./..."]   # argv, no shell
+       test_timeout_minutes: 15
+   limits:
+     wall_minutes: 60
+     max_turns: 50
+     max_changed_lines: 2000
+   retention_days: 7                   # finished worktrees are removed after this
+   ```
+
+   Claude Code runs headless (`claude -p`), so nobody can approve a tool
+   prompt. It may only use the allow-list: file tools only (`Read`, `Edit`,
+   `MultiEdit`, `Write`, `Glob`, `Grep`, `LS`, `TodoWrite`). It gets **no
+   shell at all**, not even "read-only" git: a prefix rule such as
+   `Bash(git diff:*)` also allows `git diff --no-index` (reads any file,
+   for example the worker token) and `git log --output=` (writes anywhere).
+   The config refuses every `Bash` rule, `WebFetch`, `WebSearch` and MCP
+   tools (`mcp__…`). The worker runs the repository's `test_command` itself
+   after the executor finishes.
+
+   File reads are confined to the worktree: the worker passes
+   `--settings` with `permissions.blockReadsOutsideWorkingDirectories`
+   and always denies `Read` on `~/.ssh`, `~/.config`, `~/.local/state`,
+   `~/.gnupg`, `~/.aws` and `/etc` (this also covers `Glob` and `Grep`).
+   The config refuses `allowed_tools` entries with absolute, `~/` or `..`
+   paths. This is a permission rule inside `claude`, not an OS sandbox.
+   Writes outside the working directory are blocked too, and `Edit` is
+   denied under `~/.ssh`, `~/.config`, `~/.local`, `~/.gnupg`, `~/.aws` and
+   `/etc`. These settings need `claude` 2.1.314 or newer; older releases
+   ignore them, so the worker refuses to run jobs with an older or
+   unreadable `claude --version` (the job fails with `executor_unsupported`
+   and the worker log says so at start).
+
+   The worker's own git commands in a worktree (status, add, diff, commit,
+   push) run with `core.fsmonitor=false` and `core.hooksPath=/dev/null` at
+   command-line precedence, and refuse to run when the worktree's `.git`
+   link no longer points into `<clone>/.git/worktrees/`, so files the
+   executor writes cannot make the worker run code. Nested `.git`
+   directories are never staged.
+
+   Credentials stay with the worker. `claude` and the `test_command` get
+   the scrubbed environment (no `NEXUS_*`, `*_TOKEN`, `*_KEY`, secrets) and
+   additionally no git/GitHub/SSH environment route: no `SSH_AUTH_SOCK`, no askpass
+   helper, no `GH_*`/`GITHUB_*`, `GH_CONFIG_DIR` pointing to an empty
+   directory, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
+   `GIT_TERMINAL_PROMPT=0`. `claude` keeps your real `HOME` (its
+   subscription login lives there). The `test_command` runs code the
+   executor wrote, so it also gets an empty `HOME` (under
+   `<state_dir>/jobs/<job>/sandbox/`) with `XDG_CONFIG_HOME`,
+   `XDG_DATA_HOME` and `XDG_STATE_HOME` unset; `GOPATH`, `GOMODCACHE`,
+   `GOCACHE` and `XDG_CACHE_HOME` keep pointing at your real caches. Other
+   toolchains whose caches default under `HOME` (cargo, npm, …) need their
+   cache variable set in the service environment. This is environment
+   isolation, not an OS sandbox: the test command still runs as your user
+   and can read files your user can read. OpenSSH reads keys from the
+   passwd home (`~/.ssh`) even with an empty `HOME`, so an unprotected key
+   is not hidden from the test command. For repositories that use a
+   `test_command`, use passphrase-protected keys with ssh-agent only (the
+   agent socket is not passed on), or a read-only deploy key. Only configure
+   a `test_command` for repositories whose task sources you trust.
+5. Check: `nh worker status`, then `/worker` in Telegram (one card per device).
+
+### Run it as a user service
+
+The worker must survive logout and restart by itself.
+
+Linux (`systemd --user`):
+
+```ini
+# ~/.config/systemd/user/nexus-worker.service
+[Unit]
+Description=Nexus-Hub local worker
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/nh worker run
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now nexus-worker
+sudo loginctl enable-linger "$USER"   # keeps it running without a login session
+journalctl --user -u nexus-worker -f  # logs: ids and codes only
+```
+
+macOS: a `launchd` agent in `~/Library/LaunchAgents` that runs `nh worker run`
+with `KeepAlive` true. Windows: a Task Scheduler task "at log on" that runs
+`nh worker run` and restarts on failure.
+
+`gh` and `claude` must work without an unlocked desktop. On Linux, when a
+login keeps its token in the desktop keyring, a service started at boot cannot
+read it. Test it the way the service runs:
+
+```sh
+systemd-run --user --wait --collect -p StandardOutput=journal gh auth status
+systemd-run --user --wait --collect claude --version
+```
+
+If either fails, log in again so the token is stored in a file (`gh auth login`
+with `GH_CONFIG_DIR` readable by the service; for `claude`, sign in once from
+a plain terminal), or unlock the keyring at login.
+
+### Screen lock, sleep, lid
+
+- A locked screen is fine: the worker keeps running.
+- While a job runs, the worker holds a sleep inhibitor (logind on Linux; the
+  platform equivalent elsewhere, best effort). With no job, the machine sleeps
+  normally. The worker never changes power settings.
+- Closing the lid suspends the laptop unless you decide otherwise. If you want
+  jobs to survive a closed lid on external power, set
+  `HandleLidSwitchExternalPower=ignore` in `/etc/systemd/logind.conf` (your
+  choice; it is off by default).
+- When the laptop sleeps or loses the network in the middle of a job, the
+  lease (10 minutes) runs out, the job becomes `INTERRUPTED` and the topic says
+  so with Retry and Cancel buttons. The same device can resume it from its
+  worktree within 24 hours by simply coming back online.
+
+### Commands
+
+| Where | Command | What it does |
+|---|---|---|
+| Telegram, in a task topic | `/task <instruction>` | start the `local-task` workflow for that task |
+| Telegram, anywhere | `/task <TASK-ID or link> <instruction>` | same; custom ids like `FC-6583` work. With several registered repos, write `owner/repo` before the instruction |
+| Telegram | `/worker` | one card per device: state, CPU, RAM, disk, Claude limits, tokens, jobs, failures, busy hours, last seen |
+| Telegram | `/worker enroll`, `/worker list`, `/worker revoke <name>` | enrollment code, short list, revoke at once |
+| Telegram | `/status [WF-n]`, `/cancel [WF-n]`, `/note [WF-n] <text>` | the workflow commands of Phase 6; `/status` shows the worker job state |
+| Telegram | `/retry [WF-n]` | queue a failed, interrupted or needs-input job again |
+| Laptop | `nh worker run [--config path]` | poll the hub and run jobs until stopped |
+| Laptop | `nh worker status [--json]` | the worker's own state and journal |
+| Laptop | `nh worker clean` | remove worktrees of finished jobs now |
+| Hub | `nh worker devices --workspace-id $WS [--json]` | the same fields as the cards |
+| Hub | `nh worker jobs --workspace-id $WS`, `nh workflow show WF-n` | jobs, audit events, and the worker job of a workflow |
+
+Text you send in the topic while the job runs is stored as an instruction of
+the workflow and delivered to the worker with its next heartbeat (every 20 s).
+
+### What the topic shows
+
+- One message "Đang chờ máy local online" when no matching device is online.
+- One message when every matching device is held back, for example "máy local
+  sắp hết hạn mức Claude, chờ reset lúc ...".
+- Which device took the job, with `WF-n`.
+- One progress message, edited in place: phase, files, lines, tests, turns.
+- The result: summary, branch, PR link, test outcome.
+- On failure or interruption: a reason and Retry and Cancel buttons (bound to
+  that chat, valid 24 hours; `/retry WF-n` works after that).
+
+### Settings
+
+```sh
+nh settings set worker_min_claude_left 10       # percent of the Claude session or week left
+nh settings set worker_min_disk_free 5368709120 # bytes free in repos_dir (5 GB)
+nh settings set worker_max_ram_used 90          # percent of RAM in use
+```
+
+A job is not given to a device below `worker_min_claude_left` or
+`worker_min_disk_free`, or above `worker_max_ram_used`; it waits and the topic
+says why. Unknown values never block. Restart the hub after changing them.
+
+### Offline, revoke, lost laptop
+
+- **Offline:** the job waits in `WAITING_FOR_WORKER`. When a matching device
+  comes online it takes the job and the topic is told. Nothing runs elsewhere.
+- **Revoke:** `/worker revoke <name>` (or `nh worker revoke --workspace-id $WS
+  <name>`). The token stops working at once on every endpoint, even for a
+  running job. A lost laptop: revoke it first, then enroll the new one.
+- **Rotate:** enroll again with a new code; the old device name must be revoked
+  first.
+- **Never merged by the worker:** it pushes a `nexus/<task>-<short>` branch and
+  opens a draft PR. It never merges, approves, force-pushes or pushes to the
+  default branch. Your own account cannot approve its own PR.
+
 ## Upkeep
 
 - Updates: `git pull`, rebuild both binaries, run `goose … up`, then
