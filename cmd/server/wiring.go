@@ -725,6 +725,10 @@ func registerOrchestratorSteps(reg *workflow.Registry, pool *pgxpool.Pool, store
 	if err != nil {
 		return err
 	}
+	investigateAudit, err := storage.NewWorkflowToolRunStore(pool)
+	if err != nil {
+		return err
+	}
 	template := orchestrator.NewOrchestrator(nil, s.ActorModel)
 	template.ClassifyModel = s.TriageModel
 	template.MaxRepair = int(s.OrchestratorMaxRepair)
@@ -746,7 +750,7 @@ func registerOrchestratorSteps(reg *workflow.Registry, pool *pgxpool.Pool, store
 			orchestrator.ExecutorInvestigate: &behavior.OrchestratorInvestigate{
 				Policies:      behaviorPolicies{integrations: integrations, known: ag.known},
 				Investigators: ag.investigators,
-				Registry:      ag.reg, Sanitizer: redactor, Limits: ag.limits,
+				Registry:      ag.reg, Sanitizer: redactor, Limits: ag.limits, Audit: investigateAudit,
 				MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
 			},
 		},

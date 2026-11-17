@@ -44,9 +44,10 @@ var clickUpTaskIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 // runs the read-only Tier-2 loop for one plan task. The tool policy is the
 // workspace's ClickUp source agent configuration (as for the comment
 // pipeline) reduced to read tools: no write, dangerous or action tool is
-// reachable. Tool calls are audited in memory for the evidence refs only
-// (tool_runs rows need an agent job or behavior run). Its token usage is
-// returned for the orchestrator budget.
+// reachable. Tool calls are audited in memory for the evidence refs and,
+// when Audit is set, durably in tool_runs (owned by the workflow
+// execution; sanitized summaries only). Its token usage is returned for the
+// orchestrator budget.
 type OrchestratorInvestigate struct {
 	// Policies returns the workspace's agent configuration (grants and
 	// ClickUp credential reference).
@@ -57,6 +58,9 @@ type OrchestratorInvestigate struct {
 	Registry      *tools.Registry
 	Sanitizer     tools.Sanitizer
 	Limits        tools.Limits
+	// Audit is the durable tool_runs store (workflow execution owner); nil
+	// keeps the audit in memory only.
+	Audit tools.ToolRunStore
 	// MaxInputTokens and MaxOutputTokens cap one task further (<= 0: only
 	// the orchestrator budget).
 	MaxInputTokens, MaxOutputTokens int64
@@ -90,7 +94,7 @@ func (e *OrchestratorInvestigate) RunTask(ctx context.Context, run orchestrator.
 	}
 	limits := e.Limits
 	limits.MaxDangerous = 0
-	audit := &investigateAudit{}
+	audit := &investigateAudit{store: e.Audit}
 	exec := tools.NewExecutor(e.Registry, readOnlyPolicy(cfg.Tools, e.Registry.Tiers()), limits, false, audit, e.Sanitizer, run.ExecutionID, run.WorkspaceID)
 	exec.ClickUpTokenRef = cfg.ClickUpTokenRef
 	exec.KeyScope = investigateKeyScope
@@ -195,18 +199,20 @@ func boundBytes(s string, n int) string {
 // calls for the evidence refs. It never stores tool inputs or outputs
 // beyond the validated repo and ClickUp task ID.
 type investigateAudit struct {
-	mu   sync.Mutex
-	runs []investigateRun
+	store tools.ToolRunStore // optional durable audit
+	mu    sync.Mutex
+	runs  []investigateRun
 }
 
 type investigateRun struct {
 	tool, repo, taskID string
 	ok                 bool
+	durableID          int64
 }
 
 var errReadOnlyAudit = errors.New("investigate: only read tools may run")
 
-func (a *investigateAudit) Begin(_ context.Context, r tools.RunStart) (int64, *tools.PriorRun, error) {
+func (a *investigateAudit) Begin(ctx context.Context, r tools.RunStart) (int64, *tools.PriorRun, error) {
 	if r.Tier != tenant.TierRead {
 		return 0, nil, errReadOnlyAudit
 	}
@@ -221,22 +227,40 @@ func (a *investigateAudit) Begin(_ context.Context, r tools.RunStart) (int64, *t
 			run.taskID = in.TaskID
 		}
 	}
+	if a.store != nil {
+		id, _, err := a.store.Begin(ctx, r)
+		if err != nil {
+			return 0, nil, err
+		}
+		run.durableID = id
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.runs = append(a.runs, run)
 	return int64(len(a.runs)), nil, nil
 }
 
-func (a *investigateAudit) Finish(_ context.Context, f tools.RunFinish) error {
+func (a *investigateAudit) Finish(ctx context.Context, f tools.RunFinish) error {
+	var durable int64
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if f.RunID >= 1 && int(f.RunID) <= len(a.runs) {
 		a.runs[f.RunID-1].ok = f.Status == tools.StatusOK
+		durable = a.runs[f.RunID-1].durableID
+	}
+	a.mu.Unlock()
+	if a.store != nil && durable != 0 {
+		f.RunID = durable
+		return a.store.Finish(ctx, f)
 	}
 	return nil
 }
 
-func (a *investigateAudit) Deny(context.Context, tools.RunStart, string) error { return nil }
+func (a *investigateAudit) Deny(ctx context.Context, r tools.RunStart, code string) error {
+	if a.store != nil {
+		return a.store.Deny(ctx, r, code)
+	}
+	return nil
+}
 
 // evidence returns the resources successful calls read: GitHub repo URLs
 // and ClickUp task IDs (the route's task when a ClickUp read named none).

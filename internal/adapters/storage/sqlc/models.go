@@ -653,7 +653,8 @@ type ToolRun struct {
 	UpdatedAt      pgtype.Timestamptz
 	BehaviorRunID  pgtype.Int8
 	// The behavior run's correlation ID; NULL for agent job rows.
-	CorrelationID pgtype.UUID
+	CorrelationID       pgtype.UUID
+	WorkflowExecutionID pgtype.Int8
 }
 
 type User struct {
