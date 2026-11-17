@@ -109,6 +109,7 @@ type jobRun struct {
 
 	mu       sync.Mutex
 	instrs   []behavior.WorkerInstruction // received, not yet given to the executor
+	taken    map[string]bool              // ids taken by appendFollowUps, not yet journaled; never queued again
 	interval time.Duration
 	execDone bool
 	late     int // instructions that arrived after the executor finished
@@ -537,21 +538,40 @@ func (r *jobRun) appendFollowUps() (bool, error) {
 	r.mu.Lock()
 	list := r.instrs
 	r.instrs = nil
+	if r.taken == nil {
+		r.taken = map[string]bool{}
+	}
+	for _, in := range list {
+		r.taken[in.ID] = true
+	}
 	r.mu.Unlock()
 	if len(list) == 0 {
 		return false, nil
 	}
+	// requeue puts the items that were not journaled back for the next
+	// round and lets them be received again.
+	requeue := func(rest []behavior.WorkerInstruction) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		for _, in := range rest {
+			delete(r.taken, in.ID)
+		}
+		r.instrs = append(append([]behavior.WorkerInstruction(nil), rest...), r.instrs...)
+	}
 	f, err := os.OpenFile(r.privatePath(instructionFileName), os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
+		requeue(list)
 		return false, err
 	}
 	defer f.Close()
 	if _, err := f.WriteString("\n# Follow-up\n\n"); err != nil {
+		requeue(list)
 		return false, err
 	}
-	for _, in := range list {
+	for i, in := range list {
 		if _, err := f.WriteString("- " + strings.ReplaceAll(strings.TrimSpace(in.Text), "\n", "\n  ") + "\n"); err != nil {
-			return false, err
+			requeue(list[i:])
+			return i > 0, err
 		}
 		_, _ = r.j.MarkInstruction(in.ID)
 	}
