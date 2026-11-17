@@ -82,6 +82,15 @@ func gitSafetyEnv(env []string) []string {
 
 var errGitLink = errors.New("the worktree git link was changed")
 
+// realPath resolves symlinks (macOS /var -> /private/var); p itself when it
+// cannot be resolved.
+func realPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
+}
+
 // checkGitLink refuses a command inside a job worktree whose .git is not
 // the regular file git wrote, pointing into <clone>/.git/worktrees/. An
 // executor that rewrote it could point git at a directory it controls
@@ -118,8 +127,9 @@ func (r *Repos) checkGitLink(dir string) error {
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(wt, p)
 	}
-	p = filepath.Clean(p)
-	if !strings.HasPrefix(p, filepath.Clean(r.ReposDir)+sep) || strings.HasPrefix(p+sep, root) ||
+	p = realPath(filepath.Clean(p))
+	repos := realPath(filepath.Clean(r.ReposDir))
+	if !strings.HasPrefix(p, repos+sep) || strings.HasPrefix(p+sep, filepath.Join(repos, worktreesSubdir)+sep) ||
 		!strings.Contains(p, sep+".git"+sep+"worktrees"+sep) {
 		return errGitLink
 	}
@@ -225,8 +235,9 @@ func BranchName(taskID, jobID string) string {
 }
 
 // PrepareWorktree creates (or reuses, on a resumed attempt) the job's
-// worktree on branch from origin/<defaultBranch>, and git-excludes the
-// private .nexus directory. It returns the base commit.
+// worktree on branch from origin/<defaultBranch>, and creates the private
+// .nexus directory (never staged, see StageAndDiff). It returns the base
+// commit.
 func (r *Repos) PrepareWorktree(ctx context.Context, clone, jobID, branch, defaultBranch string) (string, string, error) {
 	wt := r.WorktreePath(jobID)
 	base, err := r.git(ctx, clone, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+defaultBranch+"^{commit}")
@@ -262,31 +273,45 @@ func (r *Repos) PrepareWorktree(ctx context.Context, clone, jobID, branch, defau
 	return wt, base, nil
 }
 
+// excludePrivate makes sure the private .nexus directory is NOT listed in
+// the clone's info/exclude (earlier versions wrote "/.nexus/" there). It
+// is kept out of commits by the ":(exclude).nexus" pathspec of
+// StageAndDiff instead: git add fails ("paths are ignored") when an
+// exclude pathspec names an ignored path, because git matches exclude
+// pathspec items against ignored entries too (B-CI-1).
 func (r *Repos) excludePrivate(ctx context.Context, wt string) error {
 	common, err := r.git(ctx, wt, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(strings.TrimSpace(common), "info", "exclude")
-	line := "/" + privateDirName + "/"
-	if data, err := os.ReadFile(path); err == nil {
-		sc := bufio.NewScanner(strings.NewReader(string(data)))
-		for sc.Scan() {
-			if strings.TrimSpace(sc.Text()) == line {
-				return nil
-			}
-		}
+	common = strings.TrimSpace(common)
+	if !filepath.IsAbs(common) {
+		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	path := filepath.Join(common, "info", "exclude")
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return nil // no exclude file: nothing to undo
 	}
-	defer f.Close()
-	_, err = f.WriteString("\n" + line + "\n")
-	return err
+	line := "/" + privateDirName + "/"
+	var kept []string
+	found := false
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		if strings.TrimSpace(sc.Text()) == line {
+			found = true
+			continue
+		}
+		kept = append(kept, sc.Text())
+	}
+	if !found {
+		return nil
+	}
+	out := strings.Join(kept, "\n")
+	if out != "" {
+		out += "\n"
+	}
+	return os.WriteFile(path, []byte(out), 0o644)
 }
 
 // DiffStat is the change of a worktree against its base commit.
@@ -300,8 +325,9 @@ func (d DiffStat) Changed() int64 { return d.Added + d.Removed }
 // StageAndDiff stages every change except .nexus and returns the diff
 // against base (committed by the executor or not).
 func (r *Repos) StageAndDiff(ctx context.Context, wt, base string) (DiffStat, error) {
-	if _, err := r.git(ctx, wt, "add", "--all", "--", ".", ":(exclude)"+privateDirName,
-		":(exclude,glob)**/.git", ":(exclude,glob)**/.git/**"); err != nil {
+	// git itself never stages a path with a .git component (verify_path);
+	// a nested repository is at most a gitlink, never its .git contents.
+	if _, err := r.git(ctx, wt, "add", "--all", "--", ".", ":(exclude)"+privateDirName); err != nil {
 		return DiffStat{}, err
 	}
 	out, err := r.git(ctx, wt, "diff", "--cached", "--numstat", "--no-renames", base, "--")
