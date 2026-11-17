@@ -29,6 +29,7 @@ type jobHub struct {
 	mu       sync.Mutex
 	hbCalls  int
 	first    HeartbeatReply
+	firstErr error
 	later    func(n int) (HeartbeatReply, error)
 	acks     [][]string
 	progress []behavior.WorkerProgress
@@ -57,7 +58,7 @@ func (h *jobHub) HeartbeatAck(_ context.Context, _, _ string, _ *behavior.Worker
 	h.hbCalls++
 	h.acks = append(h.acks, append([]string(nil), ackIDs...))
 	if h.hbCalls == 1 {
-		return h.first, nil
+		return h.first, h.firstErr
 	}
 	if h.later != nil {
 		return h.later(h.hbCalls)
@@ -108,10 +109,17 @@ type fakeExec struct {
 	mu   sync.Mutex
 	reqs []ExecRequest
 	run  func(ctx context.Context, n int, req ExecRequest) (ExecResult, error)
+	// ver overrides the reported claude version; nil reports a supported one.
+	ver *string
 }
 
-func (f *fakeExec) Name() string                   { return ExecutorClaude }
-func (f *fakeExec) Version(context.Context) string { return "1.0.0" }
+func (f *fakeExec) Name() string { return ExecutorClaude }
+func (f *fakeExec) Version(context.Context) string {
+	if f.ver != nil {
+		return *f.ver
+	}
+	return ClaudeMinVersion
+}
 func (f *fakeExec) Run(ctx context.Context, req ExecRequest) (ExecResult, error) {
 	f.mu.Lock()
 	f.reqs = append(f.reqs, req)
@@ -359,8 +367,16 @@ func TestJob_HeartbeatUnauthorizedStopsJobAsLeaseLost(t *testing.T) {
 // T-B-83 (REQ-8): a cancel arriving in a later heartbeat stops the running executor; cancelled, nothing pushed.
 func TestJob_CancelDuringExecution(t *testing.T) {
 	e := newJobEnv(t, "")
-	e.hub.later = func(int) (HeartbeatReply, error) { return HeartbeatReply{Cancel: true}, nil }
-	e.ex.run = blockUntilStopped
+	// The cancel must arrive only once the executor runs; an earlier cancel
+	// would stop PrepareWorktree itself (test timing, not the contract).
+	var started atomic.Bool
+	e.hub.later = func(int) (HeartbeatReply, error) {
+		return HeartbeatReply{Cancel: started.Load()}, nil
+	}
+	e.ex.run = func(ctx context.Context, n int, req ExecRequest) (ExecResult, error) {
+		started.Store(true)
+		return blockUntilStopped(ctx, n, req)
+	}
 	res := e.runJob(t)
 	if res.Status != behavior.WorkerStatusCancelled || res.ReasonCode != ReasonCancelled {
 		t.Fatalf("result %+v", res)

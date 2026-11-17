@@ -54,18 +54,20 @@ func TestClaudeExecutor_ReadConfinementAndNoShell(t *testing.T) {
 		}
 		return false
 	}
-	for _, must := range []string{"Bash", "WebFetch", "WebSearch", "Read(~/.ssh/**)", "Read(~/.config/**)", "Read(~/.local/state/**)", "Read(~/.gnupg/**)", "Read(~/.aws/**)", "Read(//etc/**)"} {
+	for _, must := range []string{"Bash", "WebFetch", "WebSearch", "Read(~/.ssh/**)", "Read(~/.config/**)", "Read(~/.local/state/**)", "Read(~/.gnupg/**)", "Read(~/.aws/**)", "Read(//etc/**)",
+		"Edit(~/.ssh/**)", "Edit(~/.config/**)", "Edit(~/.local/**)", "Edit(~/.gnupg/**)", "Edit(~/.aws/**)", "Edit(//etc/**)"} {
 		if !has(must) {
 			t.Errorf("deny-list lacks %q: %v", must, denied)
 		}
 	}
 	var settings struct {
 		Permissions struct {
-			Block bool `json:"blockReadsOutsideWorkingDirectories"`
+			Block      bool `json:"blockReadsOutsideWorkingDirectories"`
+			BlockWrite bool `json:"blockWritesOutsideWorkingDirectories"`
 		} `json:"permissions"`
 	}
-	if err := json.Unmarshal([]byte(argAfter(args, "--settings")), &settings); err != nil || !settings.Permissions.Block {
-		t.Fatalf("--settings %q must set blockReadsOutsideWorkingDirectories true (%v)", argAfter(args, "--settings"), err)
+	if err := json.Unmarshal([]byte(argAfter(args, "--settings")), &settings); err != nil || !settings.Permissions.Block || !settings.Permissions.BlockWrite {
+		t.Fatalf("--settings %q must set blockReads/WritesOutsideWorkingDirectories true (%v)", argAfter(args, "--settings"), err)
 	}
 	if hasArg(args, "--dangerously-skip-permissions") {
 		t.Fatal("argv skips permissions")
