@@ -23,7 +23,7 @@ func TestHotfixH1_ParseTaskRefTeamForms(t *testing.T) {
 		"https://app.clickup.com/t/9008218621/FC-6583?comment=90080&threadedComment=1": {ID: "FC-6583", TeamID: "9008218621"},
 		"https://app.clickup.com/t/FC-6583":                                            {ID: "FC-6583"},
 		"https://APP.clickup.com/t/12/86abc/":                                          {ID: "86abc", TeamID: "12"},
-		"fc-6583":                                                                      {ID: "fc-6583"},
+		"fc-6583":                                                                      {ID: "FC-6583"}, // REQ-16: lowercase is a custom id, normalised to upper case
 	}
 	for in, want := range good {
 		got, ok := ParseTaskRefTeam(in)
@@ -52,7 +52,7 @@ func TestHotfixH1_ParseTaskRefTeamForms(t *testing.T) {
 func TestHotfixH1_TaskRefCustom(t *testing.T) {
 	for id, want := range map[string]bool{
 		"FC-6583": true, "ABC-1": true, "A1-22": true,
-		"86abc": false, "86abc123": false, "fc-6583": false, "FC-": false, "FC-12a": false, "-1": false, "": false, "FC-1-2": false,
+		"86abc": false, "86abc123": false, "fc-6583": true, "FC-": false, "FC-12a": false, "-1": false, "": false, "FC-1-2": false,
 	} {
 		if got := (TaskRef{ID: id}).Custom(); got != want {
 			t.Errorf("Custom(%q)=%v want %v", id, got, want)
