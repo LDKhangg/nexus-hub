@@ -132,6 +132,9 @@ func (w *Worker) Run(ctx context.Context) error {
 	defer unlock()
 	w.loadCounters()
 	w.logf("worker: started (executor %s)", w.Exec.Name())
+	if !w.executorSupported(ctx) {
+		w.logf("worker: claude is older than %s or its version is unknown; jobs will fail with executor_unsupported", ClaudeMinVersion)
+	}
 	if err := w.Recover(ctx); err != nil {
 		return err
 	}
@@ -355,6 +358,16 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// executorSupported reports whether the executor can run jobs safely. Only
+// claude has a minimum version (the permission block keys of --settings are
+// ignored by older releases); an unparseable version is refused too.
+func (w *Worker) executorSupported(ctx context.Context) bool {
+	if w.Exec == nil || w.Exec.Name() != ExecutorClaude {
+		return true
+	}
+	return claudeVersionSupported(w.Exec.Version(ctx))
 }
 
 // telemetry builds a bounded snapshot (REQ-18): metrics, executor and its

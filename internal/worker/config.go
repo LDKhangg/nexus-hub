@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -66,11 +67,56 @@ var claudeDisallowedTools = []string{
 	// rules also cover Glob and Grep.
 	"Read(~/.ssh/**)", "Read(~/.config/**)", "Read(~/.local/state/**)",
 	"Read(~/.gnupg/**)", "Read(~/.aws/**)", "Read(//etc/**)",
+	// Edit rules also cover Write, MultiEdit and NotebookEdit.
+	"Edit(~/.ssh/**)", "Edit(~/.config/**)", "Edit(~/.local/**)",
+	"Edit(~/.gnupg/**)", "Edit(~/.aws/**)", "Edit(//etc/**)",
 }
 
 // claudeSettingsJSON is passed inline as `claude --settings`: reads outside
-// the working directory are blocked. Permission-based, not an OS sandbox.
-const claudeSettingsJSON = `{"permissions":{"blockReadsOutsideWorkingDirectories":true}}`
+// the working directory are blocked, and so are writes. Permission-based,
+// not an OS sandbox. Claude older than ClaudeMinVersion ignores both keys,
+// so the worker refuses to run jobs with it.
+const claudeSettingsJSON = `{"permissions":{"blockReadsOutsideWorkingDirectories":true,"blockWritesOutsideWorkingDirectories":true}}`
+
+// ClaudeMinVersion is the first claude release that honours the block keys.
+const ClaudeMinVersion = "2.1.314"
+
+var claudeVersionRE = regexp.MustCompile(`^(\d+)\.(\d+)(?:\.(\d+))?`)
+
+func parseClaudeVersion(s string) ([3]int, bool) {
+	var out [3]int
+	m := claudeVersionRE.FindStringSubmatch(strings.TrimSpace(s))
+	if m == nil {
+		return out, false
+	}
+	for i := 0; i < 3; i++ {
+		if m[i+1] == "" {
+			continue
+		}
+		n, err := strconv.Atoi(m[i+1])
+		if err != nil {
+			return out, false
+		}
+		out[i] = n
+	}
+	return out, true
+}
+
+// claudeVersionSupported reports whether v (the `claude --version` text) is
+// at least ClaudeMinVersion. An empty or unparseable version is refused.
+func claudeVersionSupported(v string) bool {
+	got, ok := parseClaudeVersion(v)
+	if !ok {
+		return false
+	}
+	min, _ := parseClaudeVersion(ClaudeMinVersion)
+	for i := range got {
+		if got[i] != min[i] {
+			return got[i] > min[i]
+		}
+	}
+	return true
+}
 
 // Config is ~/.config/nexus-hub/worker.yaml. It never holds a secret: the
 // hub device token lives in worker-token and the ClickUp token in the file

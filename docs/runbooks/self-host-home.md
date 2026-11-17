@@ -1250,6 +1250,12 @@ fallback: with the laptop offline the job waits and the topic says so.
    `~/.gnupg`, `~/.aws` and `/etc` (this also covers `Glob` and `Grep`).
    The config refuses `allowed_tools` entries with absolute, `~/` or `..`
    paths. This is a permission rule inside `claude`, not an OS sandbox.
+   Writes outside the working directory are blocked too, and `Edit` is
+   denied under `~/.ssh`, `~/.config`, `~/.local`, `~/.gnupg`, `~/.aws` and
+   `/etc`. These settings need `claude` 2.1.314 or newer; older releases
+   ignore them, so the worker refuses to run jobs with an older or
+   unreadable `claude --version` (the job fails with `executor_unsupported`
+   and the worker log says so at start).
 
    The worker's own git commands in a worktree (status, add, diff, commit,
    push) run with `core.fsmonitor=false` and `core.hooksPath=/dev/null` at

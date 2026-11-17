@@ -37,6 +37,9 @@ const (
 	ReasonInvalidJob      = "invalid_job"
 	ReasonWorkspaceFailed = "workspace_failed"
 	ReasonNoChanges       = "no_changes"
+	// The executor is older than the minimum that enforces the permission
+	// block keys (R-B-9).
+	ReasonExecutorUnsupported = "executor_unsupported"
 )
 
 // Progress phases (REQ-6).
@@ -204,7 +207,7 @@ func (r *jobRun) firstHeartbeat(ctx context.Context) (HeartbeatReply, error) {
 			r.setInterval(reply.HeartbeatIntervalSeconds)
 			return reply, nil
 		}
-		if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) || errors.Is(err, ErrRejected) {
+		if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) || errors.Is(err, ErrRejected) || errors.Is(err, ErrUnauthorized) {
 			return reply, ErrConflict
 		}
 		if ctx.Err() != nil {
@@ -347,6 +350,12 @@ func (r *jobRun) execute(ctx context.Context) behavior.WorkerResult {
 		return r.result(behavior.WorkerStatusFailed, ReasonInvalidJob, "The job payload is not valid for this worker.")
 	}
 	r.spec = spec
+	if !w.executorSupported(ctx) {
+		if res, ok := r.stopped(ctx); ok {
+			return res
+		}
+		return r.result(behavior.WorkerStatusFailed, ReasonExecutorUnsupported, "The local claude is older than "+ClaudeMinVersion+" or its version is unknown; update claude on the worker machine.")
+	}
 	r.progress(PhaseCloning)
 	branch := BranchName(firstNonEmpty(spec.TaskID, spec.ClickUpTaskID), r.lease.JobID)
 	unlock, err := w.lockBranch(spec.Repo, branch)
