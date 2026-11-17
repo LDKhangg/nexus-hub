@@ -496,6 +496,13 @@ type WorkerInstructionSource interface {
 	PendingWorkerInstructions(ctx context.Context, job WorkerJob) ([]WorkerInstruction, error)
 }
 
+// WorkerInstructionAcker is the optional part of a WorkerInstructionSource
+// that records the instructions a worker acknowledged in a heartbeat. A
+// pending instruction is resent with every heartbeat until acknowledged.
+type WorkerInstructionAcker interface {
+	AckWorkerInstructions(ctx context.Context, job WorkerJob, ids []string) error
+}
+
 // WorkerMaintenance is the periodic upkeep of the lease protocol.
 type WorkerMaintenance interface {
 	ExpireLeases(ctx context.Context) (int, error)

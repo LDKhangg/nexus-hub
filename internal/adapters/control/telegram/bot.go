@@ -141,8 +141,8 @@ func (c *Client) SendMessage(ctx context.Context, workspaceID, tokenRef, chatID 
 }
 
 // EditMessageText replaces the text of one message of the bot, keeping its
-// inline keyboard unless buttons are given. Identical text is rejected by
-// Telegram (code "rejected"); callers skip unchanged text.
+// inline keyboard unless buttons are given. Telegram's "message is not
+// modified" (identical text) counts as success.
 func (c *Client) EditMessageText(ctx context.Context, workspaceID, tokenRef, chatID string, messageID int64, text string, buttons [][]Button) error {
 	token, err := c.token(ctx, workspaceID, tokenRef)
 	if err != nil {
@@ -317,6 +317,9 @@ func (c *Client) doLimit(ctx context.Context, token, method string, payload any,
 		return fail("server", true, 0)
 	case code == http.StatusConflict && method == "getUpdates":
 		return fail("conflict", true, 0)
+	case code == http.StatusBadRequest && method == "editMessageText" &&
+		strings.Contains(strings.ToLower(envelope.Desc), "message is not modified"):
+		return nil // the message already shows this text: the edit is done
 	case (code == http.StatusBadRequest || code == http.StatusForbidden) && topicCode(envelope.Desc) != "":
 		return fail(topicCode(envelope.Desc), false, 0)
 	case code < 200 || code >= 300:

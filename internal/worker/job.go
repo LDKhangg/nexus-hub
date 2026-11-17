@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -198,7 +199,7 @@ func (r *jobRun) run(ctx context.Context) {
 func (r *jobRun) firstHeartbeat(ctx context.Context) (HeartbeatReply, error) {
 	back := Backoff{Base: time.Second, Max: 30 * time.Second, Rand: r.w.Rand}
 	for {
-		reply, err := r.w.Hub.Heartbeat(ctx, r.lease.JobID, r.lease.LeaseToken, r.w.telemetry(ctx, "busy"))
+		reply, err := r.heartbeat(ctx)
 		if err == nil {
 			r.setInterval(reply.HeartbeatIntervalSeconds)
 			return reply, nil
@@ -235,7 +236,7 @@ func (r *jobRun) heartbeatLoop(ctx context.Context, cancelJob context.CancelCaus
 		if r.w.sleep(ctx, d) != nil {
 			return
 		}
-		reply, err := r.w.Hub.Heartbeat(ctx, r.lease.JobID, r.lease.LeaseToken, r.w.telemetry(ctx, "busy"))
+		reply, err := r.heartbeat(ctx)
 		switch {
 		case err == nil:
 			r.setInterval(reply.HeartbeatIntervalSeconds)
@@ -244,11 +245,42 @@ func (r *jobRun) heartbeatLoop(ctx context.Context, cancelJob context.CancelCaus
 				cancelJob(errCancelled)
 				return
 			}
-		case errors.Is(err, ErrConflict), errors.Is(err, ErrNotFound):
+		case errors.Is(err, ErrConflict), errors.Is(err, ErrNotFound), errors.Is(err, ErrUnauthorized):
+			// A rejected device token (revoked device) ends the job like a
+			// stale lease: the executor stops, nothing is pushed (R-B-5).
 			cancelJob(errLeaseLost)
 			return
 		}
 	}
+}
+
+// heartbeat sends one heartbeat, acknowledging the journaled instruction
+// ids when the hub client supports it.
+func (r *jobRun) heartbeat(ctx context.Context) (HeartbeatReply, error) {
+	t := r.w.telemetry(ctx, "busy")
+	if a, ok := r.w.Hub.(InstructionAcker); ok {
+		return a.HeartbeatAck(ctx, r.lease.JobID, r.lease.LeaseToken, t, r.ackIDs())
+	}
+	return r.w.Hub.Heartbeat(ctx, r.lease.JobID, r.lease.LeaseToken, t)
+}
+
+// ackIDs are the journaled instruction ids, oldest first ("v2" before
+// "v10"), at most MaxAckInstructionIDs (the newest).
+func (r *jobRun) ackIDs() []string {
+	ids := make([]string, 0, 8)
+	for id := range r.j.State().Instrs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(a, b int) bool {
+		if len(ids[a]) != len(ids[b]) {
+			return len(ids[a]) < len(ids[b])
+		}
+		return ids[a] < ids[b]
+	})
+	if len(ids) > MaxAckInstructionIDs {
+		ids = ids[len(ids)-MaxAckInstructionIDs:]
+	}
+	return ids
 }
 
 func (r *jobRun) takeInstructions(list []behavior.WorkerInstruction) {

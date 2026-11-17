@@ -63,6 +63,16 @@ type Hub interface {
 	Result(ctx context.Context, jobID, leaseToken, idempotencyKey string, r behavior.WorkerResult) error
 }
 
+// InstructionAcker is a Hub whose heartbeat also acknowledges the owner
+// instructions the worker journaled; the hub resends an instruction until
+// it is acknowledged (R-B-4). HTTPHub implements it.
+type InstructionAcker interface {
+	HeartbeatAck(ctx context.Context, jobID, leaseToken string, t *behavior.WorkerTelemetry, ackIDs []string) (HeartbeatReply, error)
+}
+
+// MaxAckInstructionIDs bounds ack_instruction_ids in one heartbeat.
+const MaxAckInstructionIDs = 64
+
 // HTTPHub talks to /worker/v1 with the device token.
 type HTTPHub struct {
 	base   string
@@ -164,9 +174,20 @@ func (h *HTTPHub) Poll(ctx context.Context, wait time.Duration, t *behavior.Work
 
 // Heartbeat implements Hub.
 func (h *HTTPHub) Heartbeat(ctx context.Context, jobID, leaseToken string, t *behavior.WorkerTelemetry) (HeartbeatReply, error) {
+	return h.HeartbeatAck(ctx, jobID, leaseToken, t, nil)
+}
+
+// HeartbeatAck implements InstructionAcker.
+func (h *HTTPHub) HeartbeatAck(ctx context.Context, jobID, leaseToken string, t *behavior.WorkerTelemetry, ackIDs []string) (HeartbeatReply, error) {
 	body := map[string]any{"lease_token": leaseToken}
 	if t != nil {
 		body["telemetry"] = t
+	}
+	if len(ackIDs) > 0 {
+		if len(ackIDs) > MaxAckInstructionIDs {
+			ackIDs = ackIDs[len(ackIDs)-MaxAckInstructionIDs:]
+		}
+		body["ack_instruction_ids"] = ackIDs
 	}
 	var r HeartbeatReply
 	_, err := h.do(ctx, jobPath(jobID, "heartbeat"), body, hubCallTimeout, &r)

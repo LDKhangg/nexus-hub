@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
@@ -36,6 +37,26 @@ type pollResponse struct {
 type heartbeatRequest struct {
 	LeaseToken string                    `json:"lease_token"`
 	Telemetry  *behavior.WorkerTelemetry `json:"telemetry"`
+	// AckInstructionIDs are the instruction ids the worker journaled; the
+	// hub stops resending them (R-B-4).
+	AckInstructionIDs []string `json:"ack_instruction_ids"`
+}
+
+// maxAckInstructionIDs bounds ack_instruction_ids in one heartbeat.
+const maxAckInstructionIDs = 64
+
+var ackInstructionIDRE = regexp.MustCompile(`^v[1-9][0-9]{0,17}$`)
+
+func validAckIDs(ids []string) bool {
+	if len(ids) > maxAckInstructionIDs {
+		return false
+	}
+	for _, id := range ids {
+		if !ackInstructionIDRE.MatchString(id) {
+			return false
+		}
+	}
+	return true
 }
 
 type heartbeatResponse struct {
@@ -182,12 +203,20 @@ func (h *WorkerHandler) Heartbeat(c echo.Context) error {
 	if req.Telemetry != nil && req.Telemetry.Validate() != nil {
 		return workerError(c, http.StatusBadRequest, "invalid telemetry")
 	}
+	if !validAckIDs(req.AckInstructionIDs) {
+		return workerError(c, http.StatusBadRequest, "invalid request")
+	}
 	ctx := c.Request().Context()
 	job, err := h.leases.Heartbeat(ctx, device, c.Param("id"), req.LeaseToken)
 	if err != nil {
 		return workerStoreError(c, err)
 	}
 	h.recordTelemetry(ctx, device, req.Telemetry)
+	if acker, ok := h.instructions.(behavior.WorkerInstructionAcker); ok && len(req.AckInstructionIDs) > 0 {
+		if err := acker.AckWorkerInstructions(ctx, job, req.AckInstructionIDs); err != nil {
+			log.Print("worker: instruction acknowledgement not saved")
+		}
+	}
 	instructions := []behavior.WorkerInstruction{}
 	if h.instructions != nil {
 		list, err := h.instructions.PendingWorkerInstructions(ctx, job)

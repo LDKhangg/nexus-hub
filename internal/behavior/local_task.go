@@ -169,9 +169,19 @@ type WorkerJobControl interface {
 	GetJob(ctx context.Context, workspaceID, jobID string) (WorkerJob, error)
 	JobForStep(ctx context.Context, workspaceID string, executionID int64, stepID string) (job WorkerJob, ok bool, err error)
 	// RetryJob queues a FAILED, NEEDS_INPUT or INTERRUPTED job again when it
-	// is still on the given attempt; otherwise ErrConflict.
+	// is still on the given attempt and its workflow execution is still
+	// active; otherwise ErrConflict (ErrWorkerExecutionEnded, which wraps
+	// it, when only the ended execution stands in the way).
 	RetryJob(ctx context.Context, workspaceID, jobID string, attempt int) (WorkerJob, error)
 }
+
+// ErrWorkerExecutionEnded: the job could be retried but its workflow
+// execution already ended. It wraps ErrConflict.
+var ErrWorkerExecutionEnded = fmt.Errorf("%w: workflow execution ended", ErrConflict)
+
+// msgWorkerExecutionEnded is the owner-facing text for a Retry refused
+// because the workflow already ended.
+const msgWorkerExecutionEnded = "Quy trình của việc này đã kết thúc nên không thể thử lại. Hãy gửi /task mới."
 
 // LocalTaskWaker queues a waiting worker.run step again after its job ended.
 type LocalTaskWaker interface {
@@ -327,7 +337,9 @@ type LocalTaskInstructions struct {
 var _ WorkerInstructionSource = (*LocalTaskInstructions)(nil)
 
 // PendingWorkerInstructions returns the instructions newer than the last
-// delivered version and marks them delivered.
+// acknowledged version, oldest first. It does not mark them delivered: the
+// hub resends them with every heartbeat until the worker acknowledges them
+// (AckWorkerInstructions); the worker drops repeats by id.
 func (s *LocalTaskInstructions) PendingWorkerInstructions(ctx context.Context, job WorkerJob) ([]WorkerInstruction, error) {
 	if s == nil || job.ExecutionID <= 0 {
 		return nil, nil
@@ -344,14 +356,12 @@ func (s *LocalTaskInstructions) PendingWorkerInstructions(ctx context.Context, j
 		return nil, err
 	}
 	var out []WorkerInstruction
-	var highest int64
 	for _, in := range list {
 		text := strings.TrimSpace(in.Text)
 		if in.Version <= route.InstructionVersion || text == "" {
 			continue
 		}
 		out = append(out, WorkerInstruction{ID: "v" + strconv.FormatInt(in.Version, 10), Text: text})
-		highest = max(highest, in.Version)
 	}
 	if len(out) == 0 {
 		return nil, nil
@@ -361,10 +371,46 @@ func (s *LocalTaskInstructions) PendingWorkerInstructions(ctx context.Context, j
 			out[j], out[j-1] = out[j-1], out[j]
 		}
 	}
-	if err := s.Routes.SetInstructionVersion(ctx, job.WorkspaceID, job.ExecutionID, highest); err != nil {
-		return nil, err
-	}
 	return out, nil
+}
+
+// AckWorkerInstructions moves the delivered version of the job's route to
+// the highest acknowledged id that names an existing instruction (ids of
+// the form "v<version>"; others are ignored). The version only moves
+// forward.
+func (s *LocalTaskInstructions) AckWorkerInstructions(ctx context.Context, job WorkerJob, ids []string) error {
+	if s == nil || job.ExecutionID <= 0 || len(ids) == 0 {
+		return nil
+	}
+	acked := map[int64]bool{}
+	for _, id := range ids {
+		if n := instructionNumber(id); n > 0 && strings.HasPrefix(id, "v") {
+			acked[n] = true
+		}
+	}
+	if len(acked) == 0 {
+		return nil
+	}
+	if _, err := s.Routes.GetRoute(ctx, job.WorkspaceID, job.ExecutionID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	list, err := s.Reader.ListInstructions(ctx, job.WorkspaceID, job.ExecutionID)
+	if err != nil {
+		return err
+	}
+	var highest int64
+	for _, in := range list {
+		if acked[in.Version] {
+			highest = max(highest, in.Version)
+		}
+	}
+	if highest == 0 {
+		return nil
+	}
+	return s.Routes.SetInstructionVersion(ctx, job.WorkspaceID, job.ExecutionID, highest)
 }
 
 func instructionNumber(id string) int64 {

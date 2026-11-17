@@ -241,12 +241,16 @@ func (q *Queries) ResetWorkerTaskInstructionVersion(ctx context.Context, arg Res
 }
 
 const retryWorkerJob = `-- name: RetryWorkerJob :one
-UPDATE public.worker_jobs
+UPDATE public.worker_jobs j
 SET state = 'WAITING_FOR_WORKER', device_id = NULL, lease_token_hash = NULL, lease_expires_at = NULL,
     result = NULL, idempotency_key = NULL, progress = NULL, progress_seq = 0, leased_at = NULL,
     interrupted_at = NULL, finished_at = NULL, updated_at = $1
-WHERE workspace_id = $2 AND id = $3 AND attempt = $4
-  AND state IN ('FAILED', 'NEEDS_INPUT', 'INTERRUPTED')
+WHERE j.workspace_id = $2 AND j.id = $3 AND j.attempt = $4
+  AND j.state IN ('FAILED', 'NEEDS_INPUT', 'INTERRUPTED')
+  AND (j.execution_id IS NULL OR EXISTS (
+        SELECT 1 FROM public.workflow_executions e
+        WHERE e.workspace_id = j.workspace_id AND e.id = j.execution_id
+          AND e.state NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')))
 RETURNING id, workspace_id, execution_id, step_id, required_capabilities, state, device_id, lease_token_hash, lease_expires_at, attempt, result, idempotency_key, payload, progress, progress_seq, leased_at, interrupted_at, created_at, updated_at, finished_at
 `
 
@@ -259,7 +263,8 @@ type RetryWorkerJobParams struct {
 
 // A failed, needs-input or interrupted job of the expected attempt goes back
 // to the queue; device, lease, result and progress are cleared (the attempt
-// counter keeps counting at the next lease).
+// counter keeps counting at the next lease). A job whose workflow execution
+// already ended (completed, failed, cancelled) is never queued again.
 func (q *Queries) RetryWorkerJob(ctx context.Context, arg RetryWorkerJobParams) (WorkerJob, error) {
 	row := q.db.QueryRow(ctx, retryWorkerJob,
 		arg.Now,

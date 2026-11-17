@@ -48,7 +48,9 @@ func (s *WorkerStore) JobForStep(ctx context.Context, workspaceID string, execut
 }
 
 // RetryJob queues a FAILED, NEEDS_INPUT or INTERRUPTED job again when it is
-// still on the given attempt. ErrConflict otherwise, ErrNotFound if unknown.
+// still on the given attempt and its workflow execution has not ended.
+// ErrWorkerExecutionEnded when the execution ended, ErrConflict otherwise,
+// ErrNotFound if unknown.
 func (s *WorkerStore) RetryJob(ctx context.Context, workspaceID, jobID string, attempt int) (behavior.WorkerJob, error) {
 	ws, err := parseDBID(workspaceID)
 	if err != nil {
@@ -75,6 +77,11 @@ func (s *WorkerStore) RetryJob(ctx context.Context, workspaceID, jobID string, a
 	row, err := q.RetryWorkerJob(ctx, sqlc.RetryWorkerJobParams{Now: ts(now), WorkspaceID: ws, ID: id, Attempt: int32(attempt)})
 	if err != nil {
 		if isNoRows(err) {
+			if retryableWorkerState(before.State) && int(before.Attempt) == attempt && before.ExecutionID.Valid {
+				// The locked job was retryable: only its ended execution
+				// stopped the update.
+				return behavior.WorkerJob{}, behavior.ErrWorkerExecutionEnded
+			}
 			return behavior.WorkerJob{}, behavior.ErrConflict
 		}
 		return behavior.WorkerJob{}, err
@@ -358,4 +365,12 @@ func (s *WorkerTaskStore) SyncWorkerTasks(ctx context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+func retryableWorkerState(state string) bool {
+	switch state {
+	case behavior.WorkerJobFailed, behavior.WorkerJobNeedsInput, behavior.WorkerJobInterrupted:
+		return true
+	}
+	return false
 }

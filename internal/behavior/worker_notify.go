@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
 )
 
@@ -80,6 +81,8 @@ type WorkerNotifier struct {
 	mu       sync.Mutex
 	progress map[string]*WorkerJob // newest unprocessed progress per job
 	lastEdit map[int64]time.Time   // per execution
+	lastText map[int64]string      // text of the progress message, per execution
+	deferred map[string]*WorkerJob // newest progress held back by the edit gap, per job
 }
 
 type workerNotice struct {
@@ -97,6 +100,7 @@ func NewWorkerNotifier(d WorkerNotifierDeps) *WorkerNotifier {
 	return &WorkerNotifier{
 		d: d, now: time.Now, queue: make(chan workerNotice, workerNoticeQueue),
 		progress: map[string]*WorkerJob{}, lastEdit: map[int64]time.Time{},
+		lastText: map[int64]string{}, deferred: map[string]*WorkerJob{},
 	}
 }
 
@@ -187,6 +191,9 @@ func (n *WorkerNotifier) handle(ctx context.Context, e workerNotice) {
 	case WorkerChangeInterrupted:
 		n.failed(hctx, route, job, "Máy local mất kết nối nên việc bị gián đoạn. Máy cũ có thể tiếp tục trong 24 giờ, hoặc chọn Thử lại / Huỷ.")
 	case WorkerChangeFinished:
+		n.mu.Lock()
+		delete(n.deferred, job.ID) // no progress edit after the result
+		n.mu.Unlock()
 		n.finished(hctx, route, job)
 	}
 }
@@ -249,10 +256,10 @@ func workerResultText(r *WorkerResult) string {
 // workerFailureReasons maps the reason codes of internal/worker to texts.
 var workerFailureReasons = map[string]string{
 	"executor_crash":   "trình thực thi bị lỗi",
-	"executor_timeout": "quá thời gian cho phép (60 phút)",
+	"executor_timeout": "quá thời gian cho phép",
 	"turn_limit":       "chạm giới hạn số lượt",
 	"tests_failed":     "test không đạt",
-	"diff_too_large":   "thay đổi quá lớn (hơn 2.000 dòng), cần bạn xác nhận",
+	"diff_too_large":   "thay đổi vượt giới hạn số dòng, cần bạn xác nhận",
 	"push_failed":      "không đẩy được nhánh",
 	"pr_failed":        "không tạo được PR",
 	"lease_lost":       "mất quyền giữ việc",
@@ -342,26 +349,33 @@ func workerProgressText(job WorkerJob) string {
 		phase, c.FilesChanged, c.LinesAdded, c.LinesRemoved, c.TestsPassed, c.TestsFailed, c.Turns)
 }
 
-// showProgress keeps one message per attempt and edits it in place; edits
-// are spaced and skipped when nothing changed.
+// showProgress keeps one message per attempt and edits it in place. An
+// unchanged text is not sent again; a change inside the edit gap is held
+// back and the newest one is flushed when the gap ends (R-B-7).
 func (n *WorkerNotifier) showProgress(ctx context.Context, route LocalTaskRoute, job WorkerJob) {
 	text := workerProgressText(job)
 	editor, _ := n.d.Messenger.(MessageEditor)
 	if editor != nil && route.ProgressMessageID > 0 && route.ProgressAttempt == job.Attempt {
 		n.mu.Lock()
-		last := n.lastEdit[job.ExecutionID]
-		n.mu.Unlock()
-		if n.now().Sub(last) < workerProgressGap {
-			return
-		}
-		to := ChatRef{WorkspaceID: route.WorkspaceID, IntegrationID: route.IntegrationID, ChatID: route.ChatID, ThreadID: route.ThreadID}
-		if err := editor.EditMessageText(ctx, to, route.ProgressMessageID, text); err == nil {
-			n.mu.Lock()
-			n.lastEdit[job.ExecutionID] = n.now()
+		if n.lastText[job.ExecutionID] == text {
 			n.mu.Unlock()
 			return
 		}
-		// Edit refused (text unchanged, message gone): fall through to a new message.
+		if wait := workerProgressGap - n.now().Sub(n.lastEdit[job.ExecutionID]); wait > 0 {
+			n.deferProgressLocked(job, wait)
+			n.mu.Unlock()
+			return
+		}
+		n.mu.Unlock()
+		to := ChatRef{WorkspaceID: route.WorkspaceID, IntegrationID: route.IntegrationID, ChatID: route.ChatID, ThreadID: route.ThreadID}
+		if err := editor.EditMessageText(ctx, to, route.ProgressMessageID, text); err == nil || notModified(err) {
+			n.mu.Lock()
+			n.lastEdit[job.ExecutionID] = n.now()
+			n.lastText[job.ExecutionID] = text
+			n.mu.Unlock()
+			return
+		}
+		// Edit refused (message gone): fall through to a new message.
 	}
 	if n.d.Messenger == nil {
 		return
@@ -375,7 +389,41 @@ func (n *WorkerNotifier) showProgress(ctx context.Context, route LocalTaskRoute,
 	}
 	n.mu.Lock()
 	n.lastEdit[job.ExecutionID] = n.now()
+	n.lastText[job.ExecutionID] = text
 	n.mu.Unlock()
+}
+
+// deferProgressLocked keeps job as the newest held-back progress and, once
+// per gap, schedules its flush. Caller holds mu.
+func (n *WorkerNotifier) deferProgressLocked(job WorkerJob, wait time.Duration) {
+	_, scheduled := n.deferred[job.ID]
+	j := job
+	n.deferred[job.ID] = &j
+	if scheduled {
+		return
+	}
+	time.AfterFunc(wait, func() { n.flushDeferred(job.ID) })
+}
+
+// flushDeferred queues the held-back progress of a job again, unless a
+// newer progress is already queued or the job finished meanwhile.
+func (n *WorkerNotifier) flushDeferred(jobID string) {
+	n.mu.Lock()
+	j := n.deferred[jobID]
+	delete(n.deferred, jobID)
+	_, pending := n.progress[jobID]
+	n.mu.Unlock()
+	if j == nil || pending {
+		return
+	}
+	n.WorkerJobChanged(context.Background(), WorkerChangeProgress, *j)
+}
+
+// notModified reports Telegram's "message is not modified" (the message
+// already shows the text), which is a successful edit.
+func notModified(err error) bool {
+	var de *relay.DeliveryError
+	return errors.As(err, &de) && de.Code == "message_not_modified"
 }
 
 // queued says that the task waits for a machine: none online, or every
@@ -544,6 +592,12 @@ func (w *InboxWorker) workerJobCallback(ctx context.Context, u InboundUpdate, da
 		_, err = w.d.WorkerJobs.CancelJob(ctx, u.WorkspaceID, p.JobID)
 	}
 	switch {
+	case errors.Is(err, ErrWorkerExecutionEnded):
+		// The workflow ended: Retry can never work again; close the buttons.
+		if _, derr := w.d.Approvals.Decide(ctx, u.WorkspaceID, a.Nonce, DecisionExpired, "", actor, w.now()); derr != nil {
+			log.Print("worker job buttons: stale approval not closed")
+		}
+		return msgWorkerExecutionEnded, "execution_ended", true
 	case errors.Is(err, ErrConflict), errors.Is(err, ErrNotFound):
 		// Already retried, finished or cancelled: the buttons are stale.
 		if _, derr := w.d.Approvals.Decide(ctx, u.WorkspaceID, a.Nonce, DecisionExpired, "", actor, w.now()); derr != nil {

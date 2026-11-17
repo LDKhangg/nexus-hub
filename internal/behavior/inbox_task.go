@@ -142,6 +142,9 @@ func (w *InboxWorker) retryCommand(ctx context.Context, u InboundUpdate, args st
 		return fmt.Sprintf("%s: việc đang ở trạng thái \"%s\", không cần thử lại.", workflow.FormatRef(id), WorkerJobStateText(job.State)), nil
 	}
 	retried, err := w.d.WorkerJobs.RetryJob(ctx, u.WorkspaceID, job.ID, job.Attempt)
+	if errors.Is(err, ErrWorkerExecutionEnded) {
+		return workflow.FormatRef(id) + ": " + msgWorkerExecutionEnded, nil
+	}
 	if errors.Is(err, ErrConflict) {
 		return "", ErrDecided
 	}
