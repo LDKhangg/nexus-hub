@@ -1420,6 +1420,102 @@ says why. Unknown values never block. Restart the hub after changing them.
   opens a draft PR. It never merges, approves, force-pushes or pushes to the
   default branch. Your own account cannot approve its own PR.
 
+## Orchestrated tasks (Phase 7b)
+
+`/plan <request>` starts an AI-planned task: the hub classifies the request,
+asks the model for a plan (tasks with dependencies, executors and a budget),
+shows the plan in Telegram under `WF-n`, runs the tasks in dependency order as
+durable workflow steps and reports the result with evidence links. `/task`
+is unchanged: it sends one instruction straight to the local worker with no
+plan. In a ClickUp task topic `/plan <request>` uses that task; elsewhere use
+`/plan <TASK-ID> <request>`, otherwise the bot replies with usage. In a chat
+with the assistant, the `start_task` tool does the same as `/plan`.
+`/status WF-n` shows the plan version, task states, last decision and the
+budget used.
+
+### Plan message and decisions
+
+The plan message lists each task with its key, executor, dependencies and the
+budget caps. After every task the model decides one of `EXECUTE`, `DELEGATE`,
+`REQUEST_CLARIFICATION`, `REQUEST_APPROVAL`, `REPLAN`, `COMPLETE` or `FAIL`.
+Go checks every decision and writes it, with its reason code, to the audit
+(a decision Go changed shows `converted_from`). A clarification question or
+approval (Làm/Huỷ) is bound to `WF-n`; the execution waits in
+`WAITING_FOR_USER` until you answer. A replan creates plan version v+1; older
+versions and finished task results are kept.
+
+### Evidence rule for COMPLETE
+
+`COMPLETE` is accepted only when every required task succeeded and holds at
+least one evidence reference that belongs to this execution (a step output, a
+resource binding, or for a code task the worker result: branch or PR URL, test
+outcome). Otherwise Go turns it into `REPLAN` when budget remains, or `FAIL`
+with reason `missing_evidence`.
+
+### Budgets
+
+Each execution has caps; the counters are checkpointed, so a hub restart
+resumes with the same numbers. Set a cap with `nh settings set <key> <value>`:
+
+| Setting | Default |
+|---|---|
+| `orchestrator_max_plan_iterations` | 3 |
+| `orchestrator_max_replans` | 2 |
+| `orchestrator_max_repair_attempts` | 2 |
+| `orchestrator_max_tokens` | 80000 |
+| `orchestrator_max_wall_minutes` | 90 |
+
+`orchestrator_min_confidence` (default 0.6) is the Classify confidence below
+which the bot asks you a question. Wall time runs from the start, including
+waits for the laptop; waits never spend tokens. When a limit is reached no
+more model calls are made and the execution waits for you
+(`planning_budget_exceeded`) with two buttons: "Thêm 1 vòng" adds budget (at
+most 3 times per execution, 10 more wall minutes each time) and "Huỷ" ends
+it. If you do not answer, the wait expires and the execution fails.
+
+### Executors
+
+- **investigate** is read-only: it reads ClickUp and GitHub through the agent
+  tools and every call is audited in `tool_runs`. It never writes anywhere.
+- **Local worker** (`repo.write`): the plan delegates the task through the same
+  machinery as `/task` (see Local worker, Phase 7a). The repository is the one
+  named in the plan, else the task's remembered repository, else the only
+  registered repository, else the bot asks. The laptop must be online: when it
+  is offline the job waits in `WAITING_FOR_WORKER` and the wait counts against
+  the wall budget. An orchestrated job sends no progress message to the topic;
+  only the plan, decisions and the final report appear.
+- A task is given only to an executor that covers all its capabilities;
+  otherwise it is blocked and the bot asks you or fails.
+
+### Inspect
+
+```sh
+nh workflow show --workspace-id $WS WF-12
+```
+
+For an orchestrated execution the JSON has an `orchestrator` object: `plans`
+(version, status, created), `tasks` (key, title, executor, state,
+`depends_on`, evidence references), `decisions` (time, decision, reason, task
+key, `converted_from`), `usage` (tokens and cost) and `budget` (used and caps
+from the latest checkpoint). It holds metadata only: titles, enums, codes,
+counters and ids; no model text.
+
+### Triage
+
+The comment pipeline's Tier-1 triage now goes through the orchestrator
+`Classify` call (prompt `classify@2`). If `Classify` cannot produce a valid
+result, triage falls back to the previous (legacy) triage path, so routing,
+reports and dedupe behave as before.
+
+### Known limits
+
+- Behavior actions are not wired as plan executors yet; only investigate and
+  the local worker are offered.
+- The static step graph has 30 task slots: one execution can run at most 30
+  task runs, including reruns after a replan.
+- Wall time is checked when the execution wakes, so an execution may run a
+  little past its cap before it stops.
+
 ## Upkeep
 
 - Updates: `git pull`, rebuild both binaries, run `goose … up`, then

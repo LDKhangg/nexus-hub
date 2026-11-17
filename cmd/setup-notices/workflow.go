@@ -25,7 +25,9 @@ const workflowUsage = `usage: workflow <command> --workspace-id <uuid> [args]
   list [--state S] [--limit N] [--cursor C]    executions, newest first
   show <ref|id>                                state, reason, version, deadline,
                                                waits, live job, lineage, resources,
-                                               instruction metadata, legacy links
+                                               instruction metadata, legacy links;
+                                               orchestrated: plans, tasks, decisions,
+                                               usage, budget (metadata only)
   steps <ref|id>                               steps, attempts, usage, checkpoint refs
   history <ref|id> [--limit N] [--cursor C]    ordered timeline
   jobs [--status S] [--execution-id ID] [--limit N] [--cursor C]
@@ -165,6 +167,7 @@ type workflowCLI struct {
 	store         *storage.WorkflowStore
 	conversations *storage.ConversationStore
 	workers       *storage.WorkerStore
+	orch          *storage.OrchestratorStore
 	ws            string
 	out           io.Writer
 }
@@ -252,7 +255,11 @@ func workflowCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 	if err != nil {
 		return errors.New("database operation failed")
 	}
-	c := workflowCLI{store: store, conversations: conversations, workers: workers, ws: *ws, out: out}
+	orch, err := storage.NewOrchestratorStore(pool)
+	if err != nil {
+		return errors.New("database operation failed")
+	}
+	c := workflowCLI{store: store, conversations: conversations, workers: workers, orch: orch, ws: *ws, out: out}
 	if err := store.CheckWorkspace(ctx, *ws); err != nil {
 		if errors.Is(err, workflow.ErrNotFound) {
 			return errors.New("workspace not found")
@@ -401,6 +408,15 @@ func (c workflowCLI) show(ctx context.Context, id int64) error {
 			m["worker_job"] = wj
 		}
 	}
+	if c.orch != nil {
+		o, err := c.orchestratorMetadata(ctx, id, steps)
+		if err != nil {
+			return workflowStoreErr(err)
+		}
+		if o != nil {
+			m["orchestrator"] = o
+		}
+	}
 	waits := make([]map[string]any, 0, len(d.Waits))
 	for _, w := range d.Waits {
 		wm := map[string]any{
@@ -418,6 +434,95 @@ func (c workflowCLI) show(ctx context.Context, id int64) error {
 		m["attention"] = "waiting: decide the open approval, then the execution resumes (or run workflow resume)"
 	}
 	return c.emit(m)
+}
+
+// workflowCode passes a short lowercase or uppercase code (reason, decision,
+// state) and replaces anything else, so no free text reaches the output.
+func workflowCode(s string) string {
+	if s == "" {
+		return ""
+	}
+	if len(s) > 64 {
+		return "unknown"
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '.' || r == '-') {
+			return "unknown"
+		}
+	}
+	return s
+}
+
+// orchestratorMetadata describes an orchestrated execution: plan versions,
+// tasks, decisions, usage and the latest budget snapshot. Metadata only:
+// titles, enums, codes, counters and evidence reference ids; no model text.
+// It returns nil for an execution without plans.
+func (c workflowCLI) orchestratorMetadata(ctx context.Context, id int64, steps []workflow.Step) (map[string]any, error) {
+	plans, err := c.orch.ListPlans(ctx, c.ws, id)
+	if err != nil {
+		return nil, err
+	}
+	if len(plans) == 0 {
+		return nil, nil
+	}
+	tasks, err := c.orch.ListTasks(ctx, c.ws, id)
+	if err != nil {
+		return nil, err
+	}
+	decisions, err := c.orch.ListDecisions(ctx, c.ws, id)
+	if err != nil {
+		return nil, err
+	}
+	versionOf := make(map[int64]int, len(plans))
+	var tokensIn, tokensOut int64
+	var cost float64
+	planItems := make([]map[string]any, 0, len(plans))
+	for _, p := range plans {
+		versionOf[p.ID] = p.Version
+		tokensIn += p.TokensIn
+		tokensOut += p.TokensOut
+		cost += p.CostUSD
+		planItems = append(planItems, map[string]any{"version": p.Version, "status": workflowCode(p.Status), "created_at": workflowTimeV(p.CreatedAt)})
+	}
+	taskItems := make([]map[string]any, 0, len(tasks))
+	for _, t := range tasks {
+		deps := t.DependsOn
+		if deps == nil {
+			deps = []string{}
+		}
+		item := map[string]any{"plan_version": versionOf[t.PlanID], "key": t.Key, "title": t.Title, "executor": workflowCode(t.Executor),
+			"state": workflowCode(t.State), "depends_on": deps}
+		if len(t.EvidenceRefs) > 0 {
+			item["evidence_refs"] = t.EvidenceRefs
+		}
+		taskItems = append(taskItems, item)
+	}
+	decisionItems := make([]map[string]any, 0, len(decisions))
+	for _, d := range decisions {
+		item := map[string]any{"at": workflowTimeV(d.CreatedAt), "plan_version": d.PlanVersion, "decision": workflowCode(d.Decision), "reason": workflowCode(d.ReasonCode)}
+		if d.TaskKey != "" {
+			item["task_key"] = d.TaskKey
+		}
+		if d.ConvertedFrom != "" {
+			item["converted_from"] = workflowCode(d.ConvertedFrom)
+		}
+		decisionItems = append(decisionItems, item)
+	}
+	o := map[string]any{
+		"plans": planItems, "tasks": taskItems, "decisions": decisionItems,
+		"usage": map[string]any{"input_tokens": tokensIn, "output_tokens": tokensOut, "cost_usd": cost},
+	}
+	if snap, ok := orchestrator.LatestBudgetSnapshot(steps); ok {
+		o["budget"] = map[string]any{
+			"plan_iterations": map[string]int{"used": snap.Used.PlanIterations, "cap": snap.Caps.PlanIterations},
+			"replans":         map[string]int{"used": snap.Used.Replans, "cap": snap.Caps.Replans},
+			"repair_attempts": map[string]int{"used": snap.Used.RepairAttempts, "cap": snap.Caps.RepairAttempts},
+			"tokens":          map[string]int64{"used": snap.Used.Tokens, "cap": snap.Caps.Tokens},
+			"wall_minutes":    map[string]any{"cap": int64(snap.Caps.Wall / time.Minute), "started_at": workflowTimeV(snap.StartedAt)},
+			"extensions":      snap.Extensions,
+		}
+	}
+	return o, nil
 }
 
 func workflowResourceMetadata(resources []workflow.ResourceBinding) []map[string]any {

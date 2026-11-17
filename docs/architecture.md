@@ -272,3 +272,30 @@ nexus-hub/
 > - [ ] **Milestone 5: BYOI & Deploy lên Oracle `E2.1.Micro` (`internal/tenant` + `scripts/build_oracle.sh`)**
 >   - Bật mã hóa `AES-256-GCM` cho API Token và `embed.FS` auto-migration.
 >   - Cross-compile ra binary Linux AMD64 (~15MB) và chạy qua `systemd` + Cloudflare Tunnel trên VPS Oracle.
+
+---
+
+## 7. AI orchestrator boundary (Phase 7b, NFR-034, ARCH-004)
+
+Orchestrator code (`internal/orchestrator`) reaches a model only through the
+`AIRuntime` interface (`Generate(ctx, StructuredRequest) (StructuredResponse, error)`):
+a structured call with a JSON schema that returns the output, token usage and
+cost. The domain packages import no provider package. Adapters implement the
+interface for Anthropic, the Claude CLI and the opencode CLI, and a
+deterministic fake provider serves tests. The vendor and model are chosen by
+settings, never in domain logic.
+
+Flow: `Classify` (intent, task type, priority, complexity, confidence) then
+`Plan` (tasks, dependencies, budget request) then, after each task result,
+`Evaluate` (a decision). Every output is validated against a versioned schema;
+invalid output gets a bounded number of repairs, and nothing from a bad output
+is applied. Go owns the policy: it checks plans (unique keys, known
+capabilities, acyclic, clamped budget), assigns only an executor whose
+capabilities cover the task, accepts `COMPLETE` only with evidence, and writes
+every decision to the audit. The model proposes; side effects go through the
+existing approval and local-worker machinery. Plans, tasks and decisions are
+stored as sanitized rows (`orchestrator_plans`, `orchestrator_plan_tasks`,
+`orchestrator_decisions`); the plan runs as durable workflow steps
+(`orchestrator.plan`, `.run_task`, `.evaluate`, `.report`) whose checkpoints
+carry the budget counters.
+

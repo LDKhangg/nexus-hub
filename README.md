@@ -19,6 +19,7 @@ to run and use it, and where to read more.
 | Intent check and mentions | the AI reads the message before approving ("review giúp em" yes, "đừng merge" no); you get a Telegram summary when someone tags you in ClickUp | Phase 3e |
 | People and report style | names instead of ids ("anh Định", not `clickup 1234567`), short reports, your own templates | Phase 4 (in progress) |
 | Local worker | `/task` in a task topic: your laptop edits the code in a worktree and opens a draft PR; the topic shows progress and the result | Phase 7a |
+| AI orchestrator | `/plan <request>`: the AI plans tasks with dependencies and a budget, runs them, and reports with evidence | Phase 7b |
 
 The full product goal is `docs/product/PCC-001.md`; the phase plan is
 `docs/product/ROADMAP.md`.
@@ -78,6 +79,7 @@ the list, or `nh <command>` for its usage.
 | Watching | `runs`, `trace` |
 | People and reports (Phase 4) | `contact`, `report-prefs`, `report-template` |
 | Local worker (Phase 7a) | `worker enroll / run / status / clean` (laptop), `worker devices / jobs / revoke` (hub); Telegram `/task`, `/worker`, `/retry` |
+| Orchestrated tasks (Phase 7b) | Telegram `/plan`, `/status WF-n`; `workflow show WF-n` lists plans, tasks, decisions, usage and budget |
 
 A typical behavior change:
 
