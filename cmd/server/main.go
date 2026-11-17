@@ -118,6 +118,7 @@ func run() error {
 		return err
 	}
 	engine.SetTopics(topics)
+	commands.SetTaskResolver(topics)
 	ag.actions.SetThreadRouter(topics)
 	workspaces, err := storage.NewWorkspaceRepository(pool)
 	if err != nil {

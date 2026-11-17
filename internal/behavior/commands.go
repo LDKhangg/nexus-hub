@@ -18,6 +18,16 @@ import (
 type CommandRunner struct {
 	defs DefinitionStore
 	runs RunStore
+	// tasks resolves custom task IDs; nil leaves them as written.
+	tasks TaskResolver
+}
+
+// SetTaskResolver sets the resolver that turns a custom task ID in a command
+// argument into the canonical ID. Set it before use.
+func (c *CommandRunner) SetTaskResolver(r TaskResolver) {
+	if c != nil {
+		c.tasks = r
+	}
 }
 
 func NewCommandRunner(defs DefinitionStore, runs RunStore) (*CommandRunner, error) {
@@ -38,7 +48,7 @@ func usageFor(t ResolvedTrigger) *UsageError {
 }
 
 // commandArgs reads the arguments a trigger declares from the command text.
-func commandArgs(t ResolvedTrigger, args string) (taskID string, err error) {
+func (c *CommandRunner) commandArgs(ctx context.Context, workspaceID string, t ResolvedTrigger, args string) (taskID string, err error) {
 	fields := strings.Fields(args)
 	if len(fields) != len(t.Args) {
 		return "", usageFor(t)
@@ -46,11 +56,19 @@ func commandArgs(t ResolvedTrigger, args string) (taskID string, err error) {
 	for i, name := range t.Args {
 		switch name {
 		case CommandArgTask:
-			id, ok := ParseTaskRef(fields[i])
+			ref, ok := ParseTaskRefTeam(fields[i])
 			if !ok {
 				return "", usageFor(t)
 			}
-			taskID = id
+			taskID = ref.ID
+			if ref.Custom() && c.tasks != nil {
+				id, rerr := c.tasks.ResolveTask(ctx, workspaceID, ref)
+				if rerr != nil {
+					log.Print("behavior: custom task id not resolved for command")
+					return "", &UsageError{Usage: "Không đọc được task " + ref.ID + ". Gửi lại ID gốc hoặc link task."}
+				}
+				taskID = id
+			}
 		default:
 			return "", usageFor(t)
 		}
@@ -76,7 +94,7 @@ func (c *CommandRunner) TriggerCommand(ctx context.Context, r CommandRequest) (s
 			if t.Type != TriggerTelegramCommand || t.Command != r.Command {
 				continue
 			}
-			taskID, err := commandArgs(t, r.Args)
+			taskID, err := c.commandArgs(ctx, r.WorkspaceID, t, r.Args)
 			if err != nil {
 				return "", err
 			}
