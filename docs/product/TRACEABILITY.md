@@ -68,22 +68,22 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-054 | Plan revision. | 7b | PENDING |  |
 | FR-055 | Structured outputs và schema validation. | 2, 7b | IN_PROGRESS | Phase 2: triage JSON validated |
 | FR-056 | Configurable reasoning/iteration budget. | 2, 7b, 6a | IN_PROGRESS | Phase 2: token budget, step limit; Phase 6a: fast/work/deep model settings, history turns (8bd07d9) |
-| FR-057 | Worker registry. | 7a, 8 | PENDING |  |
-| FR-058 | Worker capability profiles. | 7a, 8 | PENDING |  |
-| FR-059 | Worker availability tracking. | 7a, 8 | PENDING |  |
-| FR-060 | Worker task assignment. | 7a, 8 | PENDING |  |
-| FR-061 | Isolated working directories. | 7a, 8 | PENDING |  |
+| FR-057 | Worker registry. | 7a, 8 | IN_PROGRESS | Phase 7a: device enrollment, hashed tokens, revoke (c85e9ca, CI 44009727911; live laptop check pending) |
+| FR-058 | Worker capability profiles. | 7a, 8 | IN_PROGRESS | Phase 7a: device capability profiles (c85e9ca, CI 44009727911; live laptop check pending) |
+| FR-059 | Worker availability tracking. | 7a, 8 | IN_PROGRESS | Phase 7a: presence, offline after 90 s, telemetry card (c85e9ca, CI 44009727911; live laptop check pending) |
+| FR-060 | Worker task assignment. | 7a, 8 | IN_PROGRESS | Phase 7a: lease protocol, /task → local-task worker.run (c85e9ca, CI 44009727911; live laptop check pending) |
+| FR-061 | Isolated working directories. | 7a, 8 | IN_PROGRESS | Phase 7a: per-job git worktree on the laptop (c85e9ca, CI 44009727911; live laptop check pending) |
 | FR-062 | Tool permission enforcement. | 2, 8 | IN_PROGRESS | Phase 2: tiered tool policy executor |
-| FR-063 | Execution timeout. | 2, 7a, 8 | IN_PROGRESS | Phase 2: tool timeouts |
-| FR-064 | Cancellation support. | 7a, 8 | PENDING |  |
+| FR-063 | Execution timeout. | 2, 7a, 8 | IN_PROGRESS | Phase 2: tool timeouts; Phase 7a: 60 min wall, turn limit, test timeout, sleep inhibitor (c85e9ca, CI 44009727911; live laptop check pending) |
+| FR-064 | Cancellation support. | 7a, 8 | IN_PROGRESS | Phase 7a: /cancel and Cancel button stop the executor (c85e9ca, CI 44009727911; live laptop check pending) |
 | FR-065 | Captured tool results. | 2, 8 | IN_PROGRESS | Phase 2: tool_runs audit with summaries |
-| FR-066 | Task progress reporting. | 7a, 8 | PENDING |  |
-| FR-067 | Worker result contract. | 7a, 8 | PENDING |  |
-| FR-068 | Worker failure reporting. | 7a, 8 | PENDING |  |
+| FR-066 | Task progress reporting. | 7a, 8 | IN_PROGRESS | Phase 7a: one in-place progress message per job (c85e9ca, CI 44009727911; live laptop check pending) |
+| FR-067 | Worker result contract. | 7a, 8 | IN_PROGRESS | Phase 7a: idempotent result contract (c85e9ca, CI 44009727911; live laptop check pending) |
+| FR-068 | Worker failure reporting. | 7a, 8 | IN_PROGRESS | Phase 7a: fixed failure reason codes, Retry/Cancel buttons (c85e9ca, CI 44009727911; live laptop check pending) |
 | FR-069 | Worker execution iteration limit. | 2, 8 | IN_PROGRESS | Phase 2: Tier-2 step limit |
-| FR-070 | Artifact references. | 7a, 8 | PENDING |  |
-| FR-071 | Workspace cleanup và retention. | 7a, 8 | PENDING |  |
-| FR-072 | Ngăn concurrent write conflicts đối với cùng repository/branch. | 7a, 8 | PENDING |  |
+| FR-070 | Artifact references. | 7a, 8 | IN_PROGRESS | Phase 7a: result carries branch, PR URL, artifact refs (c85e9ca, CI 44009727911; live laptop check pending) |
+| FR-071 | Workspace cleanup và retention. | 7a, 8 | IN_PROGRESS | Phase 7a: worktree retention and nh worker clean (c85e9ca, CI 44009727911; live laptop check pending) |
+| FR-072 | Ngăn concurrent write conflicts đối với cùng repository/branch. | 7a, 8 | IN_PROGRESS | Phase 7a: one write lock per repo+branch (c85e9ca, CI 44009727911; live laptop check pending) |
 | FR-073 | Create workflow definition. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-074 | Update draft workflow. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-075 | Validate workflow schema. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
@@ -108,20 +108,20 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-094 | Execution timeout. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-095 | Dead-letter hoặc failed-job inspection. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-096 | Dependency-aware task progression. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
-| FR-097 | Không giữ worker khi đang chờ user. | 7a, 8 | PENDING |  |
+| FR-097 | Không giữ worker khi đang chờ user. | 7a, 8 | IN_PROGRESS | Phase 7a: job waits WAITING_FOR_WORKER, no VPS fallback (c85e9ca, CI 44009727911; live laptop check pending) |
 | FR-098 | Optimistic locking/leases để tránh nhiều scheduler cùng claim một job. | 2, 5 | IN_PROGRESS | Phase 2: agent job leases + thread lock; Phase 5: generic queue leases + fenced claims, merged develop 65be4ac |
 | FR-099 | Reconciliation sau process restart. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-100 | Persistent job queue. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-101 | Configurable per-user workflow concurrency. | 8 | PENDING |  |
 | FR-102 | Configurable worker pool size. | 8 | PENDING |  |
-| FR-103 | Worker capability matching. | 7a, 8 | PENDING |  |
+| FR-103 | Worker capability matching. | 7a, 8 | IN_PROGRESS | Phase 7a: capability and telemetry-aware matching (c85e9ca, CI 44009727911; live laptop check pending) |
 | FR-104 | Priority scheduling. | 8 | PENDING |  |
 | FR-105 | Resource conflict handling. | 8 | PENDING |  |
 | FR-106 | Job leases và lease expiration. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
-| FR-107 | Worker heartbeat hoặc tương đương. | 7a, 8 | PENDING |  |
+| FR-107 | Worker heartbeat hoặc tương đương. | 7a, 8 | IN_PROGRESS | Phase 7a: heartbeat, lease expiry, reissue after lost poll (c85e9ca, CI 44009727911; live laptop check pending) |
 | FR-108 | Queue visibility. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
-| FR-109 | Backpressure khi quá tải. | 7a, 8 | PENDING |  |
-| FR-110 | Worker allocation được audit. | 7a, 8 | PENDING |  |
+| FR-109 | Backpressure khi quá tải. | 7a, 8 | IN_PROGRESS | Phase 7a: telemetry thresholds hold jobs (single device) (c85e9ca, CI 44009727911; live laptop check pending) |
+| FR-110 | Worker allocation được audit. | 7a, 8 | IN_PROGRESS | Phase 7a: worker_events audit (c85e9ca, CI 44009727911; live laptop check pending) |
 | FR-111 | Rule schema có version. | 9 | PENDING |  |
 | FR-112 | Rule validation. | 9 | PENDING |  |
 | FR-113 | Policy evaluation trước các privileged actions. | 2, 9 | IN_PROGRESS | Phase 2: policy before tool calls (tools only) |
@@ -203,7 +203,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | NFR-016 | Secrets encryption at rest và secret redaction. | 2 | IN_PROGRESS | Phase 2: encryption at rest + redactor |
 | NFR-017 | Least privilege cho integrations. | 12 | PENDING |  |
 | NFR-018 | Không expose management endpoints không xác thực. | 11 | PENDING |  |
-| NFR-019 | Sandboxed/restricted worker execution. | 2, 7a, 8, 12 | IN_PROGRESS | Phase 2: hardened git-only runner |
+| NFR-019 | Sandboxed/restricted worker execution. | 2, 7a, 8, 12 | IN_PROGRESS | Phase 2: hardened git-only runner; Phase 7a: file-tools-only claude, no creds for executor/tests (c85e9ca, CI 44009727911; live laptop check pending) |
 | NFR-020 | Chống path traversal và command injection tại tool boundaries. | 2, 12 | IN_PROGRESS | Phase 2: path/argument checks in tools |
 | NFR-021 | Audit privileged actions. | 2, 12 | IN_PROGRESS | Phase 2: tool_runs audit |
 | NFR-022 | Prompt-injection defenses và trust-boundary checks. | 2, 12 | IN_PROGRESS | Phase 2: sanitizer + policy boundary |
@@ -214,7 +214,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | NFR-027 | Execution timelines. | 12 | PENDING |  |
 | NFR-028 | Worker status và queue depth. | 12 | PENDING |  |
 | NFR-029 | Error metrics. | 12 | PENDING |  |
-| NFR-030 | LLM usage/cost tracking khi provider cung cấp dữ liệu. | 2, 12, 6a | IN_PROGRESS | Phase 2: token usage per job; Phase 6a: per-turn assistant usage log incl. router_* (8bd07d9) |
+| NFR-030 | LLM usage/cost tracking khi provider cung cấp dữ liệu. | 2, 12, 6a | IN_PROGRESS | Phase 2: token usage per job; Phase 6a: per-turn assistant usage log incl. router_* (8bd07d9); Phase 7a: worker usage and Claude limits in telemetry (c85e9ca, CI 44009727911; live laptop check pending) |
 | NFR-031 | Health/readiness endpoints. | 3 | PENDING |  |
 | NFR-032 | Có cảnh báo hoặc notification cho stuck/failed workflows. | 12 | PENDING |  |
 | NFR-033 | Có README. | 3 | PENDING |  |
@@ -243,7 +243,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | E2E-004 | Approval from Phone | 9, 13 | PENDING |  |
 | E2E-005 | Server Restart Recovery | 5, 12, 13 | IN_PROGRESS | Phase 5: fake-provider crash/restart/reclaim tests pass on 2ac779b; live evidence is Phase 12/13 |
 | E2E-006 | Duplicate Webhook | 4, 13 | PENDING |  |
-| E2E-007 | Worker Failure | 7a, 8, 13 | PENDING |  |
+| E2E-007 | Worker Failure | 7a, 8, 13 | IN_PROGRESS | Phase 7a: fake-executor failure paths in CI (c85e9ca, CI 44009727911; live laptop check pending) |
 | E2E-008 | Cross-Platform Response | 10, 13 | PENDING |  |
 | E2E-009 | Policy Violation | 9, 13 | PENDING |  |
 | E2E-010 | New Integration | 10, 13 | PENDING |  |
