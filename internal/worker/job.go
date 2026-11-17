@@ -406,9 +406,13 @@ func (r *jobRun) execute(ctx context.Context) behavior.WorkerResult {
 		res.TestOutcome = testOutcome
 		return res
 	}
-	if diff.Changed() > int64(w.Cfg.Limits.MaxChangedLines) {
-		res := r.result(behavior.WorkerStatusNeedsInput, ReasonDiffTooLarge,
-			joinSummary(final, fmt.Sprintf("The change has %d changed lines, over the limit of %d; nothing was pushed. The worktree is kept.", diff.Changed(), w.Cfg.Limits.MaxChangedLines)))
+	if diff.Weighted() > int64(w.Cfg.Limits.MaxChangedLines) {
+		note := fmt.Sprintf("The change has %d changed lines, over the limit of %d; nothing was pushed. The worktree is kept.", diff.Changed(), w.Cfg.Limits.MaxChangedLines)
+		if diff.Binary > 0 {
+			note = fmt.Sprintf("The change has %d changed lines and %d binary files (each counts as %d lines), over the limit of %d; nothing was pushed. The worktree is kept.",
+				diff.Changed(), diff.Binary, BinaryFileWeight, w.Cfg.Limits.MaxChangedLines)
+		}
+		res := r.result(behavior.WorkerStatusNeedsInput, ReasonDiffTooLarge, joinSummary(final, note))
 		res.TestOutcome = testOutcome
 		return res
 	}

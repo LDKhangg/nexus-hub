@@ -155,7 +155,7 @@ func newJournal(dir string, l LeaseRecord, now func() time.Time) (*Journal, erro
 }
 
 // OpenJournal replays an existing job journal. A torn last line (a crash
-// mid-write) is ignored.
+// mid-write) is ignored and truncated away.
 func OpenJournal(dir string, now func() time.Time) (*Journal, error) {
 	path := filepath.Join(dir, "journal.jsonl")
 	data, err := os.ReadFile(path)
@@ -217,6 +217,15 @@ func OpenJournal(dir string, now func() time.Time) (*Journal, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, errors.New("journal not writable")
+	}
+	// A torn last line (a crash mid-write) is cut off, so the next record
+	// starts on a fresh line instead of being glued to it (D-B-1).
+	if n := len(data); n > 0 && data[n-1] != '\n' {
+		if err := f.Truncate(int64(bytes.LastIndexByte(data, '\n') + 1)); err != nil {
+			f.Close()
+			return nil, errors.New("journal not writable")
+		}
+		_ = f.Sync()
 	}
 	if now == nil {
 		now = time.Now

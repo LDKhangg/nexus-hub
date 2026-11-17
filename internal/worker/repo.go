@@ -3,6 +3,8 @@ package worker
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -153,9 +155,18 @@ func (r *Repos) ClonePath(repo string) string {
 	return filepath.Join(r.ReposDir, owner, name)
 }
 
-// WorktreePath is the worktree of a job.
+// WorktreePath is the worktree of a job. A job id that is not a plain id
+// (jobIDRE) never becomes a path element: it maps to "x-<hash>" (D-B-3).
 func (r *Repos) WorktreePath(jobID string) string {
-	return filepath.Join(r.ReposDir, worktreesSubdir, jobID)
+	return filepath.Join(r.ReposDir, worktreesSubdir, safeJobName(jobID))
+}
+
+func safeJobName(jobID string) string {
+	if jobIDRE.MatchString(jobID) {
+		return jobID
+	}
+	sum := sha256.Sum256([]byte(jobID))
+	return "x-" + hex.EncodeToString(sum[:8])
 }
 
 // EnsureClone clones repo when missing, else fetches origin (W9).
@@ -227,11 +238,20 @@ func BranchName(taskID, jobID string) string {
 	if t == "" {
 		t = "job"
 	}
-	short := strings.ReplaceAll(jobID, "-", "")
+	var sh strings.Builder
+	for _, c := range strings.ToLower(safeJobName(jobID)) {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			sh.WriteRune(c)
+		}
+	}
+	short := sh.String()
 	if len(short) > 8 {
 		short = short[:8]
 	}
-	return branchPrefix + t + "-" + strings.ToLower(short)
+	if short == "" {
+		short = "x"
+	}
+	return branchPrefix + t + "-" + short
 }
 
 // PrepareWorktree creates (or reuses, on a resumed attempt) the job's
@@ -314,13 +334,22 @@ func (r *Repos) excludePrivate(ctx context.Context, wt string) error {
 	return os.WriteFile(path, []byte(out), 0o644)
 }
 
-// DiffStat is the change of a worktree against its base commit.
+// DiffStat is the change of a worktree against its base commit. Binary
+// counts the changed binary files (numstat "-"), which have no lines.
 type DiffStat struct {
-	Files, Added, Removed int64
+	Files, Added, Removed, Binary int64
 }
+
+// BinaryFileWeight is how many changed lines one binary file counts as
+// against limits.max_changed_lines.
+const BinaryFileWeight = 100
 
 // Changed is added + removed lines.
 func (d DiffStat) Changed() int64 { return d.Added + d.Removed }
+
+// Weighted is Changed plus BinaryFileWeight per binary file: the size the
+// diff limit is checked against.
+func (d DiffStat) Weighted() int64 { return d.Changed() + d.Binary*BinaryFileWeight }
 
 // StageAndDiff stages every change except .nexus and returns the diff
 // against base (committed by the executor or not).
@@ -341,7 +370,10 @@ func (r *Repos) StageAndDiff(ctx context.Context, wt, base string) (DiffStat, er
 			continue
 		}
 		d.Files++
-		a, _ := strconv.ParseInt(f[0], 10, 64) // "-" for binary files counts 0
+		if f[0] == "-" && f[1] == "-" {
+			d.Binary++
+		}
+		a, _ := strconv.ParseInt(f[0], 10, 64) // "-" for binary files counts 0 lines
 		b, _ := strconv.ParseInt(f[1], 10, 64)
 		d.Added += a
 		d.Removed += b
@@ -372,11 +404,28 @@ func (r *Repos) Commit(ctx context.Context, wt, msgFile string) error {
 // Push pushes branch to origin. It refuses the default branch and any
 // branch outside nexus/, and never forces.
 func (r *Repos) Push(ctx context.Context, wt, branch, defaultBranch string) error {
-	if !strings.HasPrefix(branch, branchPrefix) || branch == defaultBranch || !refNameRE.MatchString(branch) {
+	if !validJobBranch(branch) || branch == defaultBranch {
 		return errors.New("refusing to push this branch")
 	}
 	_, err := r.git(ctx, wt, "push", "--quiet", "-u", "origin", "refs/heads/"+branch+":refs/heads/"+branch)
 	return err
+}
+
+// validJobBranch checks a nexus/ branch against git's ref-name rules
+// (git check-ref-format): a non-empty name after nexus/, no "..", no empty
+// or dot-led component, no trailing "/", "." or ".lock", no "@{" (D-B-2).
+func validJobBranch(branch string) bool {
+	rest, ok := strings.CutPrefix(branch, branchPrefix)
+	if !ok || rest == "" || !refNameRE.MatchString(branch) || strings.Contains(branch, "..") || strings.Contains(branch, "@{") ||
+		strings.HasSuffix(branch, "/") || strings.HasSuffix(branch, ".") || strings.HasSuffix(branch, ".lock") {
+		return false
+	}
+	for _, c := range strings.Split(rest, "/") {
+		if c == "" || strings.HasPrefix(c, ".") || strings.HasSuffix(c, ".lock") {
+			return false
+		}
+	}
+	return true
 }
 
 // CreateDraftPR opens a draft PR with the owner's gh login and returns
