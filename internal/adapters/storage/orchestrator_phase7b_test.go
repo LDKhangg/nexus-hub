@@ -466,3 +466,84 @@ func TestOrchestratorMigration_DownUp(t *testing.T) {
 		t.Fatal("Up did not restore the immutability trigger")
 	}
 }
+
+// R-A-2 (REQ-1, REQ-8): tasks carried into a new plan version keep state, result step, result and evidence.
+func TestOrchestratorStore_InsertPlanKeepsCarriedTaskState(t *testing.T) {
+	e := newOrchEnv(t)
+	carried := orchTask("a")
+	carried.State = orchestrator.TaskSucceeded
+	carried.ResultStepID = "step-3"
+	carried.Result = json.RawMessage(`{"outcome":"ok"}`)
+	carried.EvidenceRefs = []string{"s1", "pr-7"}
+	p, err := e.s.InsertPlan(e.ctx, workspaceA, orchPlan(e.exA, 2), []orchestrator.PlanTaskRecord{carried, orchTask("b", "a")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := e.s.ListTasks(e.ctx, workspaceA, e.exA)
+	if err != nil || len(tasks) != 2 {
+		t.Fatalf("%+v %v", tasks, err)
+	}
+	a, b := tasks[0], tasks[1]
+	if a.PlanID != p.ID || a.State != orchestrator.TaskSucceeded || a.ResultStepID != "step-3" || !slices.Equal(a.EvidenceRefs, []string{"s1", "pr-7"}) {
+		t.Fatalf("carried task lost its state: %+v", a)
+	}
+	var res map[string]string
+	if err := json.Unmarshal(a.Result, &res); err != nil || res["outcome"] != "ok" {
+		t.Fatalf("result %s", a.Result)
+	}
+	if b.State != orchestrator.TaskPending || b.ResultStepID != "" || len(b.EvidenceRefs) != 0 {
+		t.Fatalf("new task not pending/empty: %+v", b)
+	}
+	if b.Result != nil && string(b.Result) != "null" {
+		t.Fatalf("empty result must be NULL, got %s", b.Result)
+	}
+	var nulls int
+	nulls = e.count(`SELECT count(*) FROM orchestrator_plan_tasks WHERE plan_id=$1 AND key='b' AND result IS NULL`, p.ID)
+	if nulls != 1 {
+		t.Fatal("empty result was not stored as SQL NULL")
+	}
+}
+
+func TestOrchestratorStore_InsertPlanEmptyStateIsPending(t *testing.T) {
+	e := newOrchEnv(t)
+	task := orchTask("a")
+	task.State = ""
+	if _, err := e.s.InsertPlan(e.ctx, workspaceA, orchPlan(e.exA, 1), []orchestrator.PlanTaskRecord{task}); err != nil {
+		t.Fatal(err)
+	}
+	tasks, _ := e.s.ListTasks(e.ctx, workspaceA, e.exA)
+	if len(tasks) != 1 || tasks[0].State != orchestrator.TaskPending {
+		t.Fatalf("%+v", tasks)
+	}
+}
+
+// A carried task with an invalid state or result rolls the whole plan back.
+func TestOrchestratorStore_InsertPlanCarriedInvalidRollsBack(t *testing.T) {
+	e := newOrchEnv(t)
+	bad := map[string]func(*orchestrator.PlanTaskRecord){
+		"bad state":    func(r *orchestrator.PlanTaskRecord) { r.State = "DONE" },
+		"result array": func(r *orchestrator.PlanTaskRecord) { r.Result = json.RawMessage(`[1]`) },
+		"step too big": func(r *orchestrator.PlanTaskRecord) { r.ResultStepID = strings.Repeat("s", 129) },
+		"evidence big": func(r *orchestrator.PlanTaskRecord) { r.EvidenceRefs = []string{strings.Repeat("e", 4200)} },
+	}
+	for name, mut := range bad {
+		t.Run(name, func(t *testing.T) {
+			ok := orchTask("a")
+			ok.State = orchestrator.TaskSucceeded
+			ok.Result = json.RawMessage(`{"outcome":"ok"}`)
+			ng := orchTask("b")
+			ng.State = orchestrator.TaskSucceeded
+			ng.Result = json.RawMessage(`{"outcome":"ok"}`)
+			mut(&ng)
+			if _, err := e.s.InsertPlan(e.ctx, workspaceA, orchPlan(e.exA, 1), []orchestrator.PlanTaskRecord{ok, ng}); err == nil {
+				t.Fatal("accepted")
+			}
+			if n := e.planCount(e.exA); n != 0 {
+				t.Fatalf("%d plan rows left", n)
+			}
+			if n := e.count(`SELECT count(*) FROM orchestrator_plan_tasks`); n != 0 {
+				t.Fatalf("%d task rows left", n)
+			}
+		})
+	}
+}

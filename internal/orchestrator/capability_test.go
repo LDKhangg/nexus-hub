@@ -29,7 +29,10 @@ func TestMatch_Table(t *testing.T) {
 		{"known plus unknown blocked", []string{CapRepoRead, "shell.root"}, "", "", false},
 		{"empty blocked", nil, "", "", false},
 		{"blank blocked", []string{"", "  "}, "", "", false},
-		{"covering recommendation honoured", []string{CapRepoRead}, ExecutorLocalWorker, ExecutorLocalWorker, true},
+		// R-A-3 (REQ-5, least privilege): a recommendation can never raise a task to a more privileged executor.
+		{"more privileged covering recommendation ignored", []string{CapRepoRead}, ExecutorLocalWorker, ExecutorInvestigate, true},
+		{"read task ignores behavior-actions recommendation", []string{CapRepoRead}, ExecutorBehaviorActions, ExecutorInvestigate, true},
+		{"clickup write ignores local-worker recommendation", []string{CapClickUpWrite}, ExecutorLocalWorker, ExecutorBehaviorActions, true},
 		{"covering same recommendation", []string{CapRepoRead}, ExecutorInvestigate, ExecutorInvestigate, true},
 		{"non covering recommendation ignored", []string{CapRepoWrite}, ExecutorInvestigate, ExecutorLocalWorker, true},
 		{"unknown recommendation ignored", []string{CapRepoRead}, "evil-executor", ExecutorInvestigate, true},

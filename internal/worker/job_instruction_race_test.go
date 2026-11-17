@@ -71,3 +71,40 @@ func TestJob_InstructionNotRequeuedWhileBeingApplied(t *testing.T) {
 		t.Fatalf("instruction was applied twice in %d of %d rounds (resend queued it again while appendFollowUps was writing it)", requeued, rounds)
 	}
 }
+
+// R-A-1 (REQ-6): if the journal cannot record the instruction, its id is not
+// acked (acks come from the journal) and the hub's resend is received again.
+func TestJob_MarkInstructionFailureNotAckedAndReceivedAgain(t *testing.T) {
+	j, err := CreateJournal(t.TempDir(), LeaseRecord{JobID: "job-mf", Attempt: 1, LeaseToken: "lt", HeartbeatIntervalSeconds: 30, LeasedAt: time.Now()}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(wt, privateDirName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, privateDirName, instructionFileName), []byte("# Task\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := &jobRun{j: j}
+	r.ws.Worktree = wt
+	in := behavior.WorkerInstruction{ID: "v1", Text: "also add docs"}
+	r.takeInstructions([]behavior.WorkerInstruction{in})
+	j.Close() // every journal write now fails
+	if _, err := j.MarkInstruction("probe"); err == nil {
+		t.Fatal("journal still writable; test setup is wrong")
+	}
+	if _, err := r.appendFollowUps(); err != nil {
+		t.Fatal(err)
+	}
+	if ids := r.ackIDs(); len(ids) != 0 {
+		t.Fatalf("id acked although journaling failed: %v", ids)
+	}
+	r.takeInstructions([]behavior.WorkerInstruction{in}) // the hub resends it
+	r.mu.Lock()
+	queued := len(r.instrs)
+	r.mu.Unlock()
+	if queued != 1 {
+		t.Fatalf("resent instruction queued %d times, want 1 (it was never journaled)", queued)
+	}
+}
