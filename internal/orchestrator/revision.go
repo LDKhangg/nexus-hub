@@ -94,7 +94,8 @@ func NextPlan(prev Plan, prevVersion int, prevTasks []PlanTaskRecord, next Plan)
 // explicit repo wins when it is registered; an explicit repo that is not
 // registered needs clarification (it never falls back to another repo).
 // Without an explicit repo, the remembered repo of the task is used when it
-// is still registered. Otherwise needClarification is true. Matching is
+// is still registered, else the only registered repo when exactly one is
+// registered (like /task). Otherwise needClarification is true. Matching is
 // case-insensitive and returns the registered spelling. remembered may be
 // nil.
 func ResolveRepo(explicit string, remembered func() (string, bool), registered []string) (repo string, needClarification bool) {
@@ -122,6 +123,15 @@ func ResolveRepo(explicit string, remembered func() (string, bool), registered [
 				return r, false
 			}
 		}
+	}
+	var only []string
+	for _, r := range registered {
+		if r = strings.TrimSpace(r); r != "" {
+			only = append(only, r)
+		}
+	}
+	if len(only) == 1 {
+		return only[0], false
 	}
 	return "", true
 }
