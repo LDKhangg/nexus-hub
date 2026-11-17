@@ -99,7 +99,7 @@ func TestWorkerCommand_ListAndEmpty(t *testing.T) {
 		{Name: "old-pc", RevokedAt: &revoked},
 		{Name: "new-pc"},
 	}}
-	text, _ = workerCmd(t, admin, "")
+	text, _ = workerCmd(t, admin, "list")
 	for _, want := range []string{"laptop · online", "old-pc · revoked", "new-pc · offline", "chưa từng kết nối"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing %q in %q", want, text)
@@ -107,6 +107,23 @@ func TestWorkerCommand_ListAndEmpty(t *testing.T) {
 	}
 	if strings.Contains(text, "nhw_") {
 		t.Fatal("token in list")
+	}
+	// W-4 Ruling R8: /worker with no arguments is the device card, not the list.
+	card, code := workerCmd(t, admin, "")
+	if code != "" {
+		t.Fatalf("card code %q", code)
+	}
+	for _, want := range []string{"laptop · online", "old-pc · đã thu hồi", "new-pc · offline", "CPU: không rõ", "Lần cuối: chưa từng kết nối"} {
+		if !strings.Contains(card, want) {
+			t.Fatalf("missing %q in card %q", want, card)
+		}
+	}
+	if strings.Contains(card, "nhw_") {
+		t.Fatal("token in card")
+	}
+	// An empty workspace: the card says how to enroll too.
+	if empty, _ := workerCmd(t, &fakeWorkerAdmin{}, ""); !strings.Contains(empty, "/worker enroll") {
+		t.Fatalf("empty card is not helpful: %q", empty)
 	}
 }
 
