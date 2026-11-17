@@ -268,6 +268,8 @@ var workerFailureReasons = map[string]string{
 	"invalid_job":      "yêu cầu không hợp lệ cho máy local",
 	"workspace_failed": "không chuẩn bị được thư mục làm việc",
 	"no_changes":       "không có thay đổi nào",
+
+	"executor_unsupported": "claude trên máy local quá cũ, cần cập nhật (tối thiểu 2.1.314)",
 }
 
 func workerFailureText(r *WorkerResult) string {

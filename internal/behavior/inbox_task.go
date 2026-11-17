@@ -91,6 +91,10 @@ func (w *InboxWorker) taskTarget(ctx context.Context, u InboundUpdate, args stri
 	}
 	first, rest, _ := strings.Cut(args, " ")
 	ref, ok := ParseTaskRefTeam(first)
+	// A bare word is a task id only if it has a digit ("please" is not one).
+	if ok && taskIDRe.MatchString(strings.TrimSpace(first)) && !strings.ContainsAny(first, "0123456789") {
+		ok = false
+	}
 	return ref, strings.TrimSpace(rest), ok
 }
 
