@@ -310,9 +310,10 @@ func (n *WorkerNotifier) failed(ctx context.Context, route LocalTaskRoute, job W
 		n.say(ctx, route, text, nil)
 		return
 	}
-	retry, err1 := (CallbackData{Kind: CallbackApprove, Nonce: ap.Nonce}).Encode()
-	cancel, err2 := (CallbackData{Kind: CallbackReject, Nonce: ap.Nonce}).Encode()
+	retry, err1 := (CallbackData{Kind: CallbackApprove, Nonce: ap.Nonce, Option: -1}).Encode()
+	cancel, err2 := (CallbackData{Kind: CallbackReject, Nonce: ap.Nonce, Option: -1}).Encode()
 	if err1 != nil || err2 != nil {
+		log.Print("worker notifier: buttons not encoded, sending text only")
 		n.say(ctx, route, text, nil)
 		return
 	}
