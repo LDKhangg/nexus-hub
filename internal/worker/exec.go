@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -136,6 +138,96 @@ func GitEnv(env []string) []string {
 		out = append(out, kv)
 	}
 	return append(out, "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1")
+}
+
+// dropCredentialKey reports variables that hand the owner's git, GitHub or
+// SSH credentials to a child: agent sockets, askpass helpers, gh and
+// GitHub settings, git config redirections and credential managers.
+func dropCredentialKey(k string) bool {
+	u := strings.ToUpper(k)
+	switch {
+	case u == "SSH_AUTH_SOCK", u == "SSH_AGENT_PID", u == "SSH_ASKPASS", u == "SSH_ASKPASS_REQUIRE",
+		u == "GIT_ASKPASS", u == "GIT_SSH", u == "GIT_SSH_COMMAND", u == "GIT_CONFIG_GLOBAL",
+		u == "GIT_CONFIG_SYSTEM", u == "GIT_CONFIG_NOSYSTEM", u == "GIT_CONFIG_COUNT", u == "GIT_CONFIG_PARAMETERS",
+		u == "GIT_DIR", u == "GIT_WORK_TREE", u == "GIT_TERMINAL_PROMPT",
+		strings.HasPrefix(u, "GIT_CONFIG_KEY_"), strings.HasPrefix(u, "GIT_CONFIG_VALUE_"),
+		strings.HasPrefix(u, "GH_"), strings.HasPrefix(u, "GITHUB_"), strings.HasPrefix(u, "GCM_"):
+		return true
+	}
+	return false
+}
+
+// ExecutorEnv is the environment of the executor (claude): ScrubEnv, minus
+// every git/GitHub/SSH credential route. gh reads an empty config
+// directory (ghDir), git reads no global or system config and never
+// prompts. HOME stays: claude finds its subscription login there.
+func ExecutorEnv(env []string, ghDir string) []string {
+	out := make([]string, 0, len(env)+8)
+	for _, kv := range ScrubEnv(env) {
+		k, _, _ := strings.Cut(kv, "=")
+		if dropCredentialKey(k) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "GH_CONFIG_DIR="+ghDir, "GH_PROMPT_DISABLED=1", "GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=", "GCM_INTERACTIVE=never")
+}
+
+// TestEnv is the environment of the repository test command, which runs
+// code the executor wrote: ExecutorEnv with HOME (and USERPROFILE on
+// Windows) moved to an empty directory, and the XDG config, data and state
+// directories dropped so they default under it. The build caches (GOPATH,
+// GOMODCACHE, GOCACHE, XDG_CACHE_HOME) keep pointing at the real ones so
+// builds stay fast and offline-capable.
+func TestEnv(env []string, home, ghDir string) []string {
+	realHome := envValue(env, "HOME")
+	if realHome == "" {
+		realHome, _ = os.UserHomeDir()
+	}
+	cacheDir, _ := os.UserCacheDir()
+	base := ExecutorEnv(env, ghDir)
+	out := make([]string, 0, len(base)+8)
+	for _, kv := range base {
+		k, _, _ := strings.Cut(kv, "=")
+		switch strings.ToUpper(k) {
+		case "HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME":
+			continue
+		}
+		out = append(out, kv)
+	}
+	setDefault := func(k, v string) {
+		if v != "" && envValue(out, k) == "" {
+			out = append(out, k+"="+v)
+		}
+	}
+	gopath := envValue(out, "GOPATH")
+	if gopath == "" && realHome != "" {
+		gopath = filepath.Join(realHome, "go")
+	}
+	setDefault("GOPATH", gopath)
+	if gopath != "" {
+		setDefault("GOMODCACHE", filepath.Join(strings.Split(gopath, string(os.PathListSeparator))[0], "pkg", "mod"))
+	}
+	if cacheDir != "" {
+		setDefault("GOCACHE", filepath.Join(cacheDir, "go-build"))
+		setDefault("XDG_CACHE_HOME", cacheDir)
+	}
+	out = append(out, "HOME="+home)
+	if runtime.GOOS == "windows" {
+		out = append(out, "USERPROFILE="+home)
+	}
+	return out
+}
+
+func envValue(env []string, key string) string {
+	v := ""
+	for _, kv := range env {
+		if k, val, ok := strings.Cut(kv, "="); ok && strings.EqualFold(k, key) {
+			v = val
+		}
+	}
+	return v
 }
 
 // capBuffer keeps the first max bytes written to it.

@@ -1250,6 +1250,23 @@ fallback: with the laptop offline the job waits and the topic says so.
    link no longer points into `<clone>/.git/worktrees/`, so files the
    executor writes cannot make the worker run code. Nested `.git`
    directories are never staged.
+
+   Credentials stay with the worker. `claude` and the `test_command` get
+   the scrubbed environment (no `NEXUS_*`, `*_TOKEN`, `*_KEY`, secrets) and
+   additionally no git/GitHub/SSH route: no `SSH_AUTH_SOCK`, no askpass
+   helper, no `GH_*`/`GITHUB_*`, `GH_CONFIG_DIR` pointing to an empty
+   directory, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
+   `GIT_TERMINAL_PROMPT=0`. `claude` keeps your real `HOME` (its
+   subscription login lives there). The `test_command` runs code the
+   executor wrote, so it also gets an empty `HOME` (under
+   `<state_dir>/jobs/<job>/sandbox/`) with `XDG_CONFIG_HOME`,
+   `XDG_DATA_HOME` and `XDG_STATE_HOME` unset; `GOPATH`, `GOMODCACHE`,
+   `GOCACHE` and `XDG_CACHE_HOME` keep pointing at your real caches. Other
+   toolchains whose caches default under `HOME` (cargo, npm, …) need their
+   cache variable set in the service environment. This is environment
+   isolation, not an OS sandbox: the test command still runs as your user
+   and can read files your user can read. Only configure a `test_command`
+   for repositories whose task sources you trust.
 5. Check: `nh worker status`, then `/worker` in Telegram (one card per device).
 
 ### Run it as a user service

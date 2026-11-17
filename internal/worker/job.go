@@ -527,13 +527,17 @@ func (r *jobRun) runExecutor(ctx context.Context) (string, behavior.WorkerResult
 		r.execDone = true
 		r.mu.Unlock()
 	}()
+	_, ghDir, err := r.sandbox()
+	if err != nil {
+		return "", r.result(behavior.WorkerStatusFailed, ReasonWorkspaceFailed, "The credential sandbox could not be prepared."), false
+	}
 	if _, err := r.appendFollowUps(); err != nil { // instructions that came with the first heartbeat
 		return "", r.result(behavior.WorkerStatusFailed, ReasonWorkspaceFailed, "The instruction file could not be updated."), false
 	}
 	followUp := false
 	for run := 0; run <= maxFollowUps; run++ {
 		res, err := w.Exec.Run(ctx, ExecRequest{Dir: r.ws.Worktree, MaxTurns: int(turnsLeft), Timeout: deadline.Sub(w.now()),
-			Resume: session, FollowUp: followUp})
+			Resume: session, FollowUp: followUp, Env: ExecutorEnv(os.Environ(), ghDir)})
 		r.usage.Turns += res.Turns
 		r.usage.InputTokens += res.InputTokens
 		r.usage.OutputTokens += res.OutputTokens
@@ -582,12 +586,31 @@ func (r *jobRun) runExecutor(ctx context.Context) (string, behavior.WorkerResult
 	return final, behavior.WorkerResult{}, true
 }
 
+// sandbox returns the job's empty HOME and gh config directories (under
+// the job's state directory, mode 0700), used instead of the owner's for
+// the executor's gh/git and the whole test command (R-B-3).
+func (r *jobRun) sandbox() (home, gh string, err error) {
+	base := filepath.Join(r.j.Dir(), "sandbox")
+	home, gh = filepath.Join(base, "home"), filepath.Join(base, "gh")
+	for _, d := range []string{home, gh} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return "", "", err
+		}
+	}
+	return home, gh, nil
+}
+
 // runTests runs the configured test command in the worktree (argv, no
-// shell, scrubbed environment, output discarded).
+// shell, output discarded) with TestEnv: scrubbed, no git/GitHub/SSH
+// credentials, an empty HOME. It runs code the executor wrote.
 func (r *jobRun) runTests(ctx context.Context, rc RepoConfig) (bool, behavior.WorkerResult, bool) {
+	home, ghDir, err := r.sandbox()
+	if err != nil {
+		return false, r.result(behavior.WorkerStatusFailed, ReasonWorkspaceFailed, "The test sandbox could not be prepared."), false
+	}
 	tctx, cancel := context.WithTimeout(ctx, time.Duration(rc.TestTimeoutMinutes)*time.Minute)
 	defer cancel()
-	exit, err := r.w.Runner.Run(tctx, Cmd{Dir: r.ws.Worktree, Name: rc.TestCommand[0], Args: rc.TestCommand[1:]})
+	exit, err := r.w.Runner.Run(tctx, Cmd{Dir: r.ws.Worktree, Name: rc.TestCommand[0], Args: rc.TestCommand[1:], Env: TestEnv(os.Environ(), home, ghDir)})
 	if res, ok := r.stopped(ctx); ok {
 		return false, res, false
 	}

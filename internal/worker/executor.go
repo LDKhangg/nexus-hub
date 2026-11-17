@@ -30,6 +30,7 @@ type ExecRequest struct {
 	Timeout  time.Duration // remaining wall time
 	Resume   string        // executor session to continue ("" = new)
 	FollowUp bool          // use the follow-up prompt
+	Env      []string      // nil: the scrubbed worker environment (ExecutorEnv in a job)
 	OnStart  func(pid int)
 }
 
@@ -87,7 +88,7 @@ func (e *ClaudeExecutor) Run(ctx context.Context, req ExecRequest) (ExecResult, 
 		args = append(args, "--resume", req.Resume)
 	}
 	out := newCapBuffer(maxExecStdout)
-	res, err := runExec(ctx, e.Runner, Cmd{Dir: req.Dir, Name: e.Bin, Args: args, Stdout: out, OnStart: req.OnStart}, req.Timeout)
+	res, err := runExec(ctx, e.Runner, Cmd{Dir: req.Dir, Name: e.Bin, Args: args, Env: req.Env, Stdout: out, OnStart: req.OnStart}, req.Timeout)
 	if err != nil {
 		return res, err
 	}
@@ -159,7 +160,7 @@ func (e *OpencodeExecutor) Run(ctx context.Context, req ExecRequest) (ExecResult
 	}
 	args = append(args, prompt)
 	out := newTailBuffer(64 << 10)
-	res, err := runExec(ctx, e.Runner, Cmd{Dir: req.Dir, Name: e.Bin, Args: args, Stdout: out, OnStart: req.OnStart}, req.Timeout)
+	res, err := runExec(ctx, e.Runner, Cmd{Dir: req.Dir, Name: e.Bin, Args: args, Env: req.Env, Stdout: out, OnStart: req.OnStart}, req.Timeout)
 	if err != nil {
 		return res, err
 	}
