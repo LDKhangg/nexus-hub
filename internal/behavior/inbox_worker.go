@@ -477,6 +477,12 @@ func callbackArgs(args string) (string, int64) {
 	return qid, id
 }
 
+// draftLiveButtons is implemented by a draft handler that can tell whether a
+// message still shows a live approval of the draft.
+type draftLiveButtons interface {
+	HasLiveButtons(ctx context.Context, p DraftPress) bool
+}
+
 func (w *InboxWorker) callback(ctx context.Context, u InboundUpdate, to ChatRef, actor, corr string) outcome {
 	qid, msgID := callbackArgs(u.Args)
 	if qid == "" {
@@ -561,7 +567,17 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 		replay := a.DecidedBy == actor && (a.Decision == DecisionApproved && data.Kind == CallbackApprove ||
 			a.Decision == DecisionRejected && data.Kind == CallbackReject)
 		if a.Decision != "" && !replay || !w.now().Before(a.ExpiresAt) {
-			return msgStale, "stale", true
+			// A stale press never wipes buttons that are live on the message.
+			remove := true
+			if lc, ok := w.d.ClickUpDrafts.(draftLiveButtons); ok && lc != nil {
+				hctx, cancel := context.WithTimeout(ctx, w.settings.HandlerTimeout)
+				remove = !lc.HasLiveButtons(hctx, DraftPress{
+					WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, MessageID: msgID,
+					Kind: data.Kind, Approval: a, Actor: actor,
+				})
+				cancel()
+			}
+			return msgStale, "stale", remove
 		}
 		if w.d.ClickUpDrafts == nil {
 			return msgNotAvailable, "not_available", false

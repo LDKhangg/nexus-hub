@@ -683,7 +683,37 @@ func (c *ClickUpDrafts) closeApproval(ctx context.Context, ws, nonce, actor stri
 	}
 }
 
+// HandleDraftPress answers a press. A stale press removes the message's
+// buttons only when the message shows no live approval of that draft.
 func (c *ClickUpDrafts) HandleDraftPress(ctx context.Context, p DraftPress) (string, string, bool) {
+	toast, code, remove := c.handleDraftPress(ctx, p)
+	if remove && code == "stale" && c.HasLiveButtons(ctx, p) {
+		remove = false
+	}
+	return toast, code, remove
+}
+
+// HasLiveButtons reports whether the press's message currently shows a live
+// approval of the press's draft (the draft is open and bound to that
+// message). A storage error counts as live: buttons are never removed on a
+// guess.
+func (c *ClickUpDrafts) HasLiveButtons(ctx context.Context, p DraftPress) bool {
+	var pl draftPayload
+	a := p.Approval
+	if a.Kind != ApprovalClickUpDraft || a.WorkspaceID != p.WorkspaceID || json.Unmarshal(a.Payload, &pl) != nil || pl.DraftID <= 0 {
+		return false
+	}
+	d, err := c.d.Store.GetDraft(ctx, p.WorkspaceID, pl.DraftID)
+	if err != nil {
+		return !errors.Is(err, ErrNotFound)
+	}
+	if d.IntegrationID != p.IntegrationID || d.ChatID != p.ChatID || p.MessageID <= 0 || d.PreviewMessageID != p.MessageID {
+		return false
+	}
+	return d.State == DraftPending || d.State == DraftPosting || d.State == DraftFailed
+}
+
+func (c *ClickUpDrafts) handleDraftPress(ctx context.Context, p DraftPress) (string, string, bool) {
 	a := p.Approval
 	d, pl, err := c.boundDraft(ctx, p.WorkspaceID, p.IntegrationID, p.ChatID, a)
 	if err != nil {
