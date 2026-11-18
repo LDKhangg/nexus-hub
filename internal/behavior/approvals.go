@@ -628,7 +628,34 @@ func (e *Engine) expired(ctx context.Context, a Approval) {
 	if err != nil {
 		return
 	}
+	// A failed /task message keeps "📤 Đăng lên ClickUp" after Retry and
+	// Cancel expire: its press needs no approval (R-B-9).
+	if e.keepExpiredReportButton(ctx, chat, a) {
+		return
+	}
 	e.removeButtons(ctx, run, chat, a.TelegramMessageID)
+}
+
+// keepExpiredReportButton leaves only the report button on an expired
+// worker_job message. It returns false when the approval has no report
+// button for this chat or the keyboard cannot be edited, so the caller
+// removes the buttons. A failed edit returns true: the report button is
+// never removed by the sweep.
+func (e *Engine) keepExpiredReportButton(ctx context.Context, chat ChatRef, a Approval) bool {
+	rows, ok := workerReportKeyboard(a, chat.ChatID)
+	if !ok {
+		return false
+	}
+	editor, ok := e.d.Messenger.(MessageKeyboardEditor)
+	if !ok {
+		return false
+	}
+	rctx, cancel := context.WithTimeout(ctx, e.s.RequestTimeout)
+	defer cancel()
+	if err := editor.SetButtons(rctx, chat, a.TelegramMessageID, rows); err != nil {
+		log.Print("behavior approvals: expired worker job report button not kept")
+	}
+	return true
 }
 
 // expireOutcome records the legacy per-item outcome of an expired approval

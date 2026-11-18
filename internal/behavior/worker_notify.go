@@ -370,24 +370,39 @@ type MessageKeyboardEditor interface {
 // buttons. A failed edit returns true: the next press tries again, and the
 // report button is never lost.
 func (w *InboxWorker) keepWorkerReportButton(ctx context.Context, u InboundUpdate, to ChatRef, messageID int64, a Approval) bool {
-	var p workerJobPayload
-	if messageID <= 0 || json.Unmarshal(a.Payload, &p) != nil || !p.ReportButton || p.ChatID != u.ChatID {
+	if messageID <= 0 {
+		return false
+	}
+	rows, ok := workerReportKeyboard(a, u.ChatID)
+	if !ok {
 		return false
 	}
 	editor, ok := w.d.Messenger.(MessageKeyboardEditor)
 	if !ok {
 		return false
 	}
-	b, ok := ExecutionReportButton(p.ExecutionID)
-	if !ok {
-		return false
-	}
 	rctx, cancel := context.WithTimeout(ctx, w.settings.RequestTimeout)
 	defer cancel()
-	if err := editor.SetButtons(rctx, to, messageID, [][]Button{{b}}); err != nil {
+	if err := editor.SetButtons(rctx, to, messageID, rows); err != nil {
 		log.Print("worker job buttons: report button not kept")
 	}
 	return true
+}
+
+// workerReportKeyboard is the keyboard a worker_job message keeps once its
+// Retry and Cancel are gone: only "📤 Đăng lên ClickUp". It returns false
+// when the payload is unreadable, has no report button, names another chat
+// than chatID, or has no valid execution.
+func workerReportKeyboard(a Approval, chatID int64) ([][]Button, bool) {
+	var p workerJobPayload
+	if a.Kind != ApprovalWorkerJob || json.Unmarshal(a.Payload, &p) != nil || !p.ReportButton || p.ChatID != chatID {
+		return nil, false
+	}
+	b, ok := ExecutionReportButton(p.ExecutionID)
+	if !ok {
+		return nil, false
+	}
+	return [][]Button{{b}}, true
 }
 
 var workerPhaseText = map[string]string{
