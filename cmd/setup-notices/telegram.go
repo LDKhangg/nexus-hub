@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/control/telegram"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/netguard"
@@ -25,6 +26,8 @@ import (
 const telegramUsage = `usage: telegram webhook set|status|delete --workspace-id <uuid> --integration-id <uuid>
        telegram topics --workspace-id <uuid>
        telegram topics rename --workspace-id <uuid>
+       telegram topics ensure --workspace-id <uuid> --name <fixed name>
+       telegram topics prune --workspace-id <uuid>
        telegram send --workspace-id <uuid> [--topic general|<fixed name>]
        telegram group set|show --workspace-id <uuid> --integration-id <uuid> [--chat-id <id>]
   set     generate a new secret, store it encrypted and register
@@ -41,6 +44,13 @@ topics  list the workspace's forum topics: subject kind and key, thread id,
         rename  rename every ClickUp task topic to "<custom id> · <title>" and
                 post and pin the task link where it is missing; prints counts
                 only (renamed, linked, failed); safe to run again
+        ensure  create the fixed-name topic in the owner chat if it is
+                missing (for example the telegram_command_topic) and print
+                its thread id; safe to run again
+        prune   delete, in Telegram and in the store, every workflow topic
+                whose execution has finished; task, fixed and active topics
+                are never touched; prints counts only (deleted, kept,
+                failed); safe to run again
 group   set  store the workspace's forum group chat id (owner_chat_id) on the
              Telegram control integration; use it again after Telegram turns
              the group into a supergroup (the chat id changes)
@@ -56,8 +66,15 @@ func telegramCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 	if len(args) >= 1 {
 		switch args[0] {
 		case "topics":
-			if len(args) >= 2 && args[1] == "rename" {
-				return telegramTopicsRename(ctx, pool, args[2:], out, lookup)
+			if len(args) >= 2 {
+				switch args[1] {
+				case "rename":
+					return telegramTopicsRename(ctx, pool, args[2:], out, lookup)
+				case "ensure":
+					return telegramTopicsEnsure(ctx, pool, args[2:], out, lookup)
+				case "prune":
+					return telegramTopicsPrune(ctx, pool, args[2:], out, lookup)
+				}
 			}
 			return telegramTopics(ctx, pool, args[1:], out)
 		case "group":
@@ -256,6 +273,81 @@ func telegramTopicsRename(ctx context.Context, pool *pgxpool.Pool, args []string
 		return errors.New("topics not listed")
 	}
 	return json.NewEncoder(out).Encode(map[string]any{"workspace_id": *ws, "renamed": n.Renamed, "linked": n.Linked, "failed": n.Failed})
+}
+
+// telegramTopicsEnsure creates the fixed-name topic in the workspace's owner
+// chat when it is missing and prints its thread id. The name is never
+// printed.
+func telegramTopicsEnsure(ctx context.Context, pool *pgxpool.Pool, args []string, out io.Writer, lookup func(string) (string, bool)) error {
+	f := commandFlags("telegram topics ensure")
+	ws := f.String("workspace-id", "", "workspace UUID")
+	nameFlag := f.String("name", "", "fixed topic name")
+	if f.Parse(args) != nil || f.NArg() != 0 || !tenant.ValidUUID(*ws) {
+		return errors.New("telegram topics ensure requires a valid --workspace-id and --name\n" + telegramUsage)
+	}
+	name := strings.TrimSpace(*nameFlag)
+	if name == "" || len(name) > behavior.MaxReportTopicBytes || !utf8.ValidString(name) ||
+		name == behavior.ReportTopicTask || name == behavior.ReportTopicWorkflow || name == behavior.ReportTopicGeneral {
+		return errors.New("--name must be a fixed topic name of 1-64 bytes (not task, workflow or general)")
+	}
+	integrations, err := storage.NewIntegrationRepository(pool)
+	if err != nil {
+		return err
+	}
+	to, err := ownerChatFor(ctx, pool, integrations, *ws)
+	if err != nil {
+		return err
+	}
+	store, err := storage.NewTelegramTopicStore(pool)
+	if err != nil {
+		return err
+	}
+	resolver, _, err := openResolver(pool, lookup)
+	if err != nil {
+		return err
+	}
+	messenger := telegram.NewMessenger(telegram.NewClient(telegramHTTP(), resolver), integrations)
+	router, err := behavior.NewTopicRouter(behavior.TopicRouterDeps{Store: store, Client: messenger})
+	if err != nil {
+		return errors.New("topic router unavailable")
+	}
+	dest := router.Destination(ctx, to, behavior.TopicIntent{Mode: name})
+	if dest.ThreadID <= 0 {
+		return errors.New("topic not created (the group has no Topics, the bot lacks the Manage Topics right, or another creation is in progress)")
+	}
+	return json.NewEncoder(out).Encode(map[string]any{"workspace_id": *ws, "chat_id": dest.ChatID, "thread_id": dest.ThreadID})
+}
+
+// telegramTopicsPrune deletes the workspace's workflow topics whose
+// execution has finished. Output is counts only.
+func telegramTopicsPrune(ctx context.Context, pool *pgxpool.Pool, args []string, out io.Writer, lookup func(string) (string, bool)) error {
+	f := commandFlags("telegram topics prune")
+	ws := f.String("workspace-id", "", "workspace UUID")
+	if f.Parse(args) != nil || f.NArg() != 0 || !tenant.ValidUUID(*ws) {
+		return errors.New("telegram topics prune requires a valid --workspace-id\n" + telegramUsage)
+	}
+	store, err := storage.NewTelegramTopicStore(pool)
+	if err != nil {
+		return err
+	}
+	integrations, err := storage.NewIntegrationRepository(pool)
+	if err != nil {
+		return err
+	}
+	workflows, err := storage.NewWorkflowStore(pool)
+	if err != nil {
+		return err
+	}
+	resolver, _, err := openResolver(pool, lookup)
+	if err != nil {
+		return err
+	}
+	messenger := telegram.NewMessenger(telegram.NewClient(telegramHTTP(), resolver), integrations)
+	n, err := behavior.PruneWorkflowTopics(ctx, *ws, store, messenger, workflows)
+	if err != nil {
+		return errors.New("topics not pruned")
+	}
+	return json.NewEncoder(out).Encode(map[string]any{"workspace_id": *ws, "deleted": n.Deleted, "kept": n.Kept, "failed": n.Failed})
 }
 
 // clickUpTokenRef returns the ClickUp token reference of the workspace's

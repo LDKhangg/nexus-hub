@@ -432,6 +432,16 @@ func (c *Client) ReopenForumTopic(ctx context.Context, workspaceID, tokenRef, ch
 	return c.topicState(ctx, workspaceID, tokenRef, "reopenForumTopic", chatID, threadID)
 }
 
+// DeleteForumTopic deletes a topic with all its messages. A topic that no
+// longer exists fails with CodeThreadNotFound.
+func (c *Client) DeleteForumTopic(ctx context.Context, workspaceID, tokenRef, chatID string, threadID int64) error {
+	token, err := c.token(ctx, workspaceID, tokenRef)
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, token, "deleteForumTopic", map[string]any{"chat_id": chatID, "message_thread_id": threadID}, nil)
+}
+
 func (c *Client) topicState(ctx context.Context, workspaceID, tokenRef, method, chatID string, threadID int64) error {
 	token, err := c.token(ctx, workspaceID, tokenRef)
 	if err != nil {

@@ -182,6 +182,7 @@ func run() error {
 			Timeout: s.AssistantTimeout, RatePerMinute: int(s.AssistantRatePerMinute),
 		}
 		telegramHandler.WithAssistant(assistant.Inbox)
+		telegramHandler.WithReplyTasks(behavior.ReplyTasks{Conversations: ag.conversations})
 	}
 	inbox := behavior.NewInboxWorker(behavior.InboxDeps{
 		Workers: workerStore, WorkerTelemetry: workerStore, LocalTasks: taskStore, WorkerJobs: workerStore, WorkerNotifier: workerNotifier,
@@ -198,7 +199,7 @@ func run() error {
 		Links:             topics,
 		InstructionWaker:  &orchestrator.InstructionWaker{Steps: workflows.store, Waker: taskStore},
 		OrchestratedTasks: orchPorts.Tasks, OrchestratorPlans: orchPorts.Plans,
-	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
+	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout, CommandTopic: s.TelegramCommandTopic})
 	// A done/closed ClickUp task closes its topic once no execution of it is
 	// active (status events and a periodic sweep).
 	lifecycle, err := buildTopicLifecycle(pool, s, integrations, ag, resolver, messenger, workflows.store, workspaces)

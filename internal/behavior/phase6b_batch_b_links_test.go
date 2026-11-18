@@ -3,6 +3,7 @@ package behavior
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -458,13 +459,31 @@ func TestPhase6bB1_FallbackJumpButtonOnDeliver(t *testing.T) {
 			t.Fatalf("to=%+v err=%v msg=%+v", to, err, e.rec.last(t).msg)
 		}
 	})
-	t.Run("general mode and no subject: no button", func(t *testing.T) {
+	t.Run("general mode with a task: task-topic callback button, no URL button", func(t *testing.T) {
 		e := newB1DeliverEnv(t, supergroup)
 		e.eng.deliver(ctx, e.route(ReportTopicTask, "86abc"), OutMessage{Text: "một"})
 		e.closeAndBlock("topic_no_rights")
 		e.eng.deliver(ctx, e.route(ReportTopicGeneral, "86abc"), OutMessage{Text: "chung"})
+		got := e.rec.last(t).msg.Buttons
+		want := [][]Button{{{Text: "📌 Mở topic task", Data: "tt:86abc"}}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("general mode buttons=%+v want %+v", got, want)
+		}
+		for _, row := range got {
+			for _, b := range row {
+				if b.URL != "" {
+					t.Fatalf("unexpected URL button %+v", b)
+				}
+			}
+		}
+	})
+	t.Run("general mode with no task, and no-subject send: no button", func(t *testing.T) {
+		e := newB1DeliverEnv(t, supergroup)
+		e.eng.deliver(ctx, e.route(ReportTopicTask, "86abc"), OutMessage{Text: "một"})
+		e.closeAndBlock("topic_no_rights")
+		e.eng.deliver(ctx, e.route(ReportTopicGeneral, ""), OutMessage{Text: "chung"})
 		if len(e.rec.last(t).msg.Buttons) != 0 {
-			t.Fatalf("general mode got buttons %+v", e.rec.last(t).msg.Buttons)
+			t.Fatalf("general mode without task got buttons %+v", e.rec.last(t).msg.Buttons)
 		}
 		e.eng.deliver(ctx, e.route(ReportTopicTask, ""), OutMessage{Text: "không task"})
 		if len(e.rec.last(t).msg.Buttons) != 0 {

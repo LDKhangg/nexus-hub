@@ -172,9 +172,15 @@ func withJumpButton(m OutMessage, b Button) OutMessage {
 	return m
 }
 
-// topicCommand answers "/topic <id or link>".
+// topicCommand answers "/topic <id or link>". "/topic" alone, sent as a
+// reply to a hub message about a ClickUp task, opens that task's topic.
 func (w *InboxWorker) topicCommand(ctx context.Context, u InboundUpdate, to ChatRef) outcome {
 	ref, ok := ParseTaskRefTeam(u.Args)
+	if !ok && strings.TrimSpace(u.Args) == "" {
+		if taskID, found := w.replyTaskID(ctx, u); found {
+			ref, ok = TaskRef{ID: taskID}, true
+		}
+	}
 	if !ok {
 		return w.reply(ctx, to, msgTopicUsage, "usage")
 	}

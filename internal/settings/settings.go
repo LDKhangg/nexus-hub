@@ -51,6 +51,7 @@ type Settings struct {
 	OpencodeCLIConcurrency                int64         // opencode calls at once
 	TelegramAssistant                     bool          // owner free text goes to the LLM assistant
 	TelegramMode                          string        // auto | webhook | poll: how Telegram updates arrive
+	TelegramCommandTopic                  string        // fixed topic name handled like General; empty: none
 	TopicCloseStatuses                    string        // comma-separated ClickUp status names that close a task topic
 	AssistantModel                        string        // the Telegram assistant's default Claude model id
 	AssistantFastModel                    string        // the Telegram assistant's fast Claude model id
@@ -94,6 +95,7 @@ const (
 	kClaudeModel
 	kStatusList
 	kFloat
+	kTopicName
 )
 
 type spec struct {
@@ -174,6 +176,7 @@ var specs = map[string]spec{
 	"orchestrator_max_repair_attempts": {kind: kInt, def: int64(2), min: 0, max: 20, set: func(s *Settings, v any) { s.OrchestratorMaxRepairAttempts = v.(int64) }},
 	"orchestrator_max_tokens":          {kind: kInt, def: int64(80000), min: 1000, max: 2_000_000, set: func(s *Settings, v any) { s.OrchestratorMaxTokens = v.(int64) }},
 	"orchestrator_max_wall_minutes":    {kind: kInt, def: int64(90), min: 1, max: 1440, set: func(s *Settings, v any) { s.OrchestratorMaxWallMinutes = v.(int64) }},
+	"telegram_command_topic":           {kind: kTopicName, def: "", set: func(s *Settings, v any) { s.TelegramCommandTopic = v.(string) }},
 	"telegram_mode":                    {kind: kEnum, def: TelegramModeAuto, enum: []string{TelegramModeAuto, TelegramModeWebhook, TelegramModePoll}, set: func(s *Settings, v any) { s.TelegramMode = v.(string) }},
 }
 
@@ -404,12 +407,35 @@ func parse(key string, raw json.RawMessage) (any, error) {
 		if !validStatusList(str) {
 			return nil, bad
 		}
+	case kTopicName:
+		if str != "" && !validTopicName(str) {
+			return nil, bad
+		}
 	case kExecPath:
 		if str != "" && (!filepath.IsAbs(str) || filepath.Clean(str) != str || str == "/" || strings.ContainsRune(str, 0)) {
 			return nil, bad
 		}
 	}
 	return str, nil
+}
+
+// validTopicName accepts a fixed Telegram topic name: 1-64 bytes of valid
+// UTF-8, trimmed, without control characters, and not a report topic mode
+// (task, workflow, general).
+func validTopicName(str string) bool {
+	if str != strings.TrimSpace(str) || str == "" || len(str) > 64 || !utf8.ValidString(str) {
+		return false
+	}
+	switch str {
+	case "task", "workflow", "general":
+		return false
+	}
+	for _, r := range str {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+			return false
+		}
+	}
+	return true
 }
 
 // validStatusList accepts 1-20 comma-separated status names of 1-40 printable

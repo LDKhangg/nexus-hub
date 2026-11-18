@@ -387,6 +387,9 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 	if job.workflowID <= 0 && job.topicContext != "" {
 		ownerText = job.topicContext + "\n" + job.text
 	}
+	if job.replyContext != "" {
+		ownerText = job.replyContext + "\n" + ownerText
+	}
 	// Pick the model. /deep runs on the deep model without the router. A
 	// turn with a resolved workflow target, a provider without native
 	// structured output (the CLI providers) or an unset fast model skips the
@@ -405,7 +408,7 @@ func (w *InboxWorker) converse(ctx context.Context, job assistantJob) (assistant
 		routerErr   string
 		answered    bool
 	)
-	if job.tier != assistantTierDeep && job.workflowID <= 0 && job.topicContext == "" && a.FastModel != "" {
+	if job.tier != assistantTierDeep && job.workflowID <= 0 && job.topicContext == "" && job.replyContext == "" && a.FastModel != "" {
 		if jp, ok := p.(domain.JSONProvider); ok && lastAssistantAsked(prior) {
 			route = routeWorkFollowup
 		} else if ok {
@@ -579,6 +582,10 @@ type assistantJob struct {
 	// topicContext is the fixed "[Context] ..." line naming the subject of
 	// the topic the text was written in, when no workflow was resolved.
 	topicContext string
+	// replyContext is the fixed "[Context] ..." line naming the ClickUp task
+	// of the hub message the owner replied to (a notice); it is added even
+	// with a workflow target.
+	replyContext string
 	tier         string // "" lets the router decide; assistantTierDeep is /deep
 	queued       time.Time
 }

@@ -43,6 +43,9 @@ type InboxSettings struct {
 	MaxAttempts    int           // claims before an update is given up
 	RequestTimeout time.Duration // one Telegram call
 	HandlerTimeout time.Duration // one engine handler call
+	// CommandTopic is the fixed topic name (telegram_command_topic) whose
+	// messages are handled exactly like General; empty: none.
+	CommandTopic string
 }
 
 // InboxDeps are the worker's collaborators. Nil handlers default to
@@ -241,6 +244,9 @@ func (w *InboxWorker) dispatch(ctx context.Context, u InboundUpdate, corr string
 	case UpdateCallback:
 		if strings.HasPrefix(u.Command, "rp:") {
 			return w.reportCallback(ctx, u, to)
+		}
+		if strings.HasPrefix(u.Command, taskTopicCallbackPrefix) {
+			return w.taskTopicCallback(ctx, u, to)
 		}
 		return w.callback(ctx, u, to, actor, corr)
 	case UpdateCommand, UpdateText, UpdateOther:

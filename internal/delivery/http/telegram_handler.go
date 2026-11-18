@@ -44,6 +44,13 @@ type AssistantStager interface {
 	StageAssistantText(workspaceID, text string, now time.Time) (string, error)
 }
 
+// ReplyTaskLookup reports whether a replied-to message is a hub message
+// about a ClickUp task (a notice). Such a reply, with no open approval or
+// template prompt, goes to the assistant instead of "no open reply".
+type ReplyTaskLookup interface {
+	ReplyHasTask(ctx context.Context, workspaceID, integrationID string, chatID, messageID int64) bool
+}
+
 // TelegramHandler receives Telegram updates for the owner. It verifies the
 // secret token, keeps only the owner's updates, stores them once per
 // update_id and answers at once; all work runs later from storage.
@@ -63,6 +70,7 @@ type TelegramHandler struct {
 	answers      AnswerStager
 	templates    TemplateReplyStager
 	assistant    AssistantStager
+	replyTasks   ReplyTaskLookup
 	ownerChatID  int64
 	ownerUserID  int64
 	now          func() time.Time
@@ -287,6 +295,13 @@ func (h *TelegramHandler) WithAssistant(stager AssistantStager) *TelegramHandler
 	return h
 }
 
+// WithReplyTasks lets a reply to a hub message about a ClickUp task reach
+// the assistant (see ReplyTaskLookup). Nil keeps NoteNoOpenReply.
+func (h *TelegramHandler) WithReplyTasks(lookup ReplyTaskLookup) *TelegramHandler {
+	h.replyTasks = lookup
+	return h
+}
+
 // stageDeep keeps the text of "/deep <text>" out of the update row: like
 // plain text, it is staged in memory for the assistant and Args holds only
 // its key. Without an assistant (or when staging fails) Args stays empty.
@@ -419,6 +434,17 @@ func (h *TelegramHandler) normalize(ctx context.Context, integration tenant.Webh
 		if replyTo == 0 {
 			return stageAssistant()
 		}
+		// noOpenReply: a reply with no open approval or template prompt goes
+		// to the assistant only when it replies to a hub message about a
+		// ClickUp task; otherwise it keeps the note.
+		noOpenReply := func() (behavior.InboundUpdate, bool, error) {
+			if h.assistant != nil && h.replyTasks != nil &&
+				h.replyTasks.ReplyHasTask(ctx, workspaceID, integration.ID, m.Chat.ID, replyTo) {
+				return stageAssistant()
+			}
+			u.Note = behavior.NoteNoOpenReply
+			return u, true, nil
+		}
 		if utf8.RuneCountInString(text) > 4000 {
 			u.Note = behavior.NoteTextTooLong
 			return u, true, nil
@@ -427,13 +453,11 @@ func (h *TelegramHandler) normalize(ctx context.Context, integration tenant.Webh
 		nonce, err := h.answers.StageAnswer(ctx, workspaceID, replyTo, text, h.now())
 		if errors.Is(err, behavior.ErrNotFound) {
 			if h.templates == nil {
-				u.Note = behavior.NoteNoOpenReply
-				return u, true, nil
+				return noOpenReply()
 			}
 			nonce, err = h.templates.StageTemplateReply(ctx, workspaceID, replyTo, text, h.now())
 			if errors.Is(err, reporting.ErrTemplatePromptNotFound) {
-				u.Note = behavior.NoteNoOpenReply
-				return u, true, nil
+				return noOpenReply()
 			}
 			if err == nil {
 				u.Args = "report-template:" + nonce
