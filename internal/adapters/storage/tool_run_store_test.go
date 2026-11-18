@@ -80,11 +80,11 @@ func TestToolRunStore_ReadsNotDeduped(t *testing.T) {
 
 func TestToolRunStore_FinishDenyDryRun(t *testing.T) {
 	ctx, pool, s, job := newToolRunDB(t)
-	if err := s.Deny(ctx, start(job, "github_pr_merge", tenant.TierDangerous, "kd"), "dangerous_disabled"); err != nil {
+	if err := s.Deny(ctx, start(job, "github_pr_merge", tenant.TierDangerous, "kd"), "approval_required"); err != nil {
 		t.Fatal(err)
 	}
 	var st, code string
-	if err := pool.QueryRow(ctx, `SELECT status, error_code FROM tool_runs WHERE idempotency_key='kd'`).Scan(&st, &code); err != nil || st != "denied" || code != "dangerous_disabled" {
+	if err := pool.QueryRow(ctx, `SELECT status, error_code FROM tool_runs WHERE idempotency_key='kd'`).Scan(&st, &code); err != nil || st != "denied" || code != "approval_required" {
 		t.Fatalf("%s %s %v", st, code, err)
 	}
 	// A denial never blocks a later allowed attempt.

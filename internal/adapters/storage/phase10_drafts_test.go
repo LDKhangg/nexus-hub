@@ -293,7 +293,7 @@ func TestP10DraftAudit_ToolRunHoldsHashNotText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	factory := behavior.DraftExecutorFactory(reg, runs, agent.NewRedactor(nil), tools.DefaultLimits())
+	factory := behavior.DraftExecutorFactory(reg, runs, agent.NewRedactor(nil), tools.DefaultLimits(), gateAllowAll)
 	secret := "🤖 mật khẩu là hunter2-riêng-tư"
 	for _, dry := range []bool{false, true} {
 		d := p10NewDraft(t, e, s, secret, time.Now().Add(time.Hour))

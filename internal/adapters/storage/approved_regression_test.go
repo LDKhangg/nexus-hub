@@ -240,7 +240,7 @@ func TestApproved_DurableAuditAndAttemptBudgets(t *testing.T) {
 			}
 			p := tenant.ToolPolicyConfig{MaxWritesPerJob: 2, Accounts: map[string]tenant.GitHubAccount{"p": {Name: "p"}}, Repos: map[string]tenant.RepoGrant{"o/r": {Repo: "o/r", Account: "p", Allow: []string{x.name}}}}
 			fresh := func() *tools.Executor {
-				return tools.NewExecutor(reg, p, tools.DefaultLimits(), true, store, agent.NewRedactor([]string{"private-identifier-secret"}), job, workspaceA)
+				return tools.NewExecutor(reg, p, tools.DefaultLimits(), store, agent.NewRedactor([]string{"private-identifier-secret"}), job, workspaceA, tools.WithPolicy(gateAllowAll, "agent"))
 			}
 			if mode == "invalid_identifier" {
 				r := fresh().Call(ctx, 1, "private-identifier-secret/hostile", json.RawMessage(`{}`))

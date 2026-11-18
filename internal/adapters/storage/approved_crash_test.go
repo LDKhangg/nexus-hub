@@ -121,7 +121,7 @@ func TestApproved_CrashAfterCommitPushCommentMergeNeverRepeats(t *testing.T) {
 				t.Fatal(err)
 			}
 			policy := tenant.ToolPolicyConfig{Enabled: []string{name}, MaxWritesPerJob: 2, Accounts: map[string]tenant.GitHubAccount{"p": account}, Repos: map[string]tenant.RepoGrant{"acme/app": g}}
-			first := tools.NewExecutor(reg, policy, tools.DefaultLimits(), true, &approvedLostFinish{store}, red, job, workspaceA).Call(ctx, 1, name, json.RawMessage(input))
+			first := tools.NewExecutor(reg, policy, tools.DefaultLimits(), &approvedLostFinish{store}, red, job, workspaceA, tools.WithPolicy(gateAllowAll, "agent")).Call(ctx, 1, name, json.RawMessage(input))
 			if first.Status != tools.StatusOK {
 				t.Fatalf("fixture failed before crash: %s", first.Content)
 			}
@@ -129,7 +129,7 @@ func TestApproved_CrashAfterCommitPushCommentMergeNeverRepeats(t *testing.T) {
 			if err := pool.QueryRow(ctx, `SELECT status FROM tool_runs`).Scan(&status); err != nil || status != "started" {
 				t.Fatal("crash boundary did not leave started audit")
 			}
-			second := tools.NewExecutor(reg, policy, tools.DefaultLimits(), true, store, red, job, workspaceA).Call(ctx, 2, name, json.RawMessage(input))
+			second := tools.NewExecutor(reg, policy, tools.DefaultLimits(), store, red, job, workspaceA, tools.WithPolicy(gateAllowAll, "agent")).Call(ctx, 2, name, json.RawMessage(input))
 			if second.Status != tools.StatusUnknownOutcome || !second.IsError || !strings.Contains(second.Content, "unknown_outcome") {
 				t.Errorf("crash retry status=%s content=%s; expected explicit unknown_outcome", second.Status, second.Content)
 			}
