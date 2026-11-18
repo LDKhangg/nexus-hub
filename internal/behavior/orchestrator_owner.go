@@ -80,14 +80,7 @@ func (o *OrchestratorOwner) send(ctx context.Context, route orchestrator.Route, 
 	if o.Messenger == nil {
 		return 0, ErrNotAvailable
 	}
-	chat := ChatRef{WorkspaceID: route.WorkspaceID, IntegrationID: route.IntegrationID, ChatID: route.ChatID, ThreadID: route.ThreadID}
-	if o.Topics != nil {
-		intent := TopicIntent{Mode: ReportTopicWorkflow, ExecutionID: route.ExecutionID}
-		if route.ClickUpTaskID != "" {
-			intent = TopicIntent{Mode: ReportTopicTask, ExecutionID: route.ExecutionID, TaskID: route.ClickUpTaskID}
-		}
-		chat = o.Topics.Destination(ctx, ChatRef{WorkspaceID: route.WorkspaceID, IntegrationID: route.IntegrationID, ChatID: route.ChatID}, intent)
-	}
+	chat := o.TopicChat(ctx, route)
 	id, err := o.Messenger.SendMessage(ctx, chat, m)
 	if err == nil {
 		if o.Topics != nil {
@@ -104,6 +97,21 @@ func (o *OrchestratorOwner) send(ctx context.Context, route orchestrator.Route, 
 		}
 	}
 	return 0, err
+}
+
+// TopicChat is where the owner messages of route go: the task topic, else
+// the workflow topic, else the route chat. It sends nothing (a draft
+// preview of the behavior-actions executor uses it, Phase 10 REQ-10).
+func (o *OrchestratorOwner) TopicChat(ctx context.Context, route orchestrator.Route) ChatRef {
+	chat := ChatRef{WorkspaceID: route.WorkspaceID, IntegrationID: route.IntegrationID, ChatID: route.ChatID, ThreadID: route.ThreadID}
+	if o.Topics != nil {
+		intent := TopicIntent{Mode: ReportTopicWorkflow, ExecutionID: route.ExecutionID}
+		if route.ClickUpTaskID != "" {
+			intent = TopicIntent{Mode: ReportTopicTask, ExecutionID: route.ExecutionID, TaskID: route.ClickUpTaskID}
+		}
+		chat = o.Topics.Destination(ctx, ChatRef{WorkspaceID: route.WorkspaceID, IntegrationID: route.IntegrationID, ChatID: route.ChatID}, intent)
+	}
+	return chat
 }
 
 // Say sends one message.
@@ -222,9 +230,14 @@ func (w *InboxWorker) noteInstructionAdded(ctx context.Context, workspaceID stri
 
 // --- worker jobs and repos for orchestrated tasks ---
 
-// OrchestratorJobs adapts the 7a job store to orchestrator.WorkerJobs.
+// OrchestratorJobs adapts the 7a job store to orchestrator.WorkerJobs. With
+// Routes and Queued set, an orchestrated job gets the topic messages of a
+// 7a /task job (Phase 10 REQ-12): its route is stored before the job is
+// created, and the "waiting for a machine" notice follows the creation.
 type OrchestratorJobs struct {
-	Jobs LocalTaskJobs
+	Jobs   LocalTaskJobs
+	Routes OrchestratorWorkerRoutes // nil: no topic messages for the job
+	Queued WorkerJobQueued          // nil: no waiting notice
 }
 
 var _ orchestrator.WorkerJobs = OrchestratorJobs{}
@@ -249,6 +262,9 @@ func (a OrchestratorJobs) CreateJob(ctx context.Context, workspaceID string, exe
 	j, err := a.Jobs.CreateJob(ctx, workspaceID, executionID, stepKey, caps, payload)
 	if err != nil {
 		return orchestrator.WorkerJob{}, err
+	}
+	if a.Queued != nil {
+		a.Queued.WorkerJobQueued(ctx, j)
 	}
 	return orchestratorJob(j), nil
 }

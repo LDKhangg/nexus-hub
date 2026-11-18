@@ -97,7 +97,7 @@ var assistantTools = []assistantTool{
 	{def: domain.ToolDef{Name: toolReportTemplate, Description: "Show the report template of one kind (the owner's or the default) and a preview.",
 		InputSchema: toolSchema(`"kind":{"type":"string","enum":["pr_approve","pr_skipped","verdict_unavailable","mention","notify","fyi","digest","failure"]}`, "kind")}},
 	{workflow: true, def: domain.ToolDef{Name: toolWorkflowList, Description: "List durable workflow executions, newest first: ID, state, reason code, behavior and version, times.",
-		InputSchema: toolSchema(`"state":{"type":"string","enum":["RECEIVED","TRIAGING","PLANNING","QUEUED","RUNNING","EVALUATING","WAITING_FOR_USER","WAITING_FOR_APPROVAL","COMPLETED","FAILED","CANCELLED"]},"limit":{"type":"integer","minimum":1,"maximum":20},"before_id":{"type":"integer","minimum":1,"description":"only executions with a smaller ID (next page)"}`)}},
+		InputSchema: toolSchema(`"state":{"type":"string","enum":["RECEIVED","TRIAGING","PLANNING","QUEUED","RUNNING","EVALUATING","WAITING_FOR_USER","WAITING_FOR_APPROVAL","WAITING_FOR_WORKER","COMPLETED","FAILED","CANCELLED"]},"limit":{"type":"integer","minimum":1,"maximum":20},"before_id":{"type":"integer","minimum":1,"description":"only executions with a smaller ID (next page)"}`)}},
 	{workflow: true, def: domain.ToolDef{Name: toolWorkflowShow, Description: "Show one workflow execution: state, reason, version, retry links, live job, waits and steps.",
 		InputSchema: toolSchema(`"id":{"type":"integer","minimum":1}`, "id")}},
 	{workflow: true, def: domain.ToolDef{Name: toolWorkflowHistory, Description: "Show the event history (timeline) of one workflow execution.",

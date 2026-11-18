@@ -619,6 +619,14 @@ func (w *InboxWorker) workerJobCallback(ctx context.Context, u InboundUpdate, da
 	if data.Kind == CallbackApprove {
 		w.noteWorkerRetried(ctx, u.WorkspaceID, p)
 	}
+	// An orchestrated execution follows its job again at once (it waited
+	// for the owner's Retry/Cancel; Phase 10 REQ-12). For a /task job this
+	// wakes nothing; the sweeper repairs a missed wake.
+	if w.d.InstructionWaker != nil && p.ExecutionID > 0 {
+		if err := w.d.InstructionWaker.InstructionAdded(ctx, u.WorkspaceID, p.ExecutionID); err != nil {
+			log.Print("worker job buttons: orchestrator step not woken; the sweeper retries")
+		}
+	}
 	return toast, "", true
 }
 

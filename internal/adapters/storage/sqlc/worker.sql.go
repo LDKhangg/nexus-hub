@@ -42,12 +42,12 @@ func (q *Queries) AuthenticateWorkerDevice(ctx context.Context, tokenHash []byte
 
 const cancelWorkerJob = `-- name: CancelWorkerJob :one
 UPDATE public.worker_jobs
-SET state = CASE WHEN state IN ('WAITING_FOR_WORKER', 'INTERRUPTED') THEN 'CANCELLED' ELSE 'CANCELLING' END,
-    finished_at = CASE WHEN state IN ('WAITING_FOR_WORKER', 'INTERRUPTED') THEN $1 ELSE finished_at END,
-    lease_expires_at = CASE WHEN state IN ('WAITING_FOR_WORKER', 'INTERRUPTED') THEN NULL ELSE lease_expires_at END,
+SET state = CASE WHEN state IN ('WAITING_FOR_WORKER', 'INTERRUPTED', 'FAILED', 'NEEDS_INPUT') THEN 'CANCELLED' ELSE 'CANCELLING' END,
+    finished_at = CASE WHEN state IN ('WAITING_FOR_WORKER', 'INTERRUPTED', 'FAILED', 'NEEDS_INPUT') THEN $1 ELSE finished_at END,
+    lease_expires_at = CASE WHEN state IN ('WAITING_FOR_WORKER', 'INTERRUPTED', 'FAILED', 'NEEDS_INPUT') THEN NULL ELSE lease_expires_at END,
     updated_at = $1
 WHERE workspace_id = $2 AND id = $3
-  AND state IN ('WAITING_FOR_WORKER', 'LEASED', 'RUNNING', 'CANCELLING', 'INTERRUPTED')
+  AND state IN ('WAITING_FOR_WORKER', 'LEASED', 'RUNNING', 'CANCELLING', 'INTERRUPTED', 'FAILED', 'NEEDS_INPUT')
 RETURNING id, workspace_id, execution_id, step_id, required_capabilities, state, device_id, lease_token_hash, lease_expires_at, attempt, result, idempotency_key, payload, progress, progress_seq, leased_at, interrupted_at, created_at, updated_at, finished_at
 `
 
@@ -58,7 +58,9 @@ type CancelWorkerJobParams struct {
 }
 
 // Waiting or interrupted jobs are cancelled at once; leased or running ones
-// become CANCELLING until the worker reports.
+// become CANCELLING until the worker reports. A failed or needs-input job
+// (the owner's Cancel button next to Retry) is cancelled at once too, so its
+// workflow step ends (Phase 10 REQ-12).
 func (q *Queries) CancelWorkerJob(ctx context.Context, arg CancelWorkerJobParams) (WorkerJob, error) {
 	row := q.db.QueryRow(ctx, cancelWorkerJob, arg.Now, arg.WorkspaceID, arg.ID)
 	var i WorkerJob

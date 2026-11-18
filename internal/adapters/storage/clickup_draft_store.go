@@ -99,6 +99,28 @@ func (s *ClickUpDraftStore) GetDraft(ctx context.Context, workspaceID string, id
 	return mapClickUpDraft(row), nil
 }
 
+// OrchestratorDraft returns the newest draft an orchestrated execution made
+// for one plan task key; ok=false when there is none (Phase 10 REQ-10).
+func (s *ClickUpDraftStore) OrchestratorDraft(ctx context.Context, workspaceID string, executionID int64, planTaskKey string) (behavior.ClickUpDraft, bool, error) {
+	ws, err := parseDBID(workspaceID)
+	if err != nil {
+		return behavior.ClickUpDraft{}, false, invalid("workspace_id")
+	}
+	if executionID <= 0 || planTaskKey == "" || len(planTaskKey) > 64 {
+		return behavior.ClickUpDraft{}, false, invalid("plan task")
+	}
+	row, err := s.q.GetOrchestratorClickUpDraft(ctx, sqlc.GetOrchestratorClickUpDraftParams{
+		WorkspaceID: ws, ExecutionID: executionID, PlanTaskKey: planTaskKey,
+	})
+	if isNoRows(err) {
+		return behavior.ClickUpDraft{}, false, nil
+	}
+	if err != nil {
+		return behavior.ClickUpDraft{}, false, err
+	}
+	return mapClickUpDraft(row), true, nil
+}
+
 func (s *ClickUpDraftStore) SetDraftPreview(ctx context.Context, workspaceID string, id, messageID int64) error {
 	ws, err := parseDBID(workspaceID)
 	if err != nil {

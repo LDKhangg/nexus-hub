@@ -298,6 +298,52 @@ func (q *Queries) GetClickUpDraft(ctx context.Context, arg GetClickUpDraftParams
 	return i, err
 }
 
+const getOrchestratorClickUpDraft = `-- name: GetOrchestratorClickUpDraft :one
+SELECT id, workspace_id, integration_id, chat_id, thread_id, task_id, parent_comment_id, mention_user_ids, new_status, body, body_sha256, state, source, execution_id, plan_task_key, preview_message_id, posted_comment_id, reason_code, expires_at, created_at, updated_at, finished_at FROM public.clickup_drafts
+WHERE workspace_id = $1 AND execution_id = $2::bigint
+  AND source = 'orchestrator' AND plan_task_key = $3
+ORDER BY id DESC
+LIMIT 1
+`
+
+type GetOrchestratorClickUpDraftParams struct {
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+	PlanTaskKey string
+}
+
+// The newest draft an orchestrated execution made for one plan task (Phase
+// 10 REQ-10), so a retried step finds the draft it already made.
+func (q *Queries) GetOrchestratorClickUpDraft(ctx context.Context, arg GetOrchestratorClickUpDraftParams) (ClickupDraft, error) {
+	row := q.db.QueryRow(ctx, getOrchestratorClickUpDraft, arg.WorkspaceID, arg.ExecutionID, arg.PlanTaskKey)
+	var i ClickupDraft
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.IntegrationID,
+		&i.ChatID,
+		&i.ThreadID,
+		&i.TaskID,
+		&i.ParentCommentID,
+		&i.MentionUserIds,
+		&i.NewStatus,
+		&i.Body,
+		&i.BodySha256,
+		&i.State,
+		&i.Source,
+		&i.ExecutionID,
+		&i.PlanTaskKey,
+		&i.PreviewMessageID,
+		&i.PostedCommentID,
+		&i.ReasonCode,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
 const insertClickUpDraft = `-- name: InsertClickUpDraft :one
 
 INSERT INTO public.clickup_drafts (workspace_id, integration_id, chat_id, thread_id, task_id, parent_comment_id,

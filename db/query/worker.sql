@@ -133,14 +133,16 @@ RETURNING *;
 
 -- name: CancelWorkerJob :one
 -- Waiting or interrupted jobs are cancelled at once; leased or running ones
--- become CANCELLING until the worker reports.
+-- become CANCELLING until the worker reports. A failed or needs-input job
+-- (the owner's Cancel button next to Retry) is cancelled at once too, so its
+-- workflow step ends (Phase 10 REQ-12).
 UPDATE public.worker_jobs
-SET state = CASE WHEN state IN ('WAITING_FOR_WORKER', 'INTERRUPTED') THEN 'CANCELLED' ELSE 'CANCELLING' END,
-    finished_at = CASE WHEN state IN ('WAITING_FOR_WORKER', 'INTERRUPTED') THEN sqlc.arg(now) ELSE finished_at END,
-    lease_expires_at = CASE WHEN state IN ('WAITING_FOR_WORKER', 'INTERRUPTED') THEN NULL ELSE lease_expires_at END,
+SET state = CASE WHEN state IN ('WAITING_FOR_WORKER', 'INTERRUPTED', 'FAILED', 'NEEDS_INPUT') THEN 'CANCELLED' ELSE 'CANCELLING' END,
+    finished_at = CASE WHEN state IN ('WAITING_FOR_WORKER', 'INTERRUPTED', 'FAILED', 'NEEDS_INPUT') THEN sqlc.arg(now) ELSE finished_at END,
+    lease_expires_at = CASE WHEN state IN ('WAITING_FOR_WORKER', 'INTERRUPTED', 'FAILED', 'NEEDS_INPUT') THEN NULL ELSE lease_expires_at END,
     updated_at = sqlc.arg(now)
 WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id)
-  AND state IN ('WAITING_FOR_WORKER', 'LEASED', 'RUNNING', 'CANCELLING', 'INTERRUPTED')
+  AND state IN ('WAITING_FOR_WORKER', 'LEASED', 'RUNNING', 'CANCELLING', 'INTERRUPTED', 'FAILED', 'NEEDS_INPUT')
 RETURNING *;
 
 -- name: DeviceHasOtherActiveWorkerJob :one

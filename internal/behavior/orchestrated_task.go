@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -296,6 +297,9 @@ func (w *InboxWorker) orchestratedStatusLines(ctx context.Context, workspaceID s
 			lines = append(lines, fmt.Sprintf("- %s · %s · %s · %s", oneLine(t.Key, 40), oneLine(t.Title, 60), executor, t.State))
 		}
 	}
+	if line := orchestratorWaitLine(d, steps); line != "" {
+		lines = append(lines, line)
+	}
 	if decisions, err := w.d.OrchestratorPlans.ListDecisions(ctx, workspaceID, d.ID); err == nil && len(decisions) > 0 {
 		last := decisions[0]
 		for _, dec := range decisions[1:] {
@@ -337,4 +341,41 @@ func (w *InboxWorker) orchestratedStatusLines(ctx context.Context, workspaceID s
 func (a toolArgs) requestTooLong() bool {
 	s, ok := a["request"].(string)
 	return ok && utf8.RuneCountInString(strings.TrimSpace(s)) > maxLocalInstructionRunes
+}
+
+// orchestratorWaitLine says what a waiting orchestrated execution waits for
+// (Phase 10 REQ-11): its worker job (and when the wall-time budget ends),
+// the owner's Retry/Cancel of a failed job, or the owner's confirm of a
+// ClickUp draft. Ids and fixed texts only; "" when it does not wait on one.
+func orchestratorWaitLine(d workflow.ExecutionDetail, steps []workflow.Step) string {
+	if !d.State.IsWaiting() {
+		return ""
+	}
+	for _, st := range steps {
+		if st.State != workflow.StepWaiting || st.Kind != workflow.StepKindOrchestratorRunTask || st.Checkpoint == nil {
+			continue
+		}
+		var marker, wakeAt string
+		for _, ref := range st.Checkpoint.References {
+			switch ref.Kind {
+			case orchestrator.CheckpointWait:
+				marker = ref.ReferenceID
+			case orchestrator.CheckpointWakeAt:
+				wakeAt = ref.ReferenceID
+			}
+		}
+		until := ""
+		if secs, err := strconv.ParseInt(wakeAt, 10, 64); err == nil && secs > 0 {
+			until = " · hết thời gian lúc " + time.Unix(secs, 0).UTC().Format("2006-01-02 15:04") + " UTC"
+		}
+		switch {
+		case strings.HasPrefix(marker, "job_owner:"):
+			return "Đang chờ bạn: việc trên máy local chưa xong, bấm Thử lại hoặc Huỷ trong topic (" + oneLine(st.Key, 20) + ")" + until
+		case strings.HasPrefix(marker, "job:"):
+			return "Đang chờ máy local (" + oneLine(st.Key, 20) + ", job " + oneLine(strings.TrimPrefix(marker, "job:"), 40) + ")" + until
+		case strings.HasPrefix(marker, "task:draft:"):
+			return "Đang chờ bạn xác nhận comment ClickUp (bản nháp #" + oneLine(strings.TrimPrefix(marker, "task:draft:"), 20) + ")"
+		}
+	}
+	return ""
 }

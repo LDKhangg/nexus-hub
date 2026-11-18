@@ -338,9 +338,37 @@ func (s *WorkerTaskStore) WakeWorkerStep(ctx context.Context, workspaceID string
 
 const workerTaskUpkeepBatch = 50
 
+var _ behavior.OrchestratorWorkerRoutes = (*WorkerTaskStore)(nil)
+
+// EnsureOrchestratedRoute stores the topic route of an orchestrated
+// execution's worker job (Phase 10 REQ-12), so the job gets the local-task
+// topic messages. A later job of the same execution resets the progress
+// message and the delivered instruction version.
+func (s *WorkerTaskStore) EnsureOrchestratedRoute(ctx context.Context, route behavior.LocalTaskRoute) error {
+	ws, err := parseDBID(route.WorkspaceID)
+	if err != nil {
+		return invalid("workspace_id")
+	}
+	integration, err := parseDBID(route.IntegrationID)
+	if err != nil {
+		return invalid("integration_id")
+	}
+	if route.ExecutionID <= 0 || route.ChatID == 0 || route.ThreadID < 0 || !tenant.ValidRepo(route.Repo) ||
+		len(route.TaskRef) > 64 || len(route.ClickUpTaskID) > 64 || route.InstructionVersion < 0 {
+		return invalid("orchestrated worker route")
+	}
+	return s.q.UpsertOrchestratedWorkerRoute(ctx, sqlc.UpsertOrchestratedWorkerRouteParams{
+		WorkspaceID: ws, ExecutionID: route.ExecutionID, IntegrationID: integration, ChatID: route.ChatID, ThreadID: route.ThreadID,
+		Repo: route.Repo, TaskRef: route.TaskRef, ClickupTaskID: route.ClickUpTaskID, InstructionVersion: route.InstructionVersion,
+	})
+}
+
 // SyncWorkerTasks repairs what an observer notification could not: waiting
 // steps whose job already succeeded or was cancelled are woken, and
-// unfinished jobs of ended executions are cancelled.
+// unfinished jobs of ended executions are cancelled. It is also the durable
+// timer of orchestrated task waits (Phase 10 REQ-10/11): a worker wait whose
+// wall-time budget is over, a job the owner retried, and an ended ClickUp
+// draft wake their step (ListOrchestratorStepsToWake).
 func (s *WorkerTaskStore) SyncWorkerTasks(ctx context.Context) error {
 	var firstErr error
 	wake, err := s.q.ListWorkerJobsToWake(ctx, workerTaskUpkeepBatch)
@@ -350,6 +378,19 @@ func (s *WorkerTaskStore) SyncWorkerTasks(ctx context.Context) error {
 	for _, w := range wake {
 		if err := s.WakeWorkerStep(ctx, uuidString(w.WorkspaceID), w.ExecutionID.Int64, w.StepID); err != nil && !errors.Is(err, workflow.ErrNotEligible) {
 			log.Print("worker tasks: a waiting step was not woken")
+			firstErr = err
+		}
+	}
+	now := time.Now()
+	steps, err := s.q.ListOrchestratorStepsToWake(ctx, sqlc.ListOrchestratorStepsToWakeParams{
+		AtTime: ts(now), NowUnix: now.Unix(), RowLimit: workerTaskUpkeepBatch,
+	})
+	if err != nil && firstErr == nil {
+		firstErr = err
+	}
+	for _, st := range steps {
+		if err := s.WakeWorkerStep(ctx, uuidString(st.WorkspaceID), st.ExecutionID, st.StepKey); err != nil && !errors.Is(err, workflow.ErrNotEligible) {
+			log.Print("worker tasks: a waiting orchestrator step was not woken")
 			firstErr = err
 		}
 	}

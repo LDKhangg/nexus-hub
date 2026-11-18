@@ -62,7 +62,11 @@ const (
 	CheckpointWait = "orchestrator_wait"
 	// CheckpointWorkerJob references the worker job of a run slot.
 	CheckpointWorkerJob = "worker_job"
-	noTask              = "-"
+	// CheckpointWakeAt is the durable timer of a worker wait (Phase 10
+	// REQ-11): unix seconds of the wall-time budget's end. The worker task
+	// sweeper wakes the step once it passed, so the wait always ends.
+	CheckpointWakeAt = "orchestrator_wake_at"
+	noTask           = "-"
 )
 
 // Reason codes of orchestrated executions (decision rows and step
@@ -88,6 +92,8 @@ const (
 	ReasonClarified           = "clarification_answered"
 	ReasonAllTasksSucceeded   = "all_tasks_succeeded"
 	ReasonApproved            = "approved"
+	// ReasonExecutorFailed: an in-process executor returned an error.
+	ReasonExecutorFailed = "executor_failed"
 )
 
 // KnownWorkflowReasons returns every code an orchestrated execution can end
@@ -211,7 +217,9 @@ type StepReader interface {
 }
 
 // StepWaker queues a waiting step again (no signal needed); ErrNotEligible
-// when it is not waiting.
+// when it is not waiting. The worker task sweeper also wakes run steps
+// whose wake time passed, whose retried job runs again, or whose ClickUp
+// draft ended (storage.WorkerTaskStore.SyncWorkerTasks).
 type StepWaker interface {
 	WakeWorkerStep(ctx context.Context, workspaceID string, executionID int64, stepID string) error
 }
@@ -313,6 +321,10 @@ type TaskRun struct {
 	// TokensLeft is what the execution's token budget has left when the
 	// task starts; an executor never plans to spend more.
 	TokensLeft int64
+	// Inputs are the bounded results of the task's succeeded dependencies
+	// (summary, PR URL, branch; untrusted text), one line each, in
+	// dependency order. Executors pass them only as data.
+	Inputs []string
 }
 
 // TaskOutcome is an in-process executor's structured result. Evidence must
@@ -325,6 +337,34 @@ type TaskOutcome struct {
 	// Summary is a short untrusted result text; it is stored bounded in the
 	// task result.
 	Summary string
+	// Wait, when not empty, means the task is not finished: it waits for
+	// the owner (for example a ClickUp draft's confirm, Phase 10 REQ-10).
+	// It is the executor's own reference (at most 128 bytes, no spaces);
+	// the run step waits in WAITING_FOR_APPROVAL and, once woken, asks the
+	// executor again through TaskResumer. Only a TaskResumer may wait.
+	Wait string
+	// Blocked marks a task that did not fail but cannot go on (the owner
+	// cancelled, or a draft expired): the task becomes BLOCKED and
+	// Evaluate decides.
+	Blocked bool
+}
+
+// TaskResumer is implemented by an in-process executor whose tasks may wait
+// (TaskOutcome.Wait). ResumeTask reads the task's state again: waitRef is
+// the reference the executor returned, or "" when the step only knows the
+// task started (an attempt interrupted before it recorded the wait); the
+// executor then looks its work up by run, or reports
+// executor_interrupted when it cannot tell. It never repeats a side effect.
+type TaskResumer interface {
+	ResumeTask(ctx context.Context, run TaskRun, waitRef string) (TaskOutcome, error)
+}
+
+// WorkerJobRoutes is optionally implemented by WorkerJobs: PrepareJob is
+// called right before a run slot creates its worker job, so the job's topic
+// messages (progress, Retry/Cancel) go to the execution's topic like a 7a
+// /task job (Phase 10 REQ-12). An error is logged and the job still runs.
+type WorkerJobRoutes interface {
+	PrepareJob(ctx context.Context, route Route, stepKey, repo string, instructionVersion int64) error
 }
 
 // TaskExecutor runs one task in process. An executor never performs a side

@@ -72,3 +72,12 @@ WHERE d.id IN (SELECT c.id FROM public.clickup_drafts c
                WHERE c.state = 'posting' AND c.updated_at < sqlc.arg(before)::timestamptz
                ORDER BY c.updated_at LIMIT sqlc.arg(max_rows)::int FOR UPDATE SKIP LOCKED)
 RETURNING d.*;
+
+-- name: GetOrchestratorClickUpDraft :one
+-- The newest draft an orchestrated execution made for one plan task (Phase
+-- 10 REQ-10), so a retried step finds the draft it already made.
+SELECT * FROM public.clickup_drafts
+WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id)::bigint
+  AND source = 'orchestrator' AND plan_task_key = sqlc.arg(plan_task_key)
+ORDER BY id DESC
+LIMIT 1;

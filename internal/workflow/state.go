@@ -17,14 +17,14 @@ func (s State) IsActive() bool {
 
 // IsWaiting reports whether an execution is durably blocked without a lease.
 func (s State) IsWaiting() bool {
-	return s == StateWaitingForUser || s == StateWaitingForApproval
+	return s == StateWaitingForUser || s == StateWaitingForApproval || s == StateWaitingForWorker
 }
 
 // Valid reports whether s is in the complete persisted vocabulary.
 func (s State) Valid() bool {
 	switch s {
 	case StateReceived, StateTriaging, StatePlanning, StateQueued, StateRunning,
-		StateEvaluating, StateWaitingForUser, StateWaitingForApproval,
+		StateEvaluating, StateWaitingForUser, StateWaitingForApproval, StateWaitingForWorker,
 		StateCompleted, StateFailed, StateCancelled:
 		return true
 	default:
