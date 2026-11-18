@@ -90,6 +90,19 @@ type p10Drafts struct {
 	mu   sync.Mutex
 	rows map[int64]*ClickUpDraft
 	next int64
+	// execEnded and execDeadline model the workflow_executions rows the SQL
+	// store joins (Fix A, R-A-2): an ended or past-deadline execution.
+	execEnded    map[int64]bool
+	execDeadline map[int64]time.Time
+}
+
+// execOver is the SQL rule: the execution ended or is past its deadline at now.
+func (s *p10Drafts) execOver(id int64, now time.Time) bool {
+	if s.execEnded[id] {
+		return true
+	}
+	dl, ok := s.execDeadline[id]
+	return ok && !dl.After(now)
 }
 
 func newP10Drafts() *p10Drafts { return &p10Drafts{rows: map[int64]*ClickUpDraft{}} }
@@ -145,6 +158,9 @@ func (s *p10Drafts) ClaimDraftPost(_ context.Context, ws string, id int64, sha s
 	d, ok := s.rows[id]
 	if !ok || d.WorkspaceID != ws || (d.State != DraftPending && d.State != DraftFailed) || !now.Before(d.ExpiresAt) ||
 		d.BodySHA256 != sha || d.PreviewMessageID != preview {
+		return ClickUpDraft{}, ErrConflict
+	}
+	if d.Source == DraftSourceOrchestrator && s.execOver(d.ExecutionID, now) {
 		return ClickUpDraft{}, ErrConflict
 	}
 	d.State, d.UpdatedAt = DraftPosting, now
@@ -669,7 +685,8 @@ func TestP10Draft_NoRetryAfterUnknownOutcomeOrDryRun(t *testing.T) {
 			if !strings.Contains(ed.text, want) || len(ed.buttons) != 0 || strings.Contains(ed.text, "Thử lại") {
 				t.Fatalf("edit %+v", ed)
 			}
-			if d := e.draft(t, id); d.State != DraftFailed || d.ReasonCode != want {
+			// Review A R-A-1: no safe retry ends the draft for good.
+			if d := e.draft(t, id); d.State != DraftFailedFinal || d.ReasonCode != want || d.Body != "" || d.FinishedAt == nil {
 				t.Fatalf("draft %+v", d)
 			}
 			// The failure text must never carry the comment body.

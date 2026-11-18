@@ -359,6 +359,12 @@ func TestP10Migration00032DownUp(t *testing.T) {
 	mustExec(t, e.ctx, e.pool, `INSERT INTO approvals(workspace_id,kind,action,resource,payload,nonce,expires_at) VALUES($1,'clickup_draft','preview','clickup_draft:1','{}','nonce-0123456789abcdeg',now()+interval '1 hour')`, workspaceA)
 	_, err := e.pool.Exec(e.ctx, `INSERT INTO approvals(workspace_id,kind,action,resource,payload,nonce,expires_at) VALUES($1,'bogus','a','r','{}','nonce-0123456789abcdeh',now()+interval '1 hour')`, workspaceA)
 	requirePGCode(t, err, "23514")
+	// Fix A Q1: Up of 00032 restored the original table; re-apply 00034 so the schema ends at the latest version
+	// (failed_final accepted by all three constraints).
+	mustExec(t, e.ctx, e.pool, upSection(t, "00034_clickup_draft_failed_final.sql"))
+	if n := e.count(`SELECT count(*) FROM pg_constraint WHERE conrelid='public.clickup_drafts'::regclass AND contype='c' AND pg_get_constraintdef(oid) LIKE '%failed_final%'`); n != 3 {
+		t.Fatalf("after re-applying 00034, %d constraints know failed_final, want 3", n)
+	}
 }
 
 // TC-K1d (REQ-10): the orchestrator draft lookup finds the newest draft of an execution's plan task, and only that.
