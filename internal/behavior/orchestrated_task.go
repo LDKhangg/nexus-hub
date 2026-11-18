@@ -172,7 +172,10 @@ func (w *InboxWorker) startTaskAvailable() bool {
 // toolStartTask starts an orchestrated task. The model gets status codes and
 // the workflow id only, never the plan or any text.
 func (w *InboxWorker) toolStartTask(ctx context.Context, tt *assistantToolTurn, args toolArgs) (string, bool) {
-	request, err := args.str("request")
+	request, err := args.strMax("request", maxLocalInstructionRunes)
+	if errors.Is(err, errToolArgs) && args.requestTooLong() {
+		return toolJSON(map[string]any{"status": "too_long"})
+	}
 	if err != nil || request == "" {
 		return toolErr(errToolArgs)
 	}
@@ -327,4 +330,11 @@ func (w *InboxWorker) orchestratedStatusLines(ctx context.Context, workspaceID s
 			int(wall/time.Minute), int(snap.Caps.Wall/time.Minute)))
 	}
 	return lines
+}
+
+// requestTooLong reports whether the request argument is a string longer
+// than a /plan instruction.
+func (a toolArgs) requestTooLong() bool {
+	s, ok := a["request"].(string)
+	return ok && utf8.RuneCountInString(strings.TrimSpace(s)) > maxLocalInstructionRunes
 }

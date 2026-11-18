@@ -241,6 +241,11 @@ func parseToolArgs(raw json.RawMessage) (toolArgs, error) {
 
 // str returns a trimmed string argument of at most assistantMaxArgRunes.
 func (a toolArgs) str(key string) (string, error) {
+	return a.strMax(key, assistantMaxArgRunes)
+}
+
+// strMax is str with its own rune limit.
+func (a toolArgs) strMax(key string, limit int) (string, error) {
 	v, ok := a[key]
 	if !ok || v == nil {
 		return "", nil
@@ -254,7 +259,7 @@ func (a toolArgs) str(key string) (string, error) {
 	default:
 		return "", errToolArgs
 	}
-	if utf8.RuneCountInString(s) > assistantMaxArgRunes {
+	if utf8.RuneCountInString(s) > limit {
 		return "", errToolArgs
 	}
 	return s, nil
