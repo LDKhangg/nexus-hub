@@ -1427,6 +1427,7 @@ a plain terminal), or unlock the keyring at login.
 | Telegram | `/worker enroll`, `/worker list`, `/worker revoke <name>` | enrollment code, short list, revoke at once |
 | Telegram | `/status [WF-n]`, `/cancel [WF-n]`, `/note [WF-n] <text>` | the workflow commands of Phase 6; `/status` shows the worker job state |
 | Telegram | `/retry [WF-n]` | queue a failed, interrupted or needs-input job again |
+| Telegram, in a task topic | `/comment <text>` | draft a ClickUp comment on that task from the text (preview with Đăng/Sửa/Huỷ); never a note to the running job (Phase 10) |
 | Laptop | `nh worker run [--config path]` | poll the hub and run jobs until stopped |
 | Laptop | `nh worker status [--json]` | the worker's own state and journal |
 | Laptop | `nh worker clean` | remove worktrees of finished jobs now |
@@ -1626,6 +1627,21 @@ In a task topic, write to the assistant as usual:
 
 The assistant only makes the draft. It never posts. Outside a task topic it
 needs an explicit task id or URL.
+
+While a job of the task is running, plain text in the topic goes to that job
+as an instruction (one active job), or the hub asks which job (several). Use
+`/comment <text>` to be sure the text becomes a comment draft:
+
+- `/comment <text>` in a task topic always starts the draft flow for that
+  task, even while one or more jobs are running. It never becomes a note to a
+  job. The assistant drafts the comment and shows the preview; nothing is
+  posted until you press **Đăng**.
+- Sent as a reply to a Telegram message that shows a ClickUp comment of the
+  same task, the draft becomes a threaded reply to that comment.
+- `/comment` without text, or outside a task topic (General, a fixed topic),
+  only answers a short usage line.
+- Text over 4000 characters gets the usual "too long" note. The text is kept
+  only in memory until the assistant reads it, like other assistant text.
 
 ### Post a task result: 📤 Đăng lên ClickUp
 

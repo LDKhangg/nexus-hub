@@ -418,6 +418,8 @@ func (w *InboxWorker) command(ctx context.Context, u InboundUpdate, to ChatRef, 
 		return w.taskCommand(ctx, u, to, args)
 	case "/plan":
 		return w.planCommand(ctx, u, to, args)
+	case "/comment":
+		return w.commentCommand(ctx, u, to, actor, corr)
 	case "/retry":
 		reply, err = w.retryCommand(hctx, u, args)
 	case "/status", "/list", "/cancel", "/resume", "/note":
@@ -448,6 +450,7 @@ func (w *InboxWorker) helpText(ctx context.Context, workspaceID string) string {
 	b.WriteString("\n/worker [enroll|list|revoke <tên>]: máy local làm việc")
 	b.WriteString("\n/task [TASK-ID] <yêu cầu>: giao việc cho máy local\n/retry [WF-id]: thử lại việc của máy local")
 	b.WriteString("\n/plan [TASK-ID] <yêu cầu>: AI lập kế hoạch rồi làm từng bước")
+	b.WriteString("\n/comment <nội dung>: soạn bình luận ClickUp cho task của topic (xem trước rồi mới đăng)")
 	b.WriteString("\n/note [WF-id] <nội dung>: bổ sung yêu cầu\n/cancel [WF-id]: đề nghị huỷ\n/resume [WF-id]: đề nghị tiếp tục")
 	if w.d.Defs == nil {
 		return b.String()

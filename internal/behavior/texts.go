@@ -269,3 +269,6 @@ const (
 	msgReportOutcomeFailed    = "Trạng thái: việc thất bại, đây không phải kết quả hoàn tất."
 	msgReportOutcomeCancelled = "Trạng thái: việc đã bị huỷ, đây không phải kết quả hoàn tất."
 )
+
+// usageComment answers /comment without text or outside a ClickUp task topic.
+const usageComment = "Cú pháp: /comment <nội dung> (gõ trong topic của một task ClickUp)"
