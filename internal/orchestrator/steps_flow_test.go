@@ -678,7 +678,7 @@ func TestSayPlan_Truncation(t *testing.T) {
 	h := newSH(t)
 	var tasks []map[string]any
 	for i := 1; i <= MaxPlanTasks; i++ {
-		tasks = append(tasks, shRead(fmt.Sprintf("t%02d", i), strings.Repeat("Việc dài ", 30)))
+		tasks = append(tasks, shRead(fmt.Sprintf("t%02d", i), strings.Repeat("Việc dài ", 20)))
 	}
 	h.plan("EXECUTE", tasks...)
 	h.must(StepKeyPlan)

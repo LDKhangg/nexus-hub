@@ -215,8 +215,14 @@ func TestRegistry_BuiltinSchemasLookup(t *testing.T) {
 			t.Fatalf("schema %s missing", n)
 		}
 	}
-	if _, ok := LookupSchema("classify", 2); ok {
-		t.Fatal("unknown version found")
+	// classify v2 (SchemaClassifyNotes) exists since P5b.
+	if s, ok := LookupSchema("classify", 2); !ok || s.Version != 2 || s.Name != "classify" {
+		t.Fatal("classify v2 missing")
+	}
+	for _, v := range []int{0, 3, 99} {
+		if _, ok := LookupSchema("classify", v); ok {
+			t.Fatalf("unknown version %d found", v)
+		}
 	}
 }
 

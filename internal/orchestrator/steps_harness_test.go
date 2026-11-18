@@ -329,7 +329,8 @@ func (e *shExecutor) RunTask(_ context.Context, run TaskRun) (TaskOutcome, error
 	if e.fn != nil {
 		return e.fn(run)
 	}
-	return TaskOutcome{Succeeded: true}, nil
+	// An in-process task succeeds with a ref of what it read (R-B-3).
+	return TaskOutcome{Succeeded: true, Evidence: []EvidenceRef{{Kind: EvidenceArtifact, ID: "https://github.com/o/r"}}}, nil
 }
 
 func (e *shExecutor) keys() []string {
