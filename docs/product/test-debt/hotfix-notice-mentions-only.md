@@ -1,6 +1,6 @@
 # Test debt — hotfix/notice-mentions-only
 
-Status: OPEN.
+Status: CLOSED 2026-11-17 — TD-NM-1..3 paid in Phase 7a Batch A (see `docs/product/reports/2026-11-17-phase7a-report.md`).
 
 - Code head: see `fix(notices): option to notice only comments that tag the owner`, merged into `develop` with the `Merge hotfix/notice-mentions-only` commit.
 - Cause: every ClickUp comment and status change on the watched lists became a Telegram notice (26 comment and 4 status notices on 2026-11-16 alone, none tagging the owner).

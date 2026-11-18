@@ -1,6 +1,6 @@
 # Test debt — hotfix/clickup-comment-after (6b.2)
 
-Status: OPEN.
+Status: CLOSED 2026-11-17 — TD-CA-1..3 paid in Phase 7a Batch A (see `docs/product/reports/2026-11-17-phase7a-report.md`).
 
 - Code head: `80606b9` (`fix(clickup): accept string before/after in webhook history items`), merged into `develop` with the `Merge hotfix/clickup-comment-after` commit.
 - Cause: the first live ClickUp webhook on the VPS (registered 2026-11-16, id `de2df88e-…`) answered `400` to every `taskCommentPosted` callback. ClickUp sends `"after": "<comment id>"` (a JSON string) in comment history items; `historyValue` only decoded an object, so `json.Unmarshal` failed with `clickup: malformed JSON`. Earlier tests used synthetic payloads with `after: null`, so the suite never saw the real shape. (Deliveries before that were also blocked at the Cloudflare edge by Bot Fight Mode, now off.)
