@@ -322,3 +322,23 @@ draft keeps a body hash. Posting goes through the tool executor (policy, audit,
 idempotency key `draft:<id>`), so the model never writes to ClickUp directly:
 the `draft_clickup_comment` tool and the orchestrator's `clickup.write` task
 only create drafts.
+
+## 9. Policy engine and approvals (Phase 9, NFR-034)
+
+`policy.Engine.Decide` is the one place that answers allow, approval_required
+or deny, from the workspace's active versioned rule set (`policy_rule_sets`),
+and it records every answer in `policy_decisions`. It is called from two places:
+
+- The tool executor, before every non-read tool and after its grant checks.
+  Agent, workflow, behavior action and draft calls all pass through it.
+- The orchestrator's `github.merge` task (`internal/behavior/orchestrator_merge.go`),
+  which creates a `policy_gate` approval when the answer is `approval_required`
+  and waits in `WAITING_FOR_APPROVAL`.
+
+A grant is an `approvals` row of kind `policy_gate`, bound to the workspace,
+action, resource key, input hash and execution. The executor accepts it only
+when it is approved, not expired and not consumed, and marks it consumed in the
+same transaction that begins the tool run. It decides again before running
+(`revalidate_denied` on failure). When the engine or its store is unavailable,
+a built-in safe set applies (read allow, write approval_required, dangerous
+deny). Only `nh policy` writes rule sets.
