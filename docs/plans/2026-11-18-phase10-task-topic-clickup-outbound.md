@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `executing-plans` for an assigned task. The role boundaries and sequential handoff process in `AGENTS.md` override generic implementation/TDD instructions. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** DRAFT 2026-11-18, waiting for owner approval. Owner decision D7 (ROADMAP §5): Phase 10 runs right after 7b and ends MVP 1; Phase 9 (policy) comes after MVP 1.
+**Status:** APPROVED 2026-11-18 (owner: T1, T2; Lead calls L1, L3, L5, L6 confirmed, the others accepted with the plan). Owner decision D7 (ROADMAP §5): Phase 10 runs right after 7b and ends MVP 1; Phase 9 (policy) comes after MVP 1.
 
 **Goal:** A ClickUp task topic in Telegram becomes the single place for that task. Everything that happens on the task in ClickUp (comments, replies, tags, status and assignee changes) arrives in the topic directly, not in General. From the topic the owner can push results back to ClickUp: a `/task` or `/plan` result, a comment, a reply to a specific ClickUp comment, or a comment that tags a person. In this phase, every ClickUp write asks the owner first (preview + buttons). Phase 9 decides later which writes may skip the question.
 

@@ -378,6 +378,10 @@ orchestrator follows and can `DELEGATE` to that worker.
 
 ### Phase 10: Response router and outbound actions — NEXT, ends MVP 1 (D7)
 
+> Plan: `docs/plans/2026-11-18-phase10-task-topic-clickup-outbound.md`
+> (APPROVED 2026-11-18). Branch `feature/phase10`, migration `00031`. Scope
+> narrowed to the owner's task-topic flow; the rest moved to Phase 10b.
+
 - **Goal:** results go to the right place on every platform, exactly once.
 - **PCC:**
   - FR-013, FR-014, FR-016, FR-019 (finished)
@@ -410,6 +414,19 @@ orchestrator follows and can `DELEGATE` to that worker.
   - the EPIC 02 and EPIC 12 acceptance criteria are tested;
   - E2E-008 and E2E-010 pass;
   - E2E-001 passes end to end with fake ClickUp, GitHub and LLM.
+
+### Phase 10b: Integration platform remainder (after MVP 1)
+
+- **Goal:** the PCC Phase 10 items that the owner's task-topic flow does not
+  need, moved out of Phase 10 by the approved plan
+  (`docs/plans/2026-11-18-phase10-task-topic-clickup-outbound.md`, L6).
+- **PCC:** FR-010, FR-011, FR-014, FR-016, FR-017 (GitHub part), FR-134–FR-137,
+  FR-139 (unified outbox), FR-142, FR-143, E2E-010.
+- **Deliverables:** unified `outbox_messages`; GitHub inbound webhooks;
+  adapter registry and a demo adapter with contract tests; fallback
+  destination; aggregation; connection lifecycle and health; configurable
+  notification policies.
+- **Order:** after MVP 1, with or after Phase 9.
 
 ### Phase 11: Admin UI and API
 
