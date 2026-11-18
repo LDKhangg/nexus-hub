@@ -377,21 +377,27 @@ func TestP10FixB_CommentCommandTextGone(t *testing.T) {
 // R-B-3: a topic or link lookup error retries with the text still staged; the last attempt gives msgFailed and
 // drops the text.
 func TestP10FixB_CommentCommandLookupErrors(t *testing.T) {
-	for name, fail := range map[string]func(e *p10BEnv, err error){
-		"topic lookup": func(e *p10BEnv, err error) { e.topics.mu.Lock(); e.topics.err = err; e.topics.mu.Unlock() },
-		"link lookup":  func(e *p10BEnv, err error) { e.links.setErr(err) },
+	// The link lookup only runs for a reply, so that case sends /comment as a reply to a linked message.
+	for name, tc := range map[string]struct {
+		reply int64
+		fail  func(e *p10BEnv, err error)
+	}{
+		"topic lookup": {0, func(e *p10BEnv, err error) { e.topics.mu.Lock(); e.topics.err = err; e.topics.mu.Unlock() }},
+		"link lookup":  {p10BReply, func(e *p10BEnv, err error) { e.links.setErr(err) }},
 	} {
+		fail, reply := tc.fail, tc.reply
 		t.Run(name, func(t *testing.T) {
 			e := newP10BEnv(1)
+			e.links.put(p10BReply, b1Task, "5001")
 			args := e.staged(t, "nội dung quan trọng")
 			fail(e, errors.New("db down"))
-			out := e.comment(b1Thread, 0, args, 1)
+			out := e.comment(b1Thread, reply, args, 1)
 			if !out.retry || out.code != "storage" || e.m.count() != 0 {
 				t.Fatalf("first attempt: %+v texts %q", out, e.m.texts())
 			}
 			// Recovery on the retry: the same text drafts.
 			fail(e, nil)
-			if out := e.comment(b1Thread, 0, args, 2); out.code != "assistant_queued" {
+			if out := e.comment(b1Thread, reply, args, 2); out.code != "assistant_queued" {
 				t.Fatalf("retry: %+v", out)
 			}
 			if j, ok := e.job(); !ok || j.text != "nội dung quan trọng" {
@@ -400,7 +406,7 @@ func TestP10FixB_CommentCommandLookupErrors(t *testing.T) {
 			// The last attempt gives up.
 			args = e.staged(t, "lần cuối")
 			fail(e, errors.New("db down"))
-			out = e.comment(b1Thread, 0, args, e.w.settings.MaxAttempts)
+			out = e.comment(b1Thread, reply, args, e.w.settings.MaxAttempts)
 			if out.retry || out.code != "handler_failed" || e.m.last(t).Text != msgFailed {
 				t.Fatalf("last attempt: %+v texts %q", out, e.m.texts())
 			}
@@ -415,8 +421,9 @@ func TestP10FixB_CommentCommandLookupErrors(t *testing.T) {
 // R-B-3: the rate limit still applies: a /comment over the limit is refused, never stored as a note.
 func TestP10FixB_CommentCommandIsRateLimited(t *testing.T) {
 	e := newP10BEnv(1)
+	e.w.d.Assistant.RatePerMinute = 3
 	var last outcome
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 10; i++ {
 		last = e.comment(b1Thread, 0, "nội dung "+string(rune('a'+i%26)), 1)
 		if last.code == "assistant_rate_limited" || last.code == "assistant_queue_full" {
 			break

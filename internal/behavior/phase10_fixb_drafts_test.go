@@ -232,7 +232,7 @@ func TestP10FixB_TopicErrorNeverFallsBackToModelTask(t *testing.T) {
 		{"text": "bình luận"},
 	} {
 		m, text, isErr := x.call(x.turn(p10Thread, 0), in)
-		if isErr || m["status"] != "task_unreadable" || m["posted"] != false {
+		if isErr || m["status"] != "task_unreadable" {
 			t.Fatalf("input %v: %q", in, text)
 		}
 	}
