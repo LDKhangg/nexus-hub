@@ -192,8 +192,29 @@ func DraftExecutorFactory(reg *tools.Registry, store tools.ToolRunStore, san too
 		e.ClickUpTokenRef = ref
 		e.KeyScope = DraftKeyScope(draftID)
 		e.UnscopedWrites = append([]string(nil), policy.Enabled...)
+		e.AuditInput = draftAuditInput
 		return e
 	}
+}
+
+// draftAuditInput keeps no comment text in a draft's audit trail: "text"
+// becomes "sha256:<hex> runes:<n>" (the draft row's hash), every other
+// field stays. An input that does not decode is kept as "{}".
+func draftAuditInput(_ string, input json.RawMessage) json.RawMessage {
+	var m map[string]any
+	if json.Unmarshal(input, &m) != nil {
+		return json.RawMessage(`{}`)
+	}
+	if t, ok := m["text"].(string); ok {
+		m["text"] = "sha256:" + draftHash(t) + " runes:" + strconv.Itoa(utf8.RuneCountInString(t))
+	} else if _, ok := m["text"]; ok {
+		m["text"] = "withheld"
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return b
 }
 
 // DraftKeyScope is the idempotency key scope of a draft's post.
@@ -694,9 +715,10 @@ func (c *ClickUpDrafts) confirm(ctx context.Context, d ClickUpDraft, previewMess
 }
 
 // post runs the claimed draft's writes through the executor: the comment,
-// then the optional status change. Run again for the same draft, the
-// executor replays the comment instead of posting it twice. It reports
-// whether the comment was posted.
+// then the optional status change. The text always comes from the draft
+// row (kept while posting), never from the audit trail, which holds only
+// its hash. Run again for the same draft, the executor replays the comment
+// instead of posting it twice. It reports whether the comment was posted.
 func (c *ClickUpDrafts) post(ctx context.Context, d ClickUpDraft) bool {
 	cfg, err := c.d.Policies.RunPolicy(ctx, d.WorkspaceID, "")
 	if err != nil {
