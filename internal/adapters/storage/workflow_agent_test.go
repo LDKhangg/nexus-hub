@@ -186,7 +186,7 @@ func investigateOrch(t *testing.T, e agentEnv, tr agent.Triager, inv agent.Inves
 	}
 	runs, _ := NewToolRunStore(e.pool)
 	return agent.NewOrchestrator(e.store, func(context.Context, string) (agent.Triager, agent.Investigator, error) { return tr, inv, nil }, reg, runs, nil, nil,
-		agent.OrchestratorSettings{PollInterval: time.Millisecond, Limits: tools.DefaultLimits(), MaxInputTokens: maxIn, MaxOutputTokens: 6000})
+		agent.OrchestratorSettings{PollInterval: time.Millisecond, Limits: tools.DefaultLimits(), MaxInputTokens: maxIn, MaxOutputTokens: 6000, Policy: gateAllowAll})
 }
 
 func seedThread(t *testing.T, e agentEnv) {

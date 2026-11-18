@@ -38,7 +38,8 @@ func p9V1Engine(t *testing.T, names ...string) (*nhpolicy.Engine, *p9Store) {
 		t.Fatal(err)
 	}
 	st := &p9Store{set: nhpolicy.StoredRuleSet{Version: 1, Schema: nhpolicy.SchemaV1, Body: body, BodySHA256: sum, Active: true}}
-	return nhpolicy.NewEngine(st, nhpolicy.NewKnownActions(names...)), st
+	// DefaultV1 names github_pr_merge; a known set without it makes v1 invalid.
+	return nhpolicy.NewEngine(st, nhpolicy.NewKnownActions(append([]string{"github_pr_merge"}, names...)...)), st
 }
 
 type p9Tool struct {

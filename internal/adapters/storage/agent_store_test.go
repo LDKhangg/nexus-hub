@@ -257,7 +257,7 @@ func orchestrate(t *testing.T, e agentEnv, tool tools.Tool, inv *planInvestigato
 	runs, _ := NewToolRunStore(e.pool)
 	tr := planTriager{d: agent.TriageDecision{Category: agent.CategoryInvestigate, Urgency: agent.UrgencyHigh, Confidence: 0.9, Summary: "login 500", Goal: "find cause"}}
 	return agent.NewOrchestrator(e.store, func(context.Context, string) (agent.Triager, agent.Investigator, error) { return tr, inv, nil }, reg, runs, redactor, nil,
-		agent.OrchestratorSettings{PollInterval: time.Millisecond, Limits: tools.DefaultLimits(), MaxInputTokens: 60000, MaxOutputTokens: 6000})
+		agent.OrchestratorSettings{PollInterval: time.Millisecond, Limits: tools.DefaultLimits(), MaxInputTokens: 60000, MaxOutputTokens: 6000, Policy: gateAllowAll})
 }
 
 // runUntil drives the orchestrator until cond holds.
