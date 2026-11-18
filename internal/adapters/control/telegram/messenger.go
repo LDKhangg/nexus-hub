@@ -100,6 +100,15 @@ func (m *Messenger) CloseTopic(ctx context.Context, to behavior.ChatRef, threadI
 	return m.client.CloseForumTopic(ctx, to.WorkspaceID, ref, chatIDString(to.ChatID), threadID)
 }
 
+// DeleteTopic deletes a forum topic and its messages.
+func (m *Messenger) DeleteTopic(ctx context.Context, to behavior.ChatRef, threadID int64) error {
+	ref, err := ControlTokenRef(ctx, m.integrations, to.WorkspaceID, to.IntegrationID)
+	if err != nil {
+		return err
+	}
+	return m.client.DeleteForumTopic(ctx, to.WorkspaceID, ref, chatIDString(to.ChatID), threadID)
+}
+
 // ReopenTopic reopens a forum topic.
 func (m *Messenger) ReopenTopic(ctx context.Context, to behavior.ChatRef, threadID int64) error {
 	ref, err := ControlTokenRef(ctx, m.integrations, to.WorkspaceID, to.IntegrationID)

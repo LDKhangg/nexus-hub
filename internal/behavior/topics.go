@@ -214,18 +214,7 @@ func (r *TopicRouter) subject(ctx context.Context, ws string, in TopicIntent) (k
 		return TopicSubjectFixed, mode
 	}
 	if mode != ReportTopicWorkflow {
-		taskID := in.TaskID
-		if taskID == "" && in.ExecutionID > 0 && r.d.Resources != nil {
-			if list, err := r.d.Resources.ListResources(ctx, ws, in.ExecutionID); err == nil {
-				for _, b := range list {
-					if b.Kind == resourceClickUpTsk && b.ExternalID != "" {
-						taskID = b.ExternalID
-						break
-					}
-				}
-			}
-		}
-		if taskID != "" && taskIDRe.MatchString(taskID) {
+		if taskID := r.intentTaskID(ctx, ws, in); taskID != "" {
 			return TopicSubjectClickUpTask, taskID
 		}
 	}
@@ -233,6 +222,26 @@ func (r *TopicRouter) subject(ctx context.Context, ws string, in TopicIntent) (k
 		return TopicSubjectWorkflow, strconv.FormatInt(in.ExecutionID, 10)
 	}
 	return "", ""
+}
+
+// intentTaskID returns the ClickUp task of in: its TaskID, else the first
+// ClickUp task bound to its execution; "" when it has none.
+func (r *TopicRouter) intentTaskID(ctx context.Context, ws string, in TopicIntent) string {
+	taskID := in.TaskID
+	if taskID == "" && in.ExecutionID > 0 && r.d.Resources != nil {
+		if list, err := r.d.Resources.ListResources(ctx, ws, in.ExecutionID); err == nil {
+			for _, b := range list {
+				if b.Kind == resourceClickUpTsk && b.ExternalID != "" {
+					taskID = b.ExternalID
+					break
+				}
+			}
+		}
+	}
+	if taskID != "" && taskIDRe.MatchString(taskID) {
+		return taskID
+	}
+	return ""
 }
 
 // TopicByThread returns the stored topic of one thread of one chat of the

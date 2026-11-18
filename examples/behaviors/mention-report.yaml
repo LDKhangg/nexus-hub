@@ -75,5 +75,11 @@ budgets:
 
 dry_run: false
 
+# Notices stay in General (one forum topic per mention was too many). A
+# notice about a ClickUp task carries "📌 Mở topic task": pressing it (or
+# replying /topic to the notice) creates or reuses that task's topic.
+report:
+  topic: "general"
+
 profile:
   language: "vi"

@@ -1122,6 +1122,58 @@ back to General while its topic exists carries an **Mở topic** button.
   workflow, asks you to pick when there are several, or asks the assistant
   with the task as context.
 
+### Notices in General, task topic on demand
+
+A behavior with `report.topic: general` (for example `mention-report`) or a
+fixed topic keeps its notices there instead of opening one topic per run. When
+the run is about a ClickUp task, the notice carries a **📌 Mở topic task**
+button:
+
+- Press it: the hub creates the task's topic (same name
+  `<custom id> · <title>` and pinned task link as `/topic`) or reuses the one
+  that exists, and replies with the **Mở topic** button. Pressing again never
+  makes a second topic.
+- Reply `/topic` (no argument) to the notice: the same as the button. Without a
+  task behind the replied-to message, `/topic` keeps its usage reply.
+- Reply with free text to the notice ("tạo topic", "làm task này", a
+  `/plan`-like request): it goes to the assistant with only the task ID as
+  context (the notice text is never passed as instructions). A reply to a
+  message of an active workflow stays an instruction for that workflow.
+
+A notice without a ClickUp task (for example a ClickUp Chat channel message)
+has no button. PR approvals keep their fixed `PR approve` topic.
+
+### Command topic (`telegram_command_topic`)
+
+To keep commands out of General, pick a fixed topic name, create the topic and
+set the name, then restart the hub:
+
+```sh
+nh telegram topics ensure --workspace-id $WS --name 'Lệnh'
+nh settings set telegram_command_topic 'Lệnh'
+```
+
+`ensure` creates the fixed topic in the owner chat when it is missing and
+prints `{"workspace_id":…,"chat_id":…,"thread_id":n}`; it is safe to run
+again. Messages in that topic are handled exactly as in General: commands,
+the assistant, a pasted task link (jump button), `/topic`, `/plan <TASK-ID>`;
+replies go to that topic. Empty (the default) keeps today's behaviour. The
+name is 1-64 bytes and cannot be `task`, `workflow` or `general`.
+
+### Prune finished workflow topics
+
+```sh
+nh telegram topics prune --workspace-id $WS
+```
+
+Deletes, in Telegram (with its messages) and in the store, every `workflow`
+topic (`WF-<id> · …`) whose execution has finished. Task topics, fixed topics
+and topics of active executions are never touched. A topic already deleted in
+Telegram still has its row removed. Prints counts only
+(`{"deleted":n,"kept":n,"failed":n}`; `kept` counts workflow topics left in
+place) and is safe to run again. Needs the bot's **Delete messages** admin
+right in the group.
+
 ### Lifecycle
 
 A topic closes (never deleted; history stays) when its ClickUp task reaches a

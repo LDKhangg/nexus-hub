@@ -1059,6 +1059,13 @@ func (e *Engine) deliver(ctx context.Context, chat ChatRef, m OutMessage) (int64
 		chat = e.d.Topics.Destination(tctx, chat, in)
 		cancel()
 		jump(chat)
+		// A notice sent to General or a fixed topic gets the button that
+		// opens its ClickUp task's topic on demand.
+		bctx, bcancel := context.WithTimeout(context.WithoutCancel(ctx), e.s.RequestTimeout)
+		if b, ok := e.d.Topics.TaskTopicButton(bctx, chat.WorkspaceID, in); ok {
+			m = withDataButton(m, b)
+		}
+		bcancel()
 	}
 	id, err := send(chat)
 	if err == nil {

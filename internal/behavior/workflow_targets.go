@@ -64,14 +64,22 @@ func (w *InboxWorker) workflowOrAssistant(ctx context.Context, u InboundUpdate, 
 	trimmed := strings.TrimSpace(text)
 	// A message that is only a ClickUp task link, written in General, gets
 	// the "Mở topic" button of that task's topic.
-	if u.ThreadID == 0 && w.d.Links != nil {
-		if ref, ok := taskURLTaskRef(trimmed); ok && w.jumpAvailable(u) {
+	if w.d.Links != nil {
+		if ref, ok := taskURLTaskRef(trimmed); ok && w.jumpAvailable(u) && w.inGeneral(ctx, u) {
 			return w.topicJumpRef(ctx, u, to, ref)
 		}
 	}
 	// Target order: exactly one explicit WF-n anywhere in the text, then the
 	// reply target, then a clarification. Several references never store.
 	refs := workflow.FindRefs(trimmed)
+	// A reply to a hub message about a ClickUp task (a notice) reaches the
+	// assistant with the task ID as context, unless it targets an active
+	// workflow: then the rules below apply.
+	if u.ReplyToMessageID > 0 && len(refs) == 0 && trimmed != "" && !strings.HasPrefix(trimmed, "/") {
+		if out, ok := w.replyTaskAssistant(ctx, u, to, actor, corr, text); ok {
+			return out
+		}
+	}
 	if trimmed != "" && !strings.HasPrefix(trimmed, "/") && isWorkflowQuestion(trimmed) {
 		// A free-text question is never stored as an instruction, even when it
 		// starts with WF-n; /note forces an instruction. Context is the single
