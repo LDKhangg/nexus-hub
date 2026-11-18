@@ -793,6 +793,9 @@ func (r *stepRun) storePlan(version int, p Plan, carried []PlanTaskRecord, u Usa
 		ExecutionID: r.id, Version: version, SchemaVersion: SchemaPlan.Version, Budget: budget,
 		TokensIn: max(u.Tokens.Input, 0), TokensOut: max(u.Tokens.Output, 0), CostUSD: max(u.CostUSD, 0),
 	}, records); err != nil {
+		// The step retry calls Plan again: this plan is lost, but the
+		// iteration was charged to the budget before the call, so the
+		// re-call is bounded by the planning budget like any other.
 		return r.failStep(ReasonStorageUnavailable, true)
 	}
 	if supersede > 0 {
@@ -962,6 +965,16 @@ func (r *stepRun) runTask(t PlanTaskRecord, explicitRepo string) (workflow.StepR
 	}
 	if prof.Worker {
 		return r.runWorker(t, explicitRepo)
+	}
+	if t.State == TaskRunning && t.ResultStepID == r.key {
+		// A retry of this step found its in-process task still running: the
+		// earlier attempt was interrupted after it may have spent tokens and
+		// made tool calls. Never run it a second time; fail it and let
+		// Evaluate decide.
+		if err := r.finishTask(t, false, ReasonExecutorInterrupted, nil, nil); err != nil {
+			return r.failStep(ReasonStorageUnavailable, true)
+		}
+		return r.success()
 	}
 	ex := r.s.Executors[t.Executor]
 	if ex == nil {
@@ -1224,18 +1237,26 @@ func (r *stepRun) evidenceMissing() bool {
 		return true
 	}
 	own := fmt.Sprintf("wf%d:", r.id)
+	stepRef := r.execRef("step", "")
 	for _, t := range r.tasks {
 		if t.State != TaskSucceeded {
 			return true
 		}
-		mine := false
+		mine, executorRef := false, false
 		for _, ref := range t.EvidenceRefs {
 			mine = mine || strings.HasPrefix(ref, own)
+			executorRef = executorRef || !strings.HasPrefix(ref, stepRef)
 		}
 		if !mine {
 			return true
 		}
-		if p, ok := r.s.Registry.Profile(t.Executor); ok && p.Worker {
+		p, ok := r.s.Registry.Profile(t.Executor)
+		if !(ok && p.Worker) && !executorRef {
+			// An in-process task needs a ref from the executor itself (a
+			// tool read); its own step ref alone proves nothing.
+			return true
+		}
+		if ok && p.Worker {
 			var res map[string]string
 			_ = json.Unmarshal(t.Result, &res)
 			if res["job_id"] == "" || (res["branch"] == "" && res["pr_url"] == "" && res["test_outcome"] == "") {

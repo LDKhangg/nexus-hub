@@ -102,7 +102,14 @@ func (e *OrchestratorInvestigate) RunTask(ctx context.Context, run orchestrator.
 	if len(specs) == 0 {
 		return orchestrator.TaskOutcome{ReasonCode: "no_read_tools"}, nil
 	}
-	budget := agent.TokenBudget{MaxInput: capTokens(run.TokensLeft, e.MaxInputTokens), MaxOutput: capTokens(run.TokensLeft, e.MaxOutputTokens)}
+	// MaxTotal keeps input+output+cache of this task within the
+	// orchestrator's remaining tokens; the per-side caps alone could spend
+	// more than TokensLeft in sum.
+	budget := agent.TokenBudget{
+		MaxInput:  capTokens(run.TokensLeft, e.MaxInputTokens),
+		MaxOutput: capTokens(run.TokensLeft, e.MaxOutputTokens),
+		MaxTotal:  run.TokensLeft,
+	}
 	report, err := inv.Investigate(ctx, e.packet(run), agent.TriageDecision{Goal: investigateGoal}, agent.CleanInput(cfg.Persona), specs, exec, budget)
 	out := orchestrator.TaskOutcome{Usage: orchestrator.Usage{Tokens: report.Usage, Attempts: report.Steps}}
 	if err != nil {
@@ -123,6 +130,10 @@ func (e *OrchestratorInvestigate) RunTask(ctx context.Context, run orchestrator.
 		out.ReasonCode = "investigate_" + report.Stopped
 	case out.Summary == "":
 		out.ReasonCode = "investigate_empty"
+	case len(out.Evidence) == 0:
+		// Success needs at least one ref from a tool read; the summary
+		// alone is not evidence.
+		out.ReasonCode = "investigate_no_evidence"
 	default:
 		out.Succeeded = true
 	}

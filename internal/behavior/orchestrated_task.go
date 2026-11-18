@@ -58,9 +58,12 @@ func (w *InboxWorker) planCommand(ctx context.Context, u InboundUpdate, to ChatR
 	if !ok {
 		return w.reply(ctx, to, usagePlan, "usage")
 	}
-	repo, request := w.explicitRepo(ctx, u.WorkspaceID, rest)
-	state := conversationFromContext(ctx)
-	exec, status := w.startPlan(ctx, u, ref, repo, request, state.id)
+	repo, request, status := w.explicitRepo(ctx, u.WorkspaceID, rest)
+	var exec workflow.Execution
+	if status == "" {
+		state := conversationFromContext(ctx)
+		exec, status = w.startPlan(ctx, u, ref, repo, request, state.id)
+	}
 	switch status {
 	case "":
 	case planStatusUsage:
@@ -77,24 +80,30 @@ func (w *InboxWorker) planCommand(ctx context.Context, u InboundUpdate, to ChatR
 	return w.reply(ctx, to, workflow.FormatRef(exec.ID)+": đã nhận, đang lập kế hoạch…", "")
 }
 
-// explicitRepo peels a registered owner/repo first word; the repo is "" when
-// the first word is not one. Read errors count as no explicit repo.
-func (w *InboxWorker) explicitRepo(ctx context.Context, workspaceID, rest string) (string, string) {
+// explicitRepo peels an owner/repo first word. A first word that is not
+// owner/repo shaped is part of the request (repo ""). An owner/repo first
+// word must be registered: else the status is planStatusRepoUnknown (as for
+// start_task), never a fall-through to another repo; a read error is
+// planStatusFailed.
+func (w *InboxWorker) explicitRepo(ctx context.Context, workspaceID, rest string) (string, string, string) {
 	rest = strings.TrimSpace(rest)
 	first, tail, _ := strings.Cut(rest, " ")
-	if w.d.LocalTasks == nil || !tenant.ValidRepo(first) {
-		return "", rest
+	if !tenant.ValidRepo(first) {
+		return "", rest, ""
+	}
+	if w.d.LocalTasks == nil {
+		return "", rest, planStatusRepoUnknown
 	}
 	repos, err := w.d.LocalTasks.RegisteredRepos(ctx, workspaceID)
 	if err != nil {
-		return "", rest
+		return "", rest, planStatusFailed
 	}
 	for _, r := range repos {
 		if strings.EqualFold(r, first) {
-			return r, strings.TrimSpace(tail)
+			return r, strings.TrimSpace(tail), ""
 		}
 	}
-	return "", rest
+	return "", rest, planStatusRepoUnknown
 }
 
 // topicTaskRef is the ClickUp task whose topic the update was written in.

@@ -82,6 +82,7 @@ const (
 	ReasonRouteMissing        = "orchestrator_route_missing"
 	ReasonRepoUnresolved      = "repo_unresolved"
 	ReasonExecutorUnavailable = "executor_unavailable"
+	ReasonExecutorInterrupted = "executor_interrupted"
 	ReasonWorkerCancelled     = "worker_cancelled"
 	ReasonWorkerFailed        = "worker_failed"
 	ReasonClarified           = "clarification_answered"
