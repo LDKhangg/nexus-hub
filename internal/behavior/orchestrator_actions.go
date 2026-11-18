@@ -20,7 +20,10 @@ import (
 // a ClickUp draft (REQ-7) on the execution's own ClickUp task, shown in the
 // execution's topic with "Đăng" / "Sửa" / "Huỷ"; the plan task waits until
 // the draft ends: posted is success (the comment id is the evidence),
-// cancelled or expired blocks the task and Evaluate decides. A
+// cancelled, expired or failed with no retry blocks the task and Evaluate
+// decides. Once a draft's post outcome is unknown (it may be on ClickUp),
+// every later clickup.write task of the execution is blocked without a
+// draft, so a replan never leads to a second comment. A
 // telegram.notify task sends one message to the execution's topic. The text
 // is the plan task's title and the bounded results of its dependencies,
 // which the model wrote; it is only data, and the owner sees the exact text
@@ -35,8 +38,16 @@ const (
 	ReasonActionDraftMissing   = "draft_missing"
 	ReasonActionDraftCancelled = "draft_cancelled"
 	ReasonActionDraftExpired   = "draft_expired"
+	ReasonActionDraftFailed    = "draft_failed"
 	ReasonActionNotifyFailed   = "notify_failed"
 	ReasonActionInterrupted    = orchestrator.ReasonExecutorInterrupted
+
+	// ReasonActionDraftUnknown: the draft's post may or may not have
+	// reached ClickUp.
+	ReasonActionDraftUnknown = "draft_outcome_unknown"
+	// ReasonActionDraftUnknownEarlier: an earlier draft of the execution
+	// has an unknown outcome, so no new draft is made.
+	ReasonActionDraftUnknownEarlier = "draft_outcome_unknown_earlier"
 )
 
 // orchestratorActionMaxRunes bounds the text of one action (a ClickUp
@@ -173,9 +184,29 @@ func draftOutcome(d ClickUpDraft) orchestrator.TaskOutcome {
 		return orchestrator.TaskOutcome{Blocked: true, ReasonCode: ReasonActionDraftCancelled}
 	case DraftExpired:
 		return orchestrator.TaskOutcome{Blocked: true, ReasonCode: ReasonActionDraftExpired}
+	case DraftFailedFinal:
+		// The post failed with no retry: dry run or denied keep their own
+		// reason code; an unknown outcome has its own.
+		reason := d.ReasonCode
+		switch {
+		case reason == OutcomeUnknown:
+			reason = ReasonActionDraftUnknown
+		case reason == "":
+			reason = ReasonActionDraftFailed
+		}
+		return orchestrator.TaskOutcome{Blocked: true, ReasonCode: reason}
 	}
-	// pending, posting or failed (the owner may still press "Thử lại").
+	// pending, posting, or failed with "Thử lại" / "Huỷ" shown: the owner
+	// still decides, and the sweep ends it at expiry or when the execution
+	// ends.
 	return orchestrator.TaskOutcome{Wait: draftWaitPrefix + strconv.FormatInt(d.ID, 10)}
+}
+
+// orchestratorUnknownChecker is the optional part of an
+// OrchestratorDraftPort that tells whether an execution already has a draft
+// with an unknown post outcome (ClickUpDrafts).
+type orchestratorUnknownChecker interface {
+	UnknownOutcomeEarlier(ctx context.Context, workspaceID string, executionID int64) (bool, error)
 }
 
 // draft makes the task's ClickUp draft on the execution's own task. The
@@ -191,6 +222,16 @@ func (a *OrchestratorActions) draft(ctx context.Context, run orchestrator.TaskRu
 	text := orchestratorActionText(run)
 	if text == "" {
 		return actionFailed(ReasonActionInvalidText), nil
+	}
+	if u, ok := a.Drafts.(orchestratorUnknownChecker); ok {
+		unknown, err := u.UnknownOutcomeEarlier(ctx, run.WorkspaceID, run.ExecutionID)
+		switch {
+		case errors.Is(err, ErrNotAvailable):
+		case err != nil:
+			return orchestrator.TaskOutcome{}, err
+		case unknown:
+			return orchestrator.TaskOutcome{Blocked: true, ReasonCode: ReasonActionDraftUnknownEarlier}, nil
+		}
 	}
 	chat := ChatRef{WorkspaceID: run.Route.WorkspaceID, IntegrationID: run.Route.IntegrationID, ChatID: run.Route.ChatID, ThreadID: run.Route.ThreadID}
 	if a.Chat != nil {
@@ -236,7 +277,7 @@ func (a *OrchestratorActions) notify(ctx context.Context, run orchestrator.TaskR
 
 // OrchestratorDraftWaker returns the ClickUp draft listener that wakes the
 // run step waiting on an orchestrator draft once it ended (posted,
-// cancelled or expired). A missed wake is repaired by the worker task
+// cancelled, expired, or failed with no retry). A missed wake is repaired by the worker task
 // sweeper.
 func OrchestratorDraftWaker(w LocalTaskWaker) ClickUpDraftListener {
 	return func(ctx context.Context, o ClickUpDraftOutcome) {

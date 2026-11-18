@@ -28,12 +28,19 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND state = 'p
 RETURNING *;
 
 -- name: ClaimClickUpDraftPost :one
--- Atomic: only one confirm of the exact previewed body wins.
-UPDATE public.clickup_drafts SET state = 'posting', reason_code = '', updated_at = now()
-WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND state IN ('pending', 'failed')
-  AND body_sha256 = sqlc.arg(body_sha256) AND preview_message_id = sqlc.arg(preview_message_id)::bigint
-  AND expires_at > sqlc.arg(at_time)::timestamptz
-RETURNING *;
+-- Atomic: only one confirm of the exact previewed body wins. An
+-- orchestrator draft whose execution has ended (or is past its deadline) is
+-- never claimed; the sweep cancels it (review A R-A-2).
+UPDATE public.clickup_drafts d SET state = 'posting', reason_code = '', updated_at = now()
+WHERE d.workspace_id = sqlc.arg(workspace_id) AND d.id = sqlc.arg(id) AND d.state IN ('pending', 'failed')
+  AND d.body_sha256 = sqlc.arg(body_sha256) AND d.preview_message_id = sqlc.arg(preview_message_id)::bigint
+  AND d.expires_at > sqlc.arg(at_time)::timestamptz
+  AND NOT (d.source = 'orchestrator' AND EXISTS (
+    SELECT 1 FROM public.workflow_executions e
+    WHERE e.workspace_id = d.workspace_id AND e.id = d.execution_id
+      AND (e.state IN ('COMPLETED', 'FAILED', 'CANCELLED')
+           OR (e.deadline_at IS NOT NULL AND e.deadline_at <= sqlc.arg(at_time)::timestamptz))))
+RETURNING d.*;
 
 -- name: FinishClickUpDraftPosted :one
 -- reason_code is set when the comment was posted but the status change of
@@ -48,6 +55,15 @@ RETURNING *;
 -- A failed post keeps the body for "Thử lại" until the draft expires.
 UPDATE public.clickup_drafts SET state = 'failed', reason_code = sqlc.arg(reason_code), updated_at = now()
 WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND state = 'posting'
+RETURNING *;
+
+-- name: EndFailedClickUpDraft :one
+-- A post that failed with no safe retry (dry run, unknown outcome, denied)
+-- or whose retry buttons could not be shown ends the draft: the body is
+-- cleared and it can never be posted (review A R-A-1).
+UPDATE public.clickup_drafts SET state = 'failed_final', body = NULL, reason_code = sqlc.arg(reason_code),
+    finished_at = now(), updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND state IN ('posting', 'failed')
 RETURNING *;
 
 -- name: CancelClickUpDraft :one
@@ -81,3 +97,25 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(executio
   AND source = 'orchestrator' AND plan_task_key = sqlc.arg(plan_task_key)
 ORDER BY id DESC
 LIMIT 1;
+
+-- name: CancelEndedExecutionClickUpDrafts :many
+-- Cancels up to limit open orchestrator drafts (pending, or failed with a
+-- retry) whose execution has ended or is past its deadline (review A
+-- R-A-2). A draft that is posting is never touched.
+UPDATE public.clickup_drafts d SET state = 'cancelled', body = NULL, reason_code = 'execution_ended',
+    finished_at = now(), updated_at = now()
+WHERE d.id IN (SELECT c.id FROM public.clickup_drafts c
+               JOIN public.workflow_executions e ON e.workspace_id = c.workspace_id AND e.id = c.execution_id
+               WHERE c.source = 'orchestrator' AND c.state IN ('pending', 'failed')
+                 AND (e.state IN ('COMPLETED', 'FAILED', 'CANCELLED')
+                      OR (e.deadline_at IS NOT NULL AND e.deadline_at <= sqlc.arg(at_time)::timestamptz))
+               ORDER BY c.id LIMIT sqlc.arg(max_rows)::int FOR UPDATE OF c SKIP LOCKED)
+  AND d.state IN ('pending', 'failed')
+RETURNING d.*;
+
+-- name: HasUnknownOutcomeClickUpDraft :one
+-- Whether an orchestrated execution has a draft whose post may or may not
+-- have reached ClickUp (review A R-A-1): no later draft is made for it.
+SELECT EXISTS (SELECT 1 FROM public.clickup_drafts
+               WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id)::bigint
+                 AND source = 'orchestrator' AND state = 'failed_final' AND reason_code = 'unknown_outcome')::boolean;

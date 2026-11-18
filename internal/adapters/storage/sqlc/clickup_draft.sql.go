@@ -52,12 +52,81 @@ func (q *Queries) CancelClickUpDraft(ctx context.Context, arg CancelClickUpDraft
 	return i, err
 }
 
+const cancelEndedExecutionClickUpDrafts = `-- name: CancelEndedExecutionClickUpDrafts :many
+UPDATE public.clickup_drafts d SET state = 'cancelled', body = NULL, reason_code = 'execution_ended',
+    finished_at = now(), updated_at = now()
+WHERE d.id IN (SELECT c.id FROM public.clickup_drafts c
+               JOIN public.workflow_executions e ON e.workspace_id = c.workspace_id AND e.id = c.execution_id
+               WHERE c.source = 'orchestrator' AND c.state IN ('pending', 'failed')
+                 AND (e.state IN ('COMPLETED', 'FAILED', 'CANCELLED')
+                      OR (e.deadline_at IS NOT NULL AND e.deadline_at <= $1::timestamptz))
+               ORDER BY c.id LIMIT $2::int FOR UPDATE OF c SKIP LOCKED)
+  AND d.state IN ('pending', 'failed')
+RETURNING d.id, d.workspace_id, d.integration_id, d.chat_id, d.thread_id, d.task_id, d.parent_comment_id, d.mention_user_ids, d.new_status, d.body, d.body_sha256, d.state, d.source, d.execution_id, d.plan_task_key, d.preview_message_id, d.posted_comment_id, d.reason_code, d.expires_at, d.created_at, d.updated_at, d.finished_at
+`
+
+type CancelEndedExecutionClickUpDraftsParams struct {
+	AtTime  pgtype.Timestamptz
+	MaxRows int32
+}
+
+// Cancels up to limit open orchestrator drafts (pending, or failed with a
+// retry) whose execution has ended or is past its deadline (review A
+// R-A-2). A draft that is posting is never touched.
+func (q *Queries) CancelEndedExecutionClickUpDrafts(ctx context.Context, arg CancelEndedExecutionClickUpDraftsParams) ([]ClickupDraft, error) {
+	rows, err := q.db.Query(ctx, cancelEndedExecutionClickUpDrafts, arg.AtTime, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ClickupDraft
+	for rows.Next() {
+		var i ClickupDraft
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.IntegrationID,
+			&i.ChatID,
+			&i.ThreadID,
+			&i.TaskID,
+			&i.ParentCommentID,
+			&i.MentionUserIds,
+			&i.NewStatus,
+			&i.Body,
+			&i.BodySha256,
+			&i.State,
+			&i.Source,
+			&i.ExecutionID,
+			&i.PlanTaskKey,
+			&i.PreviewMessageID,
+			&i.PostedCommentID,
+			&i.ReasonCode,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const claimClickUpDraftPost = `-- name: ClaimClickUpDraftPost :one
-UPDATE public.clickup_drafts SET state = 'posting', reason_code = '', updated_at = now()
-WHERE workspace_id = $1 AND id = $2 AND state IN ('pending', 'failed')
-  AND body_sha256 = $3 AND preview_message_id = $4::bigint
-  AND expires_at > $5::timestamptz
-RETURNING id, workspace_id, integration_id, chat_id, thread_id, task_id, parent_comment_id, mention_user_ids, new_status, body, body_sha256, state, source, execution_id, plan_task_key, preview_message_id, posted_comment_id, reason_code, expires_at, created_at, updated_at, finished_at
+UPDATE public.clickup_drafts d SET state = 'posting', reason_code = '', updated_at = now()
+WHERE d.workspace_id = $1 AND d.id = $2 AND d.state IN ('pending', 'failed')
+  AND d.body_sha256 = $3 AND d.preview_message_id = $4::bigint
+  AND d.expires_at > $5::timestamptz
+  AND NOT (d.source = 'orchestrator' AND EXISTS (
+    SELECT 1 FROM public.workflow_executions e
+    WHERE e.workspace_id = d.workspace_id AND e.id = d.execution_id
+      AND (e.state IN ('COMPLETED', 'FAILED', 'CANCELLED')
+           OR (e.deadline_at IS NOT NULL AND e.deadline_at <= $5::timestamptz))))
+RETURNING d.id, d.workspace_id, d.integration_id, d.chat_id, d.thread_id, d.task_id, d.parent_comment_id, d.mention_user_ids, d.new_status, d.body, d.body_sha256, d.state, d.source, d.execution_id, d.plan_task_key, d.preview_message_id, d.posted_comment_id, d.reason_code, d.expires_at, d.created_at, d.updated_at, d.finished_at
 `
 
 type ClaimClickUpDraftPostParams struct {
@@ -68,7 +137,9 @@ type ClaimClickUpDraftPostParams struct {
 	AtTime           pgtype.Timestamptz
 }
 
-// Atomic: only one confirm of the exact previewed body wins.
+// Atomic: only one confirm of the exact previewed body wins. An
+// orchestrator draft whose execution has ended (or is past its deadline) is
+// never claimed; the sweep cancels it (review A R-A-2).
 func (q *Queries) ClaimClickUpDraftPost(ctx context.Context, arg ClaimClickUpDraftPostParams) (ClickupDraft, error) {
 	row := q.db.QueryRow(ctx, claimClickUpDraftPost,
 		arg.WorkspaceID,
@@ -77,6 +148,52 @@ func (q *Queries) ClaimClickUpDraftPost(ctx context.Context, arg ClaimClickUpDra
 		arg.PreviewMessageID,
 		arg.AtTime,
 	)
+	var i ClickupDraft
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.IntegrationID,
+		&i.ChatID,
+		&i.ThreadID,
+		&i.TaskID,
+		&i.ParentCommentID,
+		&i.MentionUserIds,
+		&i.NewStatus,
+		&i.Body,
+		&i.BodySha256,
+		&i.State,
+		&i.Source,
+		&i.ExecutionID,
+		&i.PlanTaskKey,
+		&i.PreviewMessageID,
+		&i.PostedCommentID,
+		&i.ReasonCode,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
+const endFailedClickUpDraft = `-- name: EndFailedClickUpDraft :one
+UPDATE public.clickup_drafts SET state = 'failed_final', body = NULL, reason_code = $1,
+    finished_at = now(), updated_at = now()
+WHERE workspace_id = $2 AND id = $3 AND state IN ('posting', 'failed')
+RETURNING id, workspace_id, integration_id, chat_id, thread_id, task_id, parent_comment_id, mention_user_ids, new_status, body, body_sha256, state, source, execution_id, plan_task_key, preview_message_id, posted_comment_id, reason_code, expires_at, created_at, updated_at, finished_at
+`
+
+type EndFailedClickUpDraftParams struct {
+	ReasonCode  string
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+// A post that failed with no safe retry (dry run, unknown outcome, denied)
+// or whose retry buttons could not be shown ends the draft: the body is
+// cleared and it can never be posted (review A R-A-1).
+func (q *Queries) EndFailedClickUpDraft(ctx context.Context, arg EndFailedClickUpDraftParams) (ClickupDraft, error) {
+	row := q.db.QueryRow(ctx, endFailedClickUpDraft, arg.ReasonCode, arg.WorkspaceID, arg.ID)
 	var i ClickupDraft
 	err := row.Scan(
 		&i.ID,
@@ -342,6 +459,26 @@ func (q *Queries) GetOrchestratorClickUpDraft(ctx context.Context, arg GetOrches
 		&i.FinishedAt,
 	)
 	return i, err
+}
+
+const hasUnknownOutcomeClickUpDraft = `-- name: HasUnknownOutcomeClickUpDraft :one
+SELECT EXISTS (SELECT 1 FROM public.clickup_drafts
+               WHERE workspace_id = $1 AND execution_id = $2::bigint
+                 AND source = 'orchestrator' AND state = 'failed_final' AND reason_code = 'unknown_outcome')::boolean
+`
+
+type HasUnknownOutcomeClickUpDraftParams struct {
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+}
+
+// Whether an orchestrated execution has a draft whose post may or may not
+// have reached ClickUp (review A R-A-1): no later draft is made for it.
+func (q *Queries) HasUnknownOutcomeClickUpDraft(ctx context.Context, arg HasUnknownOutcomeClickUpDraftParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasUnknownOutcomeClickUpDraft, arg.WorkspaceID, arg.ExecutionID)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const insertClickUpDraft = `-- name: InsertClickUpDraft :one

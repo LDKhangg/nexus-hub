@@ -204,3 +204,37 @@ func (s *ClickUpDraftStore) ReclaimStalePosts(ctx context.Context, before time.T
 	}
 	return draftRows(s.q.ReclaimStaleClickUpDraftPosts(ctx, sqlc.ReclaimStaleClickUpDraftPostsParams{Before: ts(before), MaxRows: int32(limit)}))
 }
+
+// EndFailedDraft ends a posting or failed draft whose post cannot be safely
+// retried (state failed_final, body cleared); ErrConflict otherwise.
+func (s *ClickUpDraftStore) EndFailedDraft(ctx context.Context, workspaceID string, id int64, reasonCode string) (behavior.ClickUpDraft, error) {
+	ws, err := parseDBID(workspaceID)
+	if err != nil {
+		return behavior.ClickUpDraft{}, invalid("workspace_id")
+	}
+	return draftRow(s.q.EndFailedClickUpDraft(ctx, sqlc.EndFailedClickUpDraftParams{ReasonCode: reasonCode, WorkspaceID: ws, ID: id}))
+}
+
+// CancelEndedExecutionDrafts cancels up to limit open orchestrator drafts
+// whose execution has ended or is past its deadline at now.
+func (s *ClickUpDraftStore) CancelEndedExecutionDrafts(ctx context.Context, now time.Time, limit int) ([]behavior.ClickUpDraft, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	return draftRows(s.q.CancelEndedExecutionClickUpDrafts(ctx, sqlc.CancelEndedExecutionClickUpDraftsParams{AtTime: ts(now), MaxRows: int32(limit)}))
+}
+
+// HasUnknownOutcomeDraft reports whether an orchestrated execution has a
+// draft that ended with an unknown post outcome.
+func (s *ClickUpDraftStore) HasUnknownOutcomeDraft(ctx context.Context, workspaceID string, executionID int64) (bool, error) {
+	ws, err := parseDBID(workspaceID)
+	if err != nil {
+		return false, invalid("workspace_id")
+	}
+	if executionID <= 0 {
+		return false, nil
+	}
+	return s.q.HasUnknownOutcomeClickUpDraft(ctx, sqlc.HasUnknownOutcomeClickUpDraftParams{WorkspaceID: ws, ExecutionID: executionID})
+}
+
+var _ behavior.ClickUpDraftEndStore = (*ClickUpDraftStore)(nil)

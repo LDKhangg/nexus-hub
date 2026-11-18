@@ -555,7 +555,12 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 		return w.orchestratorGateCallback(ctx, u, data, a, actor)
 	}
 	if a.Kind == ApprovalClickUpDraft {
-		if a.Decision != "" || !w.now().Before(a.ExpiresAt) {
+		// A press whose decision was saved but whose claim or cancel was not
+		// (a storage error or a crash) is replayed by the same owner; the
+		// handler checks the draft is still open with the same binding.
+		replay := a.DecidedBy == actor && (a.Decision == DecisionApproved && data.Kind == CallbackApprove ||
+			a.Decision == DecisionRejected && data.Kind == CallbackReject)
+		if a.Decision != "" && !replay || !w.now().Before(a.ExpiresAt) {
 			return msgStale, "stale", true
 		}
 		if w.d.ClickUpDrafts == nil {
@@ -631,6 +636,10 @@ func (w *InboxWorker) freeText(ctx context.Context, u InboundUpdate, to ChatRef,
 		})
 	}
 	cancel()
+	if errors.Is(err, ErrDraftRetry) && u.Attempts < w.settings.MaxAttempts {
+		// Replay-safe draft step failed: keep the staged reply, run it again.
+		return outcome{code: "storage", retry: true}
+	}
 	text, code := handlerText(reply, err)
 	// Handed on or refused: the staged text is never kept for a retry.
 	if cerr := w.d.Approvals.ClearPendingAnswer(ctx, u.WorkspaceID, a.ID); cerr != nil {

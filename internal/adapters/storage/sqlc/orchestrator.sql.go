@@ -399,7 +399,7 @@ WHERE s.kind = 'orchestrator.run_task' AND s.state = 'WAITING'
                      jsonb_build_object('ref', 'job_owner:' || j.id::text), true), false))
     OR EXISTS (SELECT 1 FROM public.clickup_drafts d
                WHERE d.workspace_id = s.workspace_id AND d.execution_id = s.execution_id
-                 AND d.state IN ('posted', 'cancelled', 'expired')
+                 AND d.state IN ('posted', 'cancelled', 'expired', 'failed_final')
                  AND COALESCE(jsonb_path_exists(s.checkpoint,
                      '$.references[*] ? (@.kind == "orchestrator_wait" && @.reference_id == $ref)',
                      jsonb_build_object('ref', 'task:draft:' || d.id::text), true), false))
@@ -427,7 +427,8 @@ type ListOrchestratorStepsToWakeRow struct {
 // over (the step's orchestrator_wake_at reference, unix seconds); the
 // worker job the step waits on for the owner (job_owner:<id>) was retried
 // and runs again; or the ClickUp draft the step waits on (task:draft:<id>)
-// has ended. Executions past their deadline are left to the reconciler, and
+// has ended (posted, cancelled, expired or failed_final). Executions past
+// their deadline are left to the reconciler, and
 // one with a live queue row is already running.
 func (q *Queries) ListOrchestratorStepsToWake(ctx context.Context, arg ListOrchestratorStepsToWakeParams) ([]ListOrchestratorStepsToWakeRow, error) {
 	rows, err := q.db.Query(ctx, listOrchestratorStepsToWake, arg.AtTime, arg.NowUnix, arg.RowLimit)

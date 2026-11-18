@@ -20,6 +20,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
 	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
+	"github.com/LDKhangg/nexus-hub/internal/workflow"
 )
 
 // This file is the ClickUp draft-and-confirm flow (Phase 10 REQ-7). Every
@@ -43,7 +44,21 @@ const (
 	DraftCancelled = "cancelled"
 	DraftExpired   = "expired"
 	DraftFailed    = "failed" // the post failed; "Thử lại" may post it
+
+	// DraftFailedFinal: the post failed and cannot be safely retried (dry
+	// run, unknown outcome, denied) or its retry could not be offered. It is
+	// terminal: the body is cleared.
+	DraftFailedFinal = "failed_final"
 )
+
+// ReasonDraftExecutionEnded is the reason code of an orchestrator draft
+// cancelled because its execution ended.
+const ReasonDraftExecutionEnded = "execution_ended"
+
+// ErrDraftRetry asks the inbox to process the same update again later,
+// keeping the staged reply: a storage or send step failed and a replay of
+// the same reply is safe (it revises once and sends the missing preview).
+var ErrDraftRetry = errors.New("behavior: clickup draft retry later")
 
 // ClickUp draft sources.
 const (
@@ -139,6 +154,22 @@ type ClickUpDraftStore interface {
 	ReclaimStalePosts(ctx context.Context, before time.Time, limit int) ([]ClickUpDraft, error)
 }
 
+// ClickUpDraftEndStore is the optional part of a ClickUpDraftStore that
+// ends drafts for good (review A). A store without it keeps the older
+// behaviour: a failure without retry stays failed until it expires, and
+// drafts of ended executions are left to expiry.
+type ClickUpDraftEndStore interface {
+	// EndFailedDraft moves a posting or failed draft to failed_final and
+	// clears its body; ErrConflict otherwise.
+	EndFailedDraft(ctx context.Context, workspaceID string, id int64, reasonCode string) (ClickUpDraft, error)
+	// CancelEndedExecutionDrafts cancels up to limit pending or failed
+	// orchestrator drafts whose execution ended or is past its deadline.
+	CancelEndedExecutionDrafts(ctx context.Context, now time.Time, limit int) ([]ClickUpDraft, error)
+	// HasUnknownOutcomeDraft reports whether an orchestrated execution has a
+	// draft that ended with an unknown post outcome.
+	HasUnknownOutcomeDraft(ctx context.Context, workspaceID string, executionID int64) (bool, error)
+}
+
 // DraftRequest asks for one ClickUp draft and its preview.
 type DraftRequest struct {
 	// Chat is where the preview goes (normally the task topic).
@@ -154,10 +185,14 @@ type DraftRequest struct {
 }
 
 // ClickUpDraftOutcome is a draft's terminal state, reported to listeners.
+// State is DraftPosted, DraftCancelled, DraftExpired or DraftFailed. A
+// listener never sees a failure that may still be retried: DraftFailed here
+// always means the draft ended with no retry (ReasonCode says why, for
+// example unknown_outcome).
 type ClickUpDraftOutcome struct {
 	WorkspaceID     string
 	DraftID         int64
-	State           string // DraftPosted, DraftCancelled or DraftExpired
+	State           string
 	Source          string
 	ExecutionID     int64
 	PlanTaskKey     string
@@ -279,7 +314,7 @@ func NewClickUpDrafts(d ClickUpDraftDeps, s ClickUpDraftSettings) (*ClickUpDraft
 }
 
 // OnFinished adds a listener for terminal states (posted, cancelled,
-// expired). Call it before the flow runs.
+// expired, and failed with no retry). Call it before the flow runs.
 func (c *ClickUpDrafts) OnFinished(fn ClickUpDraftListener) {
 	if fn == nil {
 		return
@@ -293,8 +328,12 @@ func (c *ClickUpDrafts) finished(ctx context.Context, d ClickUpDraft) {
 	c.mu.Lock()
 	ls := slices.Clone(c.listeners)
 	c.mu.Unlock()
+	state := d.State
+	if state == DraftFailedFinal {
+		state = DraftFailed
+	}
 	o := ClickUpDraftOutcome{
-		WorkspaceID: d.WorkspaceID, DraftID: d.ID, State: d.State, Source: d.Source, ExecutionID: d.ExecutionID,
+		WorkspaceID: d.WorkspaceID, DraftID: d.ID, State: state, Source: d.Source, ExecutionID: d.ExecutionID,
 		PlanTaskKey: d.PlanTaskKey, TaskID: d.TaskID, PostedCommentID: d.PostedCommentID, ReasonCode: d.ReasonCode,
 	}
 	for _, fn := range ls {
@@ -541,6 +580,10 @@ func draftCancelledText(d ClickUpDraft) string {
 	return fmt.Sprintf("🚫 Đã huỷ bản nháp D-%d, không đăng lên ClickUp.", d.ID)
 }
 
+func draftEndedText(d ClickUpDraft) string {
+	return fmt.Sprintf("🚫 Đã huỷ bản nháp D-%d vì %s đã kết thúc, không đăng lên ClickUp.", d.ID, workflow.FormatRef(d.ExecutionID))
+}
+
 func draftExpiredText(d ClickUpDraft) string {
 	return fmt.Sprintf("⌛ Bản nháp D-%d đã hết hạn, không đăng lên ClickUp.", d.ID)
 }
@@ -648,7 +691,7 @@ func (c *ClickUpDrafts) HandleDraftPress(ctx context.Context, p DraftPress) (str
 			c.closeApproval(ctx, p.WorkspaceID, a.Nonce, p.Actor)
 			return msgDraftStale, "stale", true
 		}
-		return msgFailed, "storage", false
+		return msgFailed, "retry", false
 	}
 	if p.MessageID <= 0 || d.PreviewMessageID != p.MessageID {
 		c.closeApproval(ctx, p.WorkspaceID, a.Nonce, p.Actor)
@@ -660,8 +703,8 @@ func (c *ClickUpDrafts) HandleDraftPress(ctx context.Context, p DraftPress) (str
 			c.closeApproval(ctx, p.WorkspaceID, a.Nonce, p.Actor)
 			return msgDraftStale, "stale", true
 		}
-		if _, err := c.d.Approvals.Decide(ctx, p.WorkspaceID, a.Nonce, DecisionApproved, "", p.Actor, c.now()); err != nil {
-			return msgDraftStale, "stale", true
+		if toast, code, remove, ok := c.decide(ctx, p, DecisionApproved); !ok {
+			return toast, code, remove
 		}
 		return c.confirm(ctx, d, p.MessageID)
 	case CallbackReject:
@@ -669,15 +712,16 @@ func (c *ClickUpDrafts) HandleDraftPress(ctx context.Context, p DraftPress) (str
 			c.closeApproval(ctx, p.WorkspaceID, a.Nonce, p.Actor)
 			return msgDraftStale, "stale", true
 		}
-		if _, err := c.d.Approvals.Decide(ctx, p.WorkspaceID, a.Nonce, DecisionRejected, "", p.Actor, c.now()); err != nil {
-			return msgDraftStale, "stale", true
+		if toast, code, remove, ok := c.decide(ctx, p, DecisionRejected); !ok {
+			return toast, code, remove
 		}
 		cd, err := c.d.Store.CancelDraft(ctx, p.WorkspaceID, d.ID)
 		if err != nil {
-			if errors.Is(err, ErrConflict) {
+			if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
 				return msgDraftStale, "stale", true
 			}
-			return msgFailed, "storage", false
+			// The rejection is saved; the inbox replays this press.
+			return msgFailed, "retry", false
 		}
 		log.Printf("clickup draft %d: cancelled by owner", d.ID)
 		c.editPreview(ctx, cd, draftCancelledText(cd), nil)
@@ -691,11 +735,43 @@ func (c *ClickUpDrafts) HandleDraftPress(ctx context.Context, p DraftPress) (str
 			if errors.Is(err, ErrNotFound) {
 				return msgDraftStale, "stale", true
 			}
-			return msgFailed, "storage", false
+			return msgFailed, "retry", false
 		}
 		return msgDraftEditHint, "", false
 	}
 	return msgNotAvailable, "not_available", false
+}
+
+// decide records the press's decision once. A replay of the same press by
+// the same owner (the decision was saved, but the claim or cancel after it
+// was not) continues: the caller has already checked that the draft is
+// still open with the same body and preview, and the claim or cancel stays
+// conditional, so nothing posts twice. ok=false returns the press's result.
+func (c *ClickUpDrafts) decide(ctx context.Context, p DraftPress, want Decision) (toast, code string, remove, ok bool) {
+	a := p.Approval
+	if a.Decision == "" {
+		_, err := c.d.Approvals.Decide(ctx, p.WorkspaceID, a.Nonce, want, "", p.Actor, c.now())
+		switch {
+		case err == nil:
+			return "", "", false, true
+		case errors.Is(err, ErrExpired), errors.Is(err, ErrNotFound):
+			return msgDraftStale, "stale", true, false
+		case !errors.Is(err, ErrDecided):
+			return msgFailed, "retry", false, false
+		}
+		// Decided meanwhile (a concurrent press or a replay): reload it.
+		a, err = c.d.Approvals.GetApprovalByNonce(ctx, p.WorkspaceID, a.Nonce)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return msgDraftStale, "stale", true, false
+			}
+			return msgFailed, "retry", false, false
+		}
+	}
+	if a.Decision != want || a.DecidedBy != p.Actor {
+		return msgDraftStale, "stale", true, false
+	}
+	return "", "", false, true
 }
 
 // confirm claims the draft for this exact body and preview, posts it and
@@ -706,7 +782,9 @@ func (c *ClickUpDrafts) confirm(ctx context.Context, d ClickUpDraft, previewMess
 		if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
 			return msgDraftStale, "stale", true
 		}
-		return msgFailed, "storage", false
+		// The approval is decided but the draft is unchanged: the inbox
+		// replays this press, and the claim is still conditional.
+		return msgFailed, "retry", false
 	}
 	if c.post(ctx, claimed) {
 		return msgDraftPosted, "", false
@@ -790,32 +868,44 @@ func resultCodeOr(res tools.CallResult) string {
 	return resultCode(res)
 }
 
-// fail records a failed post and shows "❌ Không đăng được: <code>", with
-// "Thử lại" / "Huỷ" when a retry cannot post twice.
+// fail records a failed post and shows "❌ Không đăng được: <code>". When a
+// retry cannot post twice, the preview gets "Thử lại" / "Huỷ" and the draft
+// waits for the owner. Otherwise (dry run, unknown outcome, denied), or when
+// the retry buttons cannot be shown, the draft ends (failed_final, body
+// cleared) and listeners are told.
 func (c *ClickUpDrafts) fail(ctx context.Context, d ClickUpDraft, code string, retry bool) bool {
 	if !codeRe.MatchString(code) {
 		code = "tool_error"
 	}
+	text := fmt.Sprintf("❌ Không đăng được: %s (D-%d)", code, d.ID)
+	if !retry {
+		c.endFailed(ctx, d, code, text+"\nKhông thử lại tự động để tránh đăng hai lần.")
+		return false
+	}
 	failed, err := c.d.Store.FailDraft(ctx, d.WorkspaceID, d.ID, code)
 	if err != nil {
+		// Still posting: the stale-post sweep finishes it with the same key.
 		log.Printf("clickup draft %d: failure not saved", d.ID)
 		return false
 	}
 	log.Printf("clickup draft %d: post failed (%s)", d.ID, code)
-	text := fmt.Sprintf("❌ Không đăng được: %s (D-%d)", code, d.ID)
-	if !retry {
-		text += "\nKhông thử lại tự động để tránh đăng hai lần."
-		c.editPreview(ctx, failed, text, nil)
-		return false
+	if !c.offerRetry(ctx, failed, text) {
+		// The owner could not be given "Thử lại" / "Huỷ": end the draft so it
+		// never waits where nobody can act on it.
+		c.endFailed(ctx, failed, code, text)
 	}
+	return false
+}
+
+// offerRetry shows the failure with "Thử lại" / "Huỷ" and binds the draft
+// to the message that carries them. It reports whether the buttons work.
+func (c *ClickUpDrafts) offerRetry(ctx context.Context, failed ClickUpDraft, text string) bool {
 	ap, err := c.newApproval(ctx, failed, "retry")
 	if err != nil {
-		c.editPreview(ctx, failed, text, nil)
 		return false
 	}
 	row, err := encodeButtons(ap.Nonce, btnDraftRetry, CallbackApprove, btnDraftCancel, CallbackReject)
 	if err != nil {
-		c.editPreview(ctx, failed, text, nil)
 		return false
 	}
 	msgID := failed.PreviewMessageID
@@ -826,49 +916,115 @@ func (c *ClickUpDrafts) fail(ctx context.Context, d ClickUpDraft, code string, r
 		if serr != nil {
 			return false
 		}
-		msgID = id
 		if err := c.d.Store.SetDraftPreview(ctx, failed.WorkspaceID, failed.ID, id); err != nil {
+			rctx, cancel := context.WithTimeout(ctx, c.s.RequestTimeout)
+			_ = c.d.Messenger.RemoveButtons(rctx, failed.Chat(), id)
+			cancel()
 			return false
 		}
+		msgID = id
 	}
 	if msgID > 0 {
 		if err := c.d.Approvals.SetApprovalMessage(ctx, failed.WorkspaceID, ap.ID, msgID); err != nil {
-			log.Printf("clickup draft %d: retry buttons not bound", d.ID)
+			// A press is still checked against the draft's preview id.
+			log.Printf("clickup draft %d: retry buttons not bound", failed.ID)
 		}
 	}
-	return false
+	return true
+}
+
+// endFailed ends a posting or failed draft with no retry (unposted, or with
+// an unknown outcome): its body is cleared, the preview shows text without
+// buttons, and listeners get the failed outcome with its reason code.
+func (c *ClickUpDrafts) endFailed(ctx context.Context, d ClickUpDraft, code, text string) {
+	var (
+		ended ClickUpDraft
+		err   error
+	)
+	if es, ok := c.d.Store.(ClickUpDraftEndStore); ok {
+		ended, err = es.EndFailedDraft(ctx, d.WorkspaceID, d.ID, code)
+	} else {
+		ended, err = c.d.Store.FailDraft(ctx, d.WorkspaceID, d.ID, code)
+	}
+	if err != nil {
+		log.Printf("clickup draft %d: failure not saved", d.ID)
+		return
+	}
+	log.Printf("clickup draft %d: post failed for good (%s)", d.ID, code)
+	c.editPreview(ctx, ended, text, nil)
+	c.finished(ctx, ended)
+}
+
+// UnknownOutcomeEarlier reports whether an orchestrated execution already
+// has a draft whose post outcome is unknown; ErrNotAvailable when the store
+// cannot tell.
+func (c *ClickUpDrafts) UnknownOutcomeEarlier(ctx context.Context, workspaceID string, executionID int64) (bool, error) {
+	es, ok := c.d.Store.(ClickUpDraftEndStore)
+	if !ok {
+		return false, ErrNotAvailable
+	}
+	return es.HasUnknownOutcomeDraft(ctx, workspaceID, executionID)
 }
 
 // HandleDraftReply replaces a pending draft's text with the owner's reply
 // to its preview ("Sửa"); the old buttons stop working and a new preview is
-// sent.
+// sent. The draft is revised before the approval is closed, so a storage
+// error or crash never leaves the draft without working buttons: an error
+// before the revise returns ErrDraftRetry (the inbox keeps the reply and
+// runs it again), and a replay after the revise only sends the missing
+// preview.
 func (c *ClickUpDrafts) HandleDraftReply(ctx context.Context, r DraftReply) (string, error) {
+	body, berr := c.draftBody(r.Text)
 	d, pl, err := c.boundDraft(ctx, r.WorkspaceID, r.IntegrationID, r.ChatID, r.Approval)
+	if errors.Is(err, ErrDecided) && berr == nil && pl.DraftID > 0 && pl.Purpose == "preview" {
+		// A replay: this reply's revise was saved but its preview was not.
+		nd, gerr := c.d.Store.GetDraft(ctx, r.WorkspaceID, pl.DraftID)
+		if gerr != nil && !errors.Is(gerr, ErrNotFound) {
+			return "", ErrDraftRetry
+		}
+		if gerr == nil && nd.State == DraftPending && nd.PreviewMessageID == 0 && nd.BodySHA256 == draftHash(body) &&
+			nd.WorkspaceID == r.WorkspaceID && nd.IntegrationID == r.IntegrationID && nd.ChatID == r.ChatID &&
+			nd.ExpiresAt.After(c.now()) {
+			return c.showRevised(ctx, r, nd, r.Approval.TelegramMessageID)
+		}
+	}
 	if err != nil {
-		return "", err
+		if errors.Is(err, ErrDecided) {
+			return "", err
+		}
+		return "", ErrDraftRetry
 	}
 	if pl.Purpose != "preview" || d.State != DraftPending {
 		return "", ErrDecided
 	}
-	body, err := c.draftBody(r.Text)
-	if err != nil {
+	if berr != nil {
 		return "Nội dung mới trống hoặc quá dài (tối đa 8000 ký tự).", nil
 	}
-	if _, err := c.d.Approvals.Decide(ctx, r.WorkspaceID, r.Approval.Nonce, DecisionAnswered, "", r.Actor, c.now()); err != nil {
-		return "", err
-	}
-	old := d
 	nd, err := c.d.Store.ReviseDraft(ctx, r.WorkspaceID, d.ID, d.BodySHA256, body, draftHash(body), c.now())
 	if err != nil {
 		if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
 			return "", ErrDecided
 		}
-		return "", err
+		return "", ErrDraftRetry
 	}
-	c.editPreview(ctx, old, fmt.Sprintf("✏️ Bản nháp D-%d đã được sửa; xem bản mới bên dưới.", d.ID), nil)
+	return c.showRevised(ctx, r, nd, d.PreviewMessageID)
+}
+
+// showRevised marks the old preview as replaced, sends the revised draft's
+// preview and then closes the reply's approval (the old buttons are already
+// dead: they name the old body). A preview that was not sent returns
+// ErrDraftRetry; the replay sends it.
+func (c *ClickUpDrafts) showRevised(ctx context.Context, r DraftReply, nd ClickUpDraft, oldPreviewID int64) (string, error) {
+	old := nd
+	old.PreviewMessageID = oldPreviewID
+	c.editPreview(ctx, old, fmt.Sprintf("✏️ Bản nháp D-%d đã được sửa; xem bản mới bên dưới.", nd.ID), nil)
 	if err := c.sendPreview(ctx, nd); err != nil {
-		log.Printf("clickup draft %d: new preview not sent (%s)", d.ID, sendCode(err))
-		return "", err
+		log.Printf("clickup draft %d: new preview not sent (%s)", nd.ID, sendCode(err))
+		return "", ErrDraftRetry
+	}
+	if _, err := c.d.Approvals.Decide(ctx, r.WorkspaceID, r.Approval.Nonce, DecisionAnswered, "", r.Actor, c.now()); err != nil &&
+		!errors.Is(err, ErrDecided) && !errors.Is(err, ErrExpired) && !errors.Is(err, ErrNotFound) {
+		log.Printf("clickup draft %d: old reply approval not closed", nd.ID)
 	}
 	return msgDraftRevised, nil
 }
@@ -893,8 +1049,9 @@ func (c *ClickUpDrafts) Run(ctx context.Context) error {
 }
 
 // Sweep expires overdue pending and failed drafts (their bodies are
-// cleared, nothing is posted) and finishes posts left in posting by a crash
-// with the same idempotency key.
+// cleared, nothing is posted), cancels open orchestrator drafts of ended
+// executions, and finishes posts left in posting by a crash with the same
+// idempotency key.
 func (c *ClickUpDrafts) Sweep(ctx context.Context) error {
 	const batch = 50
 	for {
@@ -911,6 +1068,9 @@ func (c *ClickUpDrafts) Sweep(ctx context.Context) error {
 			break
 		}
 	}
+	if err := c.cancelEndedExecutionDrafts(ctx); err != nil {
+		return err
+	}
 	stale, err := c.d.Store.ReclaimStalePosts(ctx, c.now().Add(-c.s.StalePost), 20)
 	if err != nil {
 		return err
@@ -920,4 +1080,31 @@ func (c *ClickUpDrafts) Sweep(ctx context.Context) error {
 		c.post(ctx, d)
 	}
 	return nil
+}
+
+// cancelEndedExecutionDrafts cancels the open (pending, or failed with a
+// retry) orchestrator drafts of executions that completed, failed, were
+// cancelled or are past their deadline (review A R-A-2). A draft that is
+// posting is left alone; the claim already refuses such drafts, so the
+// window between the execution's end and this sweep posts nothing.
+func (c *ClickUpDrafts) cancelEndedExecutionDrafts(ctx context.Context) error {
+	es, ok := c.d.Store.(ClickUpDraftEndStore)
+	if !ok {
+		return nil
+	}
+	const batch = 50
+	for {
+		list, err := es.CancelEndedExecutionDrafts(ctx, c.now(), batch)
+		if err != nil {
+			return err
+		}
+		for _, d := range list {
+			log.Printf("clickup draft %d: cancelled, execution %d ended", d.ID, d.ExecutionID)
+			c.editPreview(ctx, d, draftEndedText(d), nil)
+			c.finished(ctx, d)
+		}
+		if len(list) < batch {
+			return nil
+		}
+	}
 }
