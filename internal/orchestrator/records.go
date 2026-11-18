@@ -56,6 +56,8 @@ type PlanTaskRecord struct {
 	Priority     string
 	Complexity   string
 	Executor     string
+	// Merge is the target of a github.merge task; nil for other tasks.
+	Merge        *MergeTarget
 	State        string
 	ResultStepID string
 	Result       json.RawMessage

@@ -34,3 +34,33 @@ FOR UPDATE;
 UPDATE public.approvals SET consumed_at = now(), updated_at = now()
 WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND kind = 'policy_gate'
   AND decision = 'approved' AND consumed_at IS NULL AND expires_at > sqlc.arg(at_time)::timestamptz;
+
+-- name: GetPolicyGateApproval :one
+-- One policy gate with its decision, binding and message (ids only).
+SELECT id, nonce, decision, expires_at, consumed_at, COALESCE(policy_action, '')::text AS policy_action,
+       COALESCE(resource_key, '')::text AS resource_key, COALESCE(input_sha256, '')::text AS input_sha256,
+       COALESCE(execution_id, 0)::bigint AS execution_id, COALESCE(telegram_message_id, 0)::bigint AS telegram_message_id,
+       payload, COALESCE(decided_by, '')::text AS decided_by
+FROM public.approvals
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND kind = 'policy_gate';
+
+-- name: SetPolicyGateMessage :execrows
+-- Stores where the gate's approval message was sent (chat, topic, message).
+UPDATE public.approvals SET telegram_message_id = sqlc.arg(message_id)::bigint, payload = sqlc.arg(payload), updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id) AND kind = 'policy_gate';
+
+-- name: DecidePolicyGateApproval :one
+-- Atomic: only an open, unexpired gate is decided, once; records the
+-- Telegram actor and the internal user who decided.
+UPDATE public.approvals SET decision = sqlc.arg(decision)::text, decided_by = sqlc.arg(decided_by)::text,
+    decided_user_id = sqlc.narg(decided_user_id), decided_at = now(), updated_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND nonce = sqlc.arg(nonce) AND kind = 'policy_gate'
+  AND decision IS NULL AND expires_at > sqlc.arg(at_time)::timestamptz
+RETURNING id, COALESCE(execution_id, 0)::bigint AS execution_id;
+
+-- name: GetWorkspaceOwnerMember :one
+-- The workspace member with role owner (the policy gate approver).
+SELECT user_id FROM public.workspace_members
+WHERE workspace_id = sqlc.arg(workspace_id) AND role = 'owner'
+ORDER BY created_at, user_id
+LIMIT 1;

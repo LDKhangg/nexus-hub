@@ -57,6 +57,30 @@ func (e Effect) Valid() bool {
 	return false
 }
 
+// rank orders effects by strictness: allow < approval_required < deny. An
+// effect outside the closed set ranks as deny.
+func (e Effect) rank() int {
+	switch e {
+	case EffectAllow:
+		return 0
+	case EffectApprovalRequired:
+		return 1
+	}
+	return 2
+}
+
+// Stricter returns the stricter of a and b (deny > approval_required >
+// allow); an invalid effect counts as deny.
+func Stricter(a, b Effect) Effect {
+	if !a.Valid() || !b.Valid() {
+		return EffectDeny
+	}
+	if b.rank() > a.rank() {
+		return b
+	}
+	return a
+}
+
 // Tier is the permission tier of an action (same values as tenant.Tier).
 type Tier string
 

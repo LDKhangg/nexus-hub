@@ -510,6 +510,8 @@ type OrchestratorPlanTask struct {
 	EvidenceRefs []byte
 	CreatedAt    pgtype.Timestamptz
 	UpdatedAt    pgtype.Timestamptz
+	// github.merge task: {repo, number, head_sha}; NULL for other tasks.
+	MergeTarget []byte
 }
 
 // Where the messages of an orchestrated task go, and its explicit repo; ids only.

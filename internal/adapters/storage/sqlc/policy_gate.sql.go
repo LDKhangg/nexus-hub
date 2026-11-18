@@ -86,6 +86,44 @@ func (q *Queries) CreatePolicyGateApproval(ctx context.Context, arg CreatePolicy
 	return i, err
 }
 
+const decidePolicyGateApproval = `-- name: DecidePolicyGateApproval :one
+UPDATE public.approvals SET decision = $1::text, decided_by = $2::text,
+    decided_user_id = $3, decided_at = now(), updated_at = now()
+WHERE workspace_id = $4 AND nonce = $5 AND kind = 'policy_gate'
+  AND decision IS NULL AND expires_at > $6::timestamptz
+RETURNING id, COALESCE(execution_id, 0)::bigint AS execution_id
+`
+
+type DecidePolicyGateApprovalParams struct {
+	Decision      string
+	DecidedBy     string
+	DecidedUserID pgtype.UUID
+	WorkspaceID   pgtype.UUID
+	Nonce         string
+	AtTime        pgtype.Timestamptz
+}
+
+type DecidePolicyGateApprovalRow struct {
+	ID          int64
+	ExecutionID int64
+}
+
+// Atomic: only an open, unexpired gate is decided, once; records the
+// Telegram actor and the internal user who decided.
+func (q *Queries) DecidePolicyGateApproval(ctx context.Context, arg DecidePolicyGateApprovalParams) (DecidePolicyGateApprovalRow, error) {
+	row := q.db.QueryRow(ctx, decidePolicyGateApproval,
+		arg.Decision,
+		arg.DecidedBy,
+		arg.DecidedUserID,
+		arg.WorkspaceID,
+		arg.Nonce,
+		arg.AtTime,
+	)
+	var i DecidePolicyGateApprovalRow
+	err := row.Scan(&i.ID, &i.ExecutionID)
+	return i, err
+}
+
 const getOpenPolicyGateApproval = `-- name: GetOpenPolicyGateApproval :one
 SELECT id, nonce, expires_at, COALESCE(execution_id, 0)::bigint AS execution_id
 FROM public.approvals
@@ -124,6 +162,71 @@ func (q *Queries) GetOpenPolicyGateApproval(ctx context.Context, arg GetOpenPoli
 		&i.ExecutionID,
 	)
 	return i, err
+}
+
+const getPolicyGateApproval = `-- name: GetPolicyGateApproval :one
+SELECT id, nonce, decision, expires_at, consumed_at, COALESCE(policy_action, '')::text AS policy_action,
+       COALESCE(resource_key, '')::text AS resource_key, COALESCE(input_sha256, '')::text AS input_sha256,
+       COALESCE(execution_id, 0)::bigint AS execution_id, COALESCE(telegram_message_id, 0)::bigint AS telegram_message_id,
+       payload, COALESCE(decided_by, '')::text AS decided_by
+FROM public.approvals
+WHERE workspace_id = $1 AND id = $2 AND kind = 'policy_gate'
+`
+
+type GetPolicyGateApprovalParams struct {
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+type GetPolicyGateApprovalRow struct {
+	ID                int64
+	Nonce             string
+	Decision          pgtype.Text
+	ExpiresAt         pgtype.Timestamptz
+	ConsumedAt        pgtype.Timestamptz
+	PolicyAction      string
+	ResourceKey       string
+	InputSha256       string
+	ExecutionID       int64
+	TelegramMessageID int64
+	Payload           []byte
+	DecidedBy         string
+}
+
+// One policy gate with its decision, binding and message (ids only).
+func (q *Queries) GetPolicyGateApproval(ctx context.Context, arg GetPolicyGateApprovalParams) (GetPolicyGateApprovalRow, error) {
+	row := q.db.QueryRow(ctx, getPolicyGateApproval, arg.WorkspaceID, arg.ID)
+	var i GetPolicyGateApprovalRow
+	err := row.Scan(
+		&i.ID,
+		&i.Nonce,
+		&i.Decision,
+		&i.ExpiresAt,
+		&i.ConsumedAt,
+		&i.PolicyAction,
+		&i.ResourceKey,
+		&i.InputSha256,
+		&i.ExecutionID,
+		&i.TelegramMessageID,
+		&i.Payload,
+		&i.DecidedBy,
+	)
+	return i, err
+}
+
+const getWorkspaceOwnerMember = `-- name: GetWorkspaceOwnerMember :one
+SELECT user_id FROM public.workspace_members
+WHERE workspace_id = $1 AND role = 'owner'
+ORDER BY created_at, user_id
+LIMIT 1
+`
+
+// The workspace member with role owner (the policy gate approver).
+func (q *Queries) GetWorkspaceOwnerMember(ctx context.Context, workspaceID pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, getWorkspaceOwnerMember, workspaceID)
+	var user_id pgtype.UUID
+	err := row.Scan(&user_id)
+	return user_id, err
 }
 
 const lockPolicyGateApproval = `-- name: LockPolicyGateApproval :one
@@ -166,4 +269,30 @@ func (q *Queries) LockPolicyGateApproval(ctx context.Context, arg LockPolicyGate
 		&i.ExecutionID,
 	)
 	return i, err
+}
+
+const setPolicyGateMessage = `-- name: SetPolicyGateMessage :execrows
+UPDATE public.approvals SET telegram_message_id = $1::bigint, payload = $2, updated_at = now()
+WHERE workspace_id = $3 AND id = $4 AND kind = 'policy_gate'
+`
+
+type SetPolicyGateMessageParams struct {
+	MessageID   int64
+	Payload     []byte
+	WorkspaceID pgtype.UUID
+	ID          int64
+}
+
+// Stores where the gate's approval message was sent (chat, topic, message).
+func (q *Queries) SetPolicyGateMessage(ctx context.Context, arg SetPolicyGateMessageParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setPolicyGateMessage,
+		arg.MessageID,
+		arg.Payload,
+		arg.WorkspaceID,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

@@ -204,7 +204,8 @@ var _ tools.GrantedRunStore = (*ToolRunStore)(nil)
 // grant; otherwise it locks the policy_gate approval, checks that it is
 // approved, unexpired, unconsumed and bound to the same workspace, action,
 // resource key, input hash and execution, marks it consumed and records
-// the started run. A grant that does not verify returns
+// the started run (a VerifyOnly grant, for a dry run, is checked but not
+// consumed). A grant that does not verify returns
 // tools.ErrGrantInvalid and nothing is written.
 func (s *ToolRunStore) BeginGranted(ctx context.Context, r tools.RunStart, g tools.GrantCheck) (int64, *tools.PriorRun, error) {
 	if r.Tier == tenant.TierRead || g.ApprovalID <= 0 || g.WorkspaceID != r.WorkspaceID {
@@ -247,12 +248,15 @@ func (s *ToolRunStore) BeginGranted(ctx context.Context, r tools.RunStart, g too
 		a.ExecutionID != g.ExecutionID {
 		return 0, nil, tools.ErrGrantInvalid
 	}
-	n, err := q.ConsumePolicyGateApproval(ctx, sqlc.ConsumePolicyGateApprovalParams{WorkspaceID: ws, ID: g.ApprovalID, AtTime: pgtype.Timestamptz{Time: now, Valid: true}})
-	if err != nil {
-		return 0, nil, err
-	}
-	if n != 1 {
-		return 0, nil, tools.ErrGrantInvalid
+	// A dry run (VerifyOnly) checks the grant above but never consumes it.
+	if !g.VerifyOnly {
+		n, err := q.ConsumePolicyGateApproval(ctx, sqlc.ConsumePolicyGateApprovalParams{WorkspaceID: ws, ID: g.ApprovalID, AtTime: pgtype.Timestamptz{Time: now, Valid: true}})
+		if err != nil {
+			return 0, nil, err
+		}
+		if n != 1 {
+			return 0, nil, tools.ErrGrantInvalid
+		}
 	}
 	id, err := s.insert(ctx, q, r, tools.StatusStarted, "")
 	if err != nil {

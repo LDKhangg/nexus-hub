@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -27,6 +28,41 @@ type PlanTask struct {
 	Complexity     string   `json:"complexity"`
 	AcceptanceHint string   `json:"acceptance_hint,omitempty"`
 	Executor       string   `json:"executor,omitempty"`
+	// Merge is the target of a github.merge task (and only of one).
+	Merge *MergeTarget `json:"merge,omitempty"`
+}
+
+// MergeTarget is what a github.merge task merges: one pull request at the
+// exact head commit an earlier task reported. Go validates it strictly
+// (ValidMergeTarget); the owner approves exactly this head.
+type MergeTarget struct {
+	Repo    string `json:"repo"`
+	Number  int64  `json:"number"`
+	HeadSHA string `json:"head_sha"`
+}
+
+var (
+	mergeRepoRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,38}/[A-Za-z0-9_.-]{1,100}$`)
+	mergeSHARe  = regexp.MustCompile(`^[0-9a-f]{40}$`)
+)
+
+// MaxPRNumber bounds a merge target's pull request number.
+const MaxPRNumber = 1<<31 - 1
+
+// ValidMergeTarget reports whether m names one repository (owner/name),
+// a pull request number above 0 and a full 40-hex lowercase commit SHA.
+func ValidMergeTarget(m *MergeTarget) bool {
+	return m != nil && mergeRepoRe.MatchString(m.Repo) && !strings.Contains(m.Repo, "..") &&
+		m.Number > 0 && m.Number <= MaxPRNumber && mergeSHARe.MatchString(m.HeadSHA)
+}
+
+// cloneMerge copies a merge target.
+func cloneMerge(m *MergeTarget) *MergeTarget {
+	if m == nil {
+		return nil
+	}
+	c := *m
+	return &c
 }
 
 // Plan is a validated Plan output. Order lists every task key in a
@@ -223,6 +259,17 @@ func checkPlanTasks(in []PlanTask, known []string, maxTasks int) ([]PlanTask, []
 			}
 		}
 		t.DependsOn = uniqueNonEmpty(t.DependsOn)
+		switch merge := contains(t.Capabilities, CapGitHubMerge); {
+		case merge && len(t.Capabilities) != 1:
+			add("$.tasks[%d].capabilities: github.merge must be the task's only capability", i)
+		case merge && t.Merge == nil:
+			add("$.tasks[%d].merge: required for a github.merge task (repo, number, head_sha from earlier task evidence)", i)
+		case merge && !ValidMergeTarget(t.Merge):
+			add("$.tasks[%d].merge: needs repo owner/name, number above 0 and the full 40-character lowercase head_sha", i)
+		case !merge && t.Merge != nil:
+			add("$.tasks[%d].merge: allowed only on a github.merge task", i)
+		}
+		t.Merge = cloneMerge(t.Merge)
 		tasks[i] = t
 	}
 	if len(errs) > 0 {
@@ -276,7 +323,7 @@ func boundPlanTasks(tasks []PlanTask) []PlanTask {
 		out = append(out, PlanTask{
 			Key: sanitizeText(t.Key, 32), Title: sanitizeText(t.Title, MaxTitleRunes),
 			Capabilities: t.Capabilities, DependsOn: t.DependsOn,
-			Priority: t.Priority, Complexity: t.Complexity,
+			Priority: t.Priority, Complexity: t.Complexity, Merge: cloneMerge(t.Merge),
 		})
 	}
 	return out

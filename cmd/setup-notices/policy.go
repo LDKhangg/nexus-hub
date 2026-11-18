@@ -13,11 +13,7 @@ import (
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage"
-	clickuptools "github.com/LDKhangg/nexus-hub/internal/adapters/tools/clickup"
-	githubtools "github.com/LDKhangg/nexus-hub/internal/adapters/tools/github"
-	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
-	"github.com/LDKhangg/nexus-hub/internal/behavior"
-	"github.com/LDKhangg/nexus-hub/internal/orchestrator"
+	"github.com/LDKhangg/nexus-hub/internal/adapters/tools/catalog"
 	"github.com/LDKhangg/nexus-hub/internal/policy"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -33,26 +29,10 @@ const policyUsage = `usage: policy <command> [args]
 Only this command changes policy. A change applies to the next decision; no
 restart is needed.`
 
-// policyKnownActions is the closed set of names a rule set may use: every
-// tool the hub registers (the same constructors as the server, built
-// without dependencies only to read their specs) plus the orchestrator
-// capability names.
+// policyKnownActions is the closed set of names a rule set may use; the
+// server builds the same set (catalog.PolicyKnownActions).
 func policyKnownActions() policy.KnownActions {
-	known := policy.KnownActions{}
-	for name := range knownTools() {
-		known[name] = true
-	}
-	all := append([]tools.Tool{}, clickuptools.NewWriteTools(nil, nil)...)
-	all = append(all, githubtools.NewApproveTool(nil))
-	all = append(all, clickuptools.NewChatReactionTool(nil, nil, nil), clickuptools.NewChatReactionRemoveTool(nil, nil, nil))
-	for _, t := range all {
-		known[t.Spec().Name] = true
-	}
-	known[behavior.MemorySearchTool] = true
-	for _, c := range orchestrator.NewCapabilityRegistry().KnownCapabilities() {
-		known[c] = true
-	}
-	return known
+	return catalog.PolicyKnownActions()
 }
 
 func readPolicyFile(path string) ([]byte, error) {

@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"regexp"
+	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
+	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/policy"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -81,4 +84,92 @@ func gateNonce() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+var _ behavior.PolicyGateStore = (*PolicyStore)(nil)
+
+// PolicyGate returns one policy gate of the workspace.
+func (s *PolicyStore) PolicyGate(ctx context.Context, workspaceID string, id int64) (behavior.PolicyGateRecord, error) {
+	ws, err := parseDBID(workspaceID)
+	if err != nil || id <= 0 {
+		return behavior.PolicyGateRecord{}, behavior.ErrNotFound
+	}
+	r, err := s.q.GetPolicyGateApproval(ctx, sqlc.GetPolicyGateApprovalParams{WorkspaceID: ws, ID: id})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return behavior.PolicyGateRecord{}, behavior.ErrNotFound
+	}
+	if err != nil {
+		return behavior.PolicyGateRecord{}, err
+	}
+	return behavior.PolicyGateRecord{
+		ID: r.ID, Nonce: r.Nonce, Decision: behavior.Decision(r.Decision.String), ExpiresAt: r.ExpiresAt.Time,
+		Consumed: r.ConsumedAt.Valid, Action: r.PolicyAction, ResourceKey: r.ResourceKey, InputSHA256: r.InputSha256,
+		ExecutionID: r.ExecutionID, MessageID: r.TelegramMessageID, Payload: r.Payload, DecidedBy: r.DecidedBy,
+	}, nil
+}
+
+// SetPolicyGateMessage stores where the gate's message was sent.
+func (s *PolicyStore) SetPolicyGateMessage(ctx context.Context, workspaceID string, id, messageID int64, payload json.RawMessage) error {
+	ws, err := parseDBID(workspaceID)
+	if err != nil || id <= 0 || messageID <= 0 || !json.Valid(payload) {
+		return ErrInvalidGateRequest
+	}
+	n, err := s.q.SetPolicyGateMessage(ctx, sqlc.SetPolicyGateMessageParams{MessageID: messageID, Payload: payload, WorkspaceID: ws, ID: id})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return behavior.ErrNotFound
+	}
+	return nil
+}
+
+// DecidePolicyGate decides an open, unexpired gate once.
+func (s *PolicyStore) DecidePolicyGate(ctx context.Context, workspaceID, nonce string, d behavior.Decision, actor, userID string, now time.Time) (behavior.PolicyGateRecord, error) {
+	ws, err := parseDBID(workspaceID)
+	if err != nil || nonce == "" || actor == "" || (d != behavior.DecisionApproved && d != behavior.DecisionRejected) {
+		return behavior.PolicyGateRecord{}, ErrInvalidGateRequest
+	}
+	var user pgtype.UUID
+	if userID != "" {
+		if user, err = parseDBID(userID); err != nil {
+			return behavior.PolicyGateRecord{}, ErrInvalidGateRequest
+		}
+	}
+	row, err := s.q.DecidePolicyGateApproval(ctx, sqlc.DecidePolicyGateApprovalParams{
+		Decision: string(d), DecidedBy: actor, DecidedUserID: user, WorkspaceID: ws, Nonce: nonce,
+		AtTime: pgtype.Timestamptz{Time: now, Valid: true},
+	})
+	if err == nil {
+		return s.PolicyGate(ctx, workspaceID, row.ID)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return behavior.PolicyGateRecord{}, err
+	}
+	cur, err := s.q.GetApprovalByNonce(ctx, sqlc.GetApprovalByNonceParams{WorkspaceID: ws, Nonce: nonce})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows) || (err == nil && cur.Kind != "policy_gate"):
+		return behavior.PolicyGateRecord{}, behavior.ErrNotFound
+	case err != nil:
+		return behavior.PolicyGateRecord{}, err
+	case cur.Decision.Valid && cur.Decision.String != string(behavior.DecisionExpired):
+		return behavior.PolicyGateRecord{}, behavior.ErrDecided
+	}
+	return behavior.PolicyGateRecord{}, behavior.ErrExpired
+}
+
+// WorkspaceOwner returns the users.id of the workspace's owner member.
+func (s *PolicyStore) WorkspaceOwner(ctx context.Context, workspaceID string) (string, error) {
+	ws, err := parseDBID(workspaceID)
+	if err != nil {
+		return "", behavior.ErrNotFound
+	}
+	u, err := s.q.GetWorkspaceOwnerMember(ctx, ws)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", behavior.ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return uuidString(u), nil
 }

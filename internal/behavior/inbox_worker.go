@@ -100,6 +100,9 @@ type InboxDeps struct {
 	// ClickUpDrafts backs the "Đăng" / "Sửa" / "Huỷ" / "Thử lại" buttons
 	// and the edit replies of ClickUp drafts. Nil answers "not available".
 	ClickUpDrafts ClickUpDraftHandler
+	// PolicyGates backs "Duyệt" / "Từ chối" of a policy gate (Phase 9
+	// REQ-10). Nil answers "not available".
+	PolicyGates *PolicyGates
 	// ExecutionReports and ReportDrafts back "📤 Đăng lên ClickUp" of a final
 	// report (Phase 10 REQ-9). Nil answers "not available".
 	ExecutionReports ExecutionReportSource
@@ -578,6 +581,14 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 			return msgStale, "stale", true
 		}
 		return w.orchestratorGateCallback(ctx, u, data, a, actor)
+	}
+	if a.Kind == ApprovalPolicyGate {
+		if w.d.PolicyGates == nil {
+			return msgNotAvailable, "not_available", false
+		}
+		hctx, cancel := context.WithTimeout(ctx, w.settings.HandlerTimeout)
+		defer cancel()
+		return w.d.PolicyGates.HandlePress(hctx, u, msgID, data, a)
 	}
 	if a.Kind == ApprovalClickUpDraft {
 		// A press whose decision was saved but whose claim or cancel was not

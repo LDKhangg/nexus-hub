@@ -84,6 +84,9 @@ type GrantCheck struct {
 	ResourceKey string
 	InputSHA256 string
 	ExecutionID int64
+	// VerifyOnly checks the grant without consuming it (a dry run: nothing
+	// runs, so the approval stays usable for the real call).
+	VerifyOnly bool
 }
 
 // ErrGrantInvalid is returned by BeginGranted when the grant does not
@@ -408,6 +411,7 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 	)
 	if tier != tenant.TierRead {
 		preq = e.policyRequest(tool, name, tier, start.Repo, input)
+		preq.Escalated = tier != spec.Tier
 		d := e.decide(ctx, preq)
 		switch d.Effect {
 		case nhpolicy.EffectAllow:
@@ -419,8 +423,11 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 				return CallResult{Content: approvalRequiredText, IsError: true, Status: StatusDenied, Tier: tier}
 			}
 			preq.ApprovalID = g.ApprovalID
+			// A dry run verifies the grant but never consumes it: nothing
+			// runs, so the owner's approval stays usable.
 			granted = &GrantCheck{ApprovalID: g.ApprovalID, WorkspaceID: e.workspaceID, Action: preq.Action,
-				ResourceKey: preq.ResourceKey, InputSHA256: preq.InputSHA256, ExecutionID: e.executionID}
+				ResourceKey: preq.ResourceKey, InputSHA256: preq.InputSHA256, ExecutionID: e.executionID,
+				VerifyOnly: e.policy.DryRun}
 		default:
 			e.refund(tier)
 			return e.deny(ctx, start, DenyPolicyDenied)

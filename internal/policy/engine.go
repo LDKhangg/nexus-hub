@@ -39,6 +39,10 @@ const (
 	// (FR-130) refused it, because the rule now denies it or the approval
 	// grant did not verify. Nothing ran.
 	ReasonRevalidateDenied = "revalidate_denied"
+	// ReasonTierEscalated: the tool's tier was raised for this input and
+	// the raised tier's default is stricter than the action's own rule, so
+	// the default decided (rule key defaults.<tier>).
+	ReasonTierEscalated = "tier_escalated"
 )
 
 // MaxResourceKeyBytes bounds a resource key (for example "owner/repo#12").
@@ -70,6 +74,10 @@ type Request struct {
 	// GrantRejected marks a re-check whose approval grant did not verify:
 	// the decision is deny, reason revalidate_denied, whatever the rules say.
 	GrantRejected bool
+	// Escalated marks a call whose tool tier was raised for this input
+	// (tools.TierEscalator): Tier is the raised tier, and the effect is the
+	// stricter of the action rule and that tier's default.
+	Escalated bool
 }
 
 // Decision is the engine's answer.
@@ -223,6 +231,18 @@ func Resolve(active *RuleSet, version int32, fallbackReason string, known KnownA
 		return d
 	}
 	effect, key, byAction := Evaluate(rs, req.Action, req.Tier)
+	escalated := false
+	if byAction && req.Escalated {
+		// An action rule names the tool, not the raised tier: the raised
+		// tier's default still applies when it is stricter.
+		def, ok := rs.Defaults[req.Tier]
+		if !ok || !def.Valid() {
+			def = EffectDeny
+		}
+		if s := Stricter(effect, def); s != effect {
+			effect, key, escalated = s, "defaults."+string(req.Tier), true
+		}
+	}
 	d.Effect, d.RuleKey = effect, key
 	switch {
 	case !fromStore:
@@ -231,6 +251,8 @@ func Resolve(active *RuleSet, version int32, fallbackReason string, known KnownA
 			d.Reason = ReasonFallbackNoSet
 		}
 		d.RuleKey = "fallback." + string(req.Tier)
+	case escalated:
+		d.Reason = ReasonTierEscalated
 	case byAction:
 		d.Reason = ReasonActionRule
 	default:

@@ -16,6 +16,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/adapters/netguard"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/sources/clickupchat"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage"
+	"github.com/LDKhangg/nexus-hub/internal/adapters/tools/catalog"
 	clickuptools "github.com/LDKhangg/nexus-hub/internal/adapters/tools/clickup"
 	codetools "github.com/LDKhangg/nexus-hub/internal/adapters/tools/code"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/tools/execrunner"
@@ -49,6 +50,8 @@ type agentServices struct {
 	// policy is the Phase 9 policy engine. P1 constructs it; the tool
 	// executor and the orchestrator actions call it from P2/P3.
 	policy *policy.Engine
+	// policyStore holds rule sets, decisions and policy gates.
+	policyStore *storage.PolicyStore
 
 	conversations workflow.ConversationStore
 	// provider returns the workspace's default LLM provider.
@@ -202,27 +205,18 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		Policy: policyEngine,
 	})
 	worker := relay.NewActionWorker(actions, sender, relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout}, conversations)
-	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, investigators: investigators, people: directory, store: store, conversations: conversations, policy: policyEngine}, nil
+	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, investigators: investigators, people: directory, store: store, conversations: conversations, policy: policyEngine, policyStore: policyStore}, nil
 }
 
-// policyKnownActions is the closed set of names a rule set may use: every
-// tool name of the registry, the code and workspace tools even when git is
-// unavailable here (so a stored rule set naming them stays valid), and the
-// orchestrator capability names.
+// policyKnownActions is the closed set of names a rule set may use: the
+// shared catalog (the same set nh policy validates against) plus every
+// name of the live registry, so a registered tool is never unknown.
 func policyKnownActions(reg *tools.Registry) policy.KnownActions {
-	known := policy.KnownActions{}
+	names := make([]string, 0, len(reg.Tiers()))
 	for name := range reg.Tiers() {
-		known[name] = true
+		names = append(names, name)
 	}
-	static := append([]tools.Tool{}, codetools.NewReadTools(nil, "/nonexistent")...)
-	static = append(static, codetools.NewWorkspaceTools(nil, nil, "/nonexistent", 0, nil)...)
-	for _, t := range static {
-		known[t.Spec().Name] = true
-	}
-	for _, c := range orchestrator.NewCapabilityRegistry().KnownCapabilities() {
-		known[c] = true
-	}
-	return known
+	return catalog.PolicyKnownActions(names...)
 }
 
 // buildBehaviorEngine wires the behavior run executor and the action
@@ -795,7 +789,8 @@ func orchestratorStepSettings(s settings.Settings) orchestrator.StepSettings {
 // progress and Retry/Cancel (REQ-12).
 func registerOrchestratorSteps(ports *orchestratorPorts, reg *workflow.Registry, pool *pgxpool.Pool, store *storage.WorkflowStore, s settings.Settings, ag agentServices,
 	behaviors *storage.BehaviorStore, messenger behavior.Messenger, topics orchestratorTopics, jobs behavior.LocalTaskJobs, tasks *storage.WorkerTaskStore,
-	integrations *storage.IntegrationRepository, redactor *agent.Redactor, drafts *behavior.ClickUpDrafts, queued behavior.WorkerJobQueued) error {
+	integrations *storage.IntegrationRepository, redactor *agent.Redactor, drafts *behavior.ClickUpDrafts, queued behavior.WorkerJobQueued,
+	gates *behavior.PolicyGates) error {
 	plans, err := storage.NewOrchestratorStore(pool)
 	if err != nil {
 		return err
@@ -823,7 +818,17 @@ func registerOrchestratorSteps(ports *orchestratorPorts, reg *workflow.Registry,
 		},
 	}
 	if drafts != nil {
-		executors[orchestrator.ExecutorBehaviorActions] = &behavior.OrchestratorActions{Drafts: drafts, Owner: owner, Chat: owner.TopicChat}
+		actions := &behavior.OrchestratorActions{Drafts: drafts, Owner: owner, Chat: owner.TopicChat}
+		// github.merge (Phase 9): the merge tool under the policy engine,
+		// audited on the execution; approvals are policy gates.
+		if gates != nil && gates.Store != nil && ag.policy != nil {
+			actions.Merge = &behavior.OrchestratorMerge{
+				Registry: ag.reg, Audit: investigateAudit, Sanitizer: redactor, Limits: ag.limits,
+				Policies: behaviorPolicies{integrations: integrations, known: ag.known},
+				Engine:   ag.policy, Gates: gates,
+			}
+		}
+		executors[orchestrator.ExecutorBehaviorActions] = actions
 		drafts.OnFinished(behavior.OrchestratorDraftWaker(tasks))
 	}
 	steps := &orchestrator.Steps{

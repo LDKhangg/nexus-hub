@@ -151,6 +151,12 @@ func run() error {
 		MinClaudeLeftPct: s.WorkerMinClaudeLeft, MinDiskFreeBytes: s.WorkerMinDiskFree, MaxRAMUsedPct: s.WorkerMaxRAMUsed,
 	}
 	workerStore.SetAssignmentThresholds(thresholds)
+	// Policy gates (Phase 9): the owner's "Duyệt" / "Từ chối" of an action
+	// the policy engine holds for approval.
+	policyGates := &behavior.PolicyGates{
+		Store: ag.policyStore, Messenger: messenger,
+		OwnerTelegramUserID: s.OwnerTelegramUserID, RequestTimeout: s.NoticeRequestTimeout,
+	}
 	var (
 		taskStore      *storage.WorkerTaskStore
 		workerNotifier *behavior.WorkerNotifier
@@ -165,6 +171,7 @@ func run() error {
 			return err
 		}
 		reports.Executions, reports.Routes, reports.Jobs = store, taskStore, workerStore
+		policyGates.Waker = taskStore
 		workerNotifier = behavior.NewWorkerNotifier(behavior.WorkerNotifierDeps{
 			Routes: taskStore, Messenger: messenger, Topics: topics, Approvals: behaviors,
 			Devices: workerStore, Telemetry: workerStore, Thresholds: thresholds, Waker: taskStore,
@@ -174,7 +181,7 @@ func run() error {
 		if err := step.Register(reg); err != nil {
 			return err
 		}
-		return registerOrchestratorSteps(&orchPorts, reg, pool, store, s, ag, behaviors, messenger, topics, workerStore, taskStore, integrations, redactor, clickUpDrafts, workerNotifier)
+		return registerOrchestratorSteps(&orchPorts, reg, pool, store, s, ag, behaviors, messenger, topics, workerStore, taskStore, integrations, redactor, clickUpDrafts, workerNotifier, policyGates)
 	})
 	if err != nil {
 		return err
@@ -216,7 +223,7 @@ func run() error {
 		InstructionWaker:  &orchestrator.InstructionWaker{Steps: workflows.store, Waker: taskStore},
 		OrchestratedTasks: orchPorts.Tasks, OrchestratorPlans: orchPorts.Plans,
 		ClickUpDrafts: clickUpDrafts, ReportDrafts: clickUpDrafts, CommentLinks: topics,
-		ExecutionReports: reports,
+		ExecutionReports: reports, PolicyGates: policyGates,
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout, CommandTopic: s.TelegramCommandTopic})
 	// A done/closed ClickUp task closes its topic once no execution of it is
 	// active (status events and a periodic sweep).

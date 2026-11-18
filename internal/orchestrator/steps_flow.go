@@ -681,7 +681,7 @@ func planFromRecords(tasks []PlanTaskRecord) Plan {
 	for _, t := range tasks {
 		p.Tasks = append(p.Tasks, PlanTask{
 			Key: t.Key, Title: t.Title, Capabilities: slices.Clone(t.Capabilities), DependsOn: slices.Clone(t.DependsOn),
-			Priority: t.Priority, Complexity: t.Complexity, Executor: t.Executor,
+			Priority: t.Priority, Complexity: t.Complexity, Executor: t.Executor, Merge: cloneMerge(t.Merge),
 		})
 	}
 	if order, ok := topoOrder(p.Tasks); ok {
@@ -825,7 +825,7 @@ func (r *stepRun) storePlan(version int, p Plan, carried []PlanTaskRecord, u Usa
 		}
 		records = append(records, PlanTaskRecord{
 			Key: t.Key, Title: t.Title, Capabilities: slices.Clone(t.Capabilities), DependsOn: slices.Clone(t.DependsOn),
-			Priority: t.Priority, Complexity: t.Complexity, Executor: t.Executor, State: state,
+			Priority: t.Priority, Complexity: t.Complexity, Executor: t.Executor, Merge: cloneMerge(t.Merge), State: state,
 		})
 	}
 	budget, _ := json.Marshal(p.Budget)

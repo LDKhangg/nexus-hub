@@ -197,9 +197,32 @@ func (h *TelegramHandler) Handle(c echo.Context) error {
 		return respond(http.StatusServiceUnavailable, "service unavailable")
 	case status == UpdateInvalid:
 		return respond(http.StatusBadRequest, "invalid update")
+	case status == UpdateIgnored:
+		// A button press by someone other than the owner changes nothing;
+		// the webhook reply answers it with a short toast (Phase 9 REQ-10).
+		if qid := ignoredCallbackID(raw); qid != "" {
+			return c.JSON(http.StatusOK, map[string]string{
+				"status": status, "method": "answerCallbackQuery", "callback_query_id": qid, "text": msgNotOwnerPress,
+			})
+		}
+		return ok(status)
 	default:
 		return ok(status)
 	}
+}
+
+// msgNotOwnerPress is the toast of a button press by someone other than the
+// owner.
+const msgNotOwnerPress = "Chỉ chủ hub mới duyệt được."
+
+// ignoredCallbackID returns the callback query id of an ignored update
+// that is a button press, or "".
+func ignoredCallbackID(raw []byte) string {
+	var upd tgUpdate
+	if json.Unmarshal(raw, &upd) != nil || upd.CallbackQuery == nil || !callbackIDRe.MatchString(upd.CallbackQuery.ID) {
+		return ""
+	}
+	return upd.CallbackQuery.ID
 }
 
 // Results of HandleUpdate (and the webhook's 200 status values).

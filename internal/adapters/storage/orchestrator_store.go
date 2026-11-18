@@ -78,8 +78,32 @@ func mapOrchestratorTask(r sqlc.OrchestratorPlanTask) orchestrator.PlanTaskRecor
 		PlanID: r.PlanID, Key: r.Key, Title: r.Title, Capabilities: nonNil(r.Capabilities), DependsOn: nonNil(r.DependsOn),
 		Priority: r.Priority, Complexity: r.Complexity, Executor: r.Executor, State: r.State,
 		ResultStepID: r.ResultStepID, Result: json.RawMessage(r.Result), EvidenceRefs: refsFromJSON(r.EvidenceRefs),
-		UpdatedAt: r.UpdatedAt.Time,
+		Merge: mergeFromJSON(r.MergeTarget), UpdatedAt: r.UpdatedAt.Time,
 	}
+}
+
+// mergeFromJSON decodes a stored merge target; a value that does not
+// decode or validate is dropped (the merge task then fails closed).
+func mergeFromJSON(b []byte) *orchestrator.MergeTarget {
+	if len(b) == 0 {
+		return nil
+	}
+	var m orchestrator.MergeTarget
+	if json.Unmarshal(b, &m) != nil || !orchestrator.ValidMergeTarget(&m) {
+		return nil
+	}
+	return &m
+}
+
+// mergeJSON encodes a merge target for storage; nil stores SQL NULL.
+func mergeJSON(m *orchestrator.MergeTarget) ([]byte, error) {
+	if m == nil {
+		return nil, nil
+	}
+	if !orchestrator.ValidMergeTarget(m) {
+		return nil, invalid("merge_target")
+	}
+	return json.Marshal(m)
 }
 
 func mapOrchestratorDecision(r sqlc.OrchestratorDecision) orchestrator.DecisionRecord {
@@ -117,11 +141,16 @@ func (s *OrchestratorStore) InsertPlan(ctx context.Context, workspaceID string, 
 		return orchestrator.PlanRecord{}, topicError(err)
 	}
 	for _, t := range tasks {
+		merge, err := mergeJSON(t.Merge)
+		if err != nil {
+			return orchestrator.PlanRecord{}, err
+		}
 		if _, err := q.InsertOrchestratorPlanTask(ctx, sqlc.InsertOrchestratorPlanTaskParams{
 			WorkspaceID: ws, PlanID: row.ID, Key: t.Key, Title: t.Title,
 			Capabilities: nonNil(t.Capabilities), DependsOn: nonNil(t.DependsOn),
 			Priority: defaultStr(t.Priority, "normal"), Complexity: defaultStr(t.Complexity, "m"), Executor: t.Executor,
 			State: defaultStr(t.State, "PENDING"), ResultStepID: t.ResultStepID, Result: rawOrNil(t.Result), EvidenceRefs: refsJSON(t.EvidenceRefs),
+			MergeTarget: merge,
 		}); err != nil {
 			return orchestrator.PlanRecord{}, topicError(err)
 		}
