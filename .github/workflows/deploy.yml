@@ -49,8 +49,8 @@ jobs:
           persist-credentials: false
       - id: d
         env:
-          GITHUB_EVENT_NAME: push
-          GITHUB_REF: ${{ github.event_name == 'workflow_run' && 'refs/heads/develop' || 'manual' }}
+          CI_EVENT: ${{ github.event_name == 'workflow_run' && 'push' || 'manual' }}
+          CI_REF: ${{ github.event_name == 'workflow_run' && 'refs/heads/develop' || 'manual' }}
         run: |
           v=$(scripts/ci-docs-only.sh)
           echo "docs_only=$v" >> "$GITHUB_OUTPUT"

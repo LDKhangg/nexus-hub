@@ -6,11 +6,13 @@
 #   push develop: first parent .. HEAD (a merge counts all branch changes)
 #   push branch:  merge-base with origin/develop .. HEAD (all branch changes,
 #                 so one code commit anywhere on the branch runs everything)
+# CI_EVENT / CI_REF override GITHUB_EVENT_NAME / GITHUB_REF (GitHub does not
+# let a step overwrite GITHUB_* variables; deploy.yml needs the override).
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-event=${GITHUB_EVENT_NAME:-}
-ref=${GITHUB_REF:-}
+event=${CI_EVENT:-${GITHUB_EVENT_NAME:-}}
+ref=${CI_REF:-${GITHUB_REF:-}}
 base=""
 case "$event" in
   pull_request) base=${PR_BASE_SHA:-} ;;
