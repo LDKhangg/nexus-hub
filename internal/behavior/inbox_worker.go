@@ -560,10 +560,15 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 		return w.workflowTargetCallback(ctx, u, to, data, a, actor, corr)
 	}
 	if a.Kind == ApprovalWorkerJob {
-		if a.Decision != "" || !w.now().Before(a.ExpiresAt) {
-			return msgStale, "stale", true
+		toast, code, remove := msgStale, "stale", true
+		if a.Decision == "" && w.now().Before(a.ExpiresAt) {
+			toast, code, remove = w.workerJobCallback(ctx, u, data, a, actor)
 		}
-		return w.workerJobCallback(ctx, u, data, a, actor)
+		// Cancel, even pressed twice, keeps "📤 Đăng lên ClickUp".
+		if remove && data.Kind == CallbackReject && w.keepWorkerReportButton(ctx, u, to, msgID, a) {
+			remove = false
+		}
+		return toast, code, remove
 	}
 	if a.Kind == ApprovalOrchestratorGate {
 		if a.Decision != "" || !w.now().Before(a.ExpiresAt) {

@@ -75,6 +75,21 @@ func (c *ClickUpDrafts) OpenExecutionReportDraft(ctx context.Context, workspaceI
 	return f.OpenExecutionReportDraft(ctx, workspaceID, executionID)
 }
 
+// reportPreviewResender is the optional part of ReportDrafts that sends the
+// preview of an open draft whose first preview never arrived.
+type reportPreviewResender interface {
+	ResendPreview(ctx context.Context, d ClickUpDraft) error
+}
+
+// ResendPreview sends the preview of a pending draft that has none. The
+// draft keeps its text and expiry. ErrConflict when it needs no new preview.
+func (c *ClickUpDrafts) ResendPreview(ctx context.Context, d ClickUpDraft) error {
+	if d.State != DraftPending || d.PreviewMessageID != 0 || d.Body == "" {
+		return ErrConflict
+	}
+	return c.sendPreview(ctx, d)
+}
+
 // executionReportCallbackData is the data of the report button.
 func executionReportCallbackData(executionID int64) (string, bool) {
 	if executionID <= 0 {
@@ -118,24 +133,34 @@ var (
 	_ ExecutionReportButtons = (*ExecutionReports)(nil)
 )
 
-func (r *ExecutionReports) sourceKind(ctx context.Context, workspaceID string, executionID int64) (string, error) {
+func (r *ExecutionReports) detail(ctx context.Context, workspaceID string, executionID int64) (workflow.ExecutionDetail, error) {
 	if r == nil || r.Executions == nil {
-		return "", ErrNotAvailable
+		return workflow.ExecutionDetail{}, ErrNotAvailable
 	}
 	d, err := r.Executions.GetExecutionDetail(ctx, workspaceID, executionID)
-	if err != nil {
-		if errors.Is(err, workflow.ErrNotFound) {
-			return "", ErrNotFound
-		}
-		return "", err
+	if errors.Is(err, workflow.ErrNotFound) {
+		return workflow.ExecutionDetail{}, ErrNotFound
 	}
-	return d.References.SourceKind, nil
+	return d, err
+}
+
+// reportOutcomeLine is the line that tells ClickUp readers the execution
+// did not finish well; "" for any other execution. jobState is the /task
+// job's state, "" for a /plan execution.
+func reportOutcomeLine(state workflow.State, jobState string) string {
+	switch {
+	case state == workflow.StateCancelled, jobState == WorkerJobCancelled:
+		return msgReportOutcomeCancelled
+	case state == workflow.StateFailed, jobState == WorkerJobFailed:
+		return msgReportOutcomeFailed
+	}
+	return ""
 }
 
 // LocalTaskReportButton implements ExecutionReportButtons.
 func (r *ExecutionReports) LocalTaskReportButton(ctx context.Context, workspaceID string, executionID int64) (Button, bool) {
-	kind, err := r.sourceKind(ctx, workspaceID, executionID)
-	if err != nil || kind != WorkflowSourceLocalTask {
+	d, err := r.detail(ctx, workspaceID, executionID)
+	if err != nil || d.References.SourceKind != WorkflowSourceLocalTask {
 		return Button{}, false
 	}
 	return ExecutionReportButton(executionID)
@@ -143,20 +168,20 @@ func (r *ExecutionReports) LocalTaskReportButton(ctx context.Context, workspaceI
 
 // ExecutionReport implements ExecutionReportSource.
 func (r *ExecutionReports) ExecutionReport(ctx context.Context, workspaceID string, executionID int64) (ExecutionReport, error) {
-	kind, err := r.sourceKind(ctx, workspaceID, executionID)
+	d, err := r.detail(ctx, workspaceID, executionID)
 	if err != nil {
 		return ExecutionReport{}, err
 	}
-	switch kind {
+	switch d.References.SourceKind {
 	case WorkflowSourceLocalTask:
-		return r.localReport(ctx, workspaceID, executionID)
+		return r.localReport(ctx, workspaceID, executionID, d.State)
 	case orchestrator.WorkflowSourceOrchestratedTask:
-		return r.planReport(ctx, workspaceID, executionID)
+		return r.planReport(ctx, workspaceID, executionID, d.State)
 	}
 	return ExecutionReport{}, ErrNotFound
 }
 
-func (r *ExecutionReports) localReport(ctx context.Context, workspaceID string, executionID int64) (ExecutionReport, error) {
+func (r *ExecutionReports) localReport(ctx context.Context, workspaceID string, executionID int64, state workflow.State) (ExecutionReport, error) {
 	if r.Routes == nil || r.Jobs == nil {
 		return ExecutionReport{}, ErrNotAvailable
 	}
@@ -174,14 +199,14 @@ func (r *ExecutionReports) localReport(ctx context.Context, workspaceID string, 
 	if !ok || job.Result == nil {
 		return ExecutionReport{}, ErrNoReportResult
 	}
-	text := reportResultText(workflow.FormatRef(executionID), job.Result.Summary, job.Result.PRURL, job.Result.Branch)
+	text := reportResultText(workflow.FormatRef(executionID), reportOutcomeLine(state, job.State), job.Result.Summary, job.Result.PRURL, job.Result.Branch)
 	if text == "" {
 		return ExecutionReport{}, ErrNoReportResult
 	}
 	return ExecutionReport{IntegrationID: route.IntegrationID, ChatID: route.ChatID, TaskID: route.ClickUpTaskID, Text: text}, nil
 }
 
-func (r *ExecutionReports) planReport(ctx context.Context, workspaceID string, executionID int64) (ExecutionReport, error) {
+func (r *ExecutionReports) planReport(ctx context.Context, workspaceID string, executionID int64, state workflow.State) (ExecutionReport, error) {
 	if r.PlanRoutes == nil || r.Plans == nil {
 		return ExecutionReport{}, ErrNotAvailable
 	}
@@ -205,6 +230,9 @@ func (r *ExecutionReports) planReport(ctx context.Context, workspaceID string, e
 	}
 	var b strings.Builder
 	b.WriteString(msgReportHead + " " + workflow.FormatRef(executionID) + ":")
+	if line := reportOutcomeLine(state, ""); line != "" {
+		b.WriteString("\n" + line)
+	}
 	found := false
 	for _, t := range tasks {
 		if t.PlanID != latest {
@@ -239,9 +267,10 @@ func (r *ExecutionReports) planReport(ctx context.Context, workspaceID string, e
 		Text: capRunes(b.String(), executionReportMaxRunes)}, nil
 }
 
-// reportResultText is the comment text of one worker result: summary, PR
-// URL and branch. "" when the result has none of them.
-func reportResultText(ref, summary, prURL, branch string) string {
+// reportResultText is the comment text of one worker result: the outcome
+// line (if any), summary, PR URL and branch. "" when the result has no
+// summary, PR URL or branch.
+func reportResultText(ref, outcomeLine, summary, prURL, branch string) string {
 	summary, branch = strings.TrimSpace(summary), strings.TrimSpace(branch)
 	if !strings.HasPrefix(prURL, "https://") {
 		prURL = ""
@@ -251,6 +280,9 @@ func reportResultText(ref, summary, prURL, branch string) string {
 	}
 	var b strings.Builder
 	b.WriteString(msgReportHead + " " + ref + ":")
+	if outcomeLine != "" {
+		b.WriteString("\n" + outcomeLine)
+	}
 	if summary != "" {
 		b.WriteString("\n" + capRunes(summary, WorkerMaxSummaryRunes))
 	}
@@ -296,6 +328,15 @@ func (w *InboxWorker) executionReportCallback(ctx context.Context, u InboundUpda
 	if open, found, err := w.d.ReportDrafts.OpenExecutionReportDraft(hctx, u.WorkspaceID, id); err != nil && !errors.Is(err, ErrNotAvailable) {
 		return w.answerReportCallback(ctx, to, u, msgReportFailed, "report_draft")
 	} else if found && open.ID > 0 {
+		// A draft whose preview never arrived cannot be seen or cancelled by
+		// the owner: this press sends its preview again.
+		if resender, ok := w.d.ReportDrafts.(reportPreviewResender); ok && open.State == DraftPending && open.PreviewMessageID == 0 {
+			if err := resender.ResendPreview(hctx, open); err != nil {
+				log.Printf("execution report: draft %d preview not sent again", open.ID)
+				return w.answerReportCallback(ctx, to, u, msgReportPreviewFailed, "preview_not_sent")
+			}
+			return w.answerReportCallback(ctx, to, u, msgReportDraftMade, "")
+		}
 		return w.answerReportCallback(ctx, to, u, msgReportDraftOpen, "")
 	}
 	draftID, err := w.d.ReportDrafts.Create(hctx, DraftRequest{

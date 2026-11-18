@@ -195,7 +195,7 @@ func run() error {
 			Timeout: s.AssistantTimeout, RatePerMinute: int(s.AssistantRatePerMinute),
 		}
 		telegramHandler.WithAssistant(assistant.Inbox)
-		telegramHandler.WithReplyTasks(behavior.ReplyTasks{Conversations: ag.conversations})
+		telegramHandler.WithReplyTasks(behavior.ReplyTasks{Conversations: ag.conversations, Links: topics})
 	}
 	inbox := behavior.NewInboxWorker(behavior.InboxDeps{
 		Workers: workerStore, WorkerTelemetry: workerStore, LocalTasks: taskStore, WorkerJobs: workerStore, WorkerNotifier: workerNotifier,

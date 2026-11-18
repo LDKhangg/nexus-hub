@@ -252,6 +252,7 @@ type WorkerJob struct {
 	Branch      string
 	PRURL       string
 	TestOutcome string
+	Summary     string // the worker's result summary
 }
 
 // WorkerJobs creates and reads the worker job of a step (7a job store).

@@ -139,6 +139,15 @@ func (m *Messenger) EditMessageWithButtons(ctx context.Context, to behavior.Chat
 	return m.client.EditMessageText(ctx, to.WorkspaceID, ref, chatIDString(to.ChatID), messageID, text, buttons(rows))
 }
 
+// SetButtons replaces a message's inline keyboard and keeps its text.
+func (m *Messenger) SetButtons(ctx context.Context, to behavior.ChatRef, messageID int64, rows [][]behavior.Button) error {
+	ref, err := ControlTokenRef(ctx, m.integrations, to.WorkspaceID, to.IntegrationID)
+	if err != nil {
+		return err
+	}
+	return m.client.EditReplyMarkup(ctx, to.WorkspaceID, ref, chatIDString(to.ChatID), messageID, buttons(rows))
+}
+
 func (m *Messenger) RemoveButtons(ctx context.Context, to behavior.ChatRef, messageID int64) error {
 	ref, err := ControlTokenRef(ctx, m.integrations, to.WorkspaceID, to.IntegrationID)
 	if err != nil {

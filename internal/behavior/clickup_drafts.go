@@ -724,7 +724,12 @@ func (c *ClickUpDrafts) handleDraftPress(ctx context.Context, p DraftPress) (str
 		return msgFailed, "retry", false
 	}
 	if p.MessageID <= 0 || d.PreviewMessageID != p.MessageID {
-		c.closeApproval(ctx, p.WorkspaceID, a.Nonce, p.Actor)
+		// A press on another message never closes the approval of an open
+		// draft's real preview: that preview keeps working.
+		open := d.State == DraftPending || d.State == DraftPosting || d.State == DraftFailed
+		if d.PreviewMessageID <= 0 || !open {
+			c.closeApproval(ctx, p.WorkspaceID, a.Nonce, p.Actor)
+		}
 		return msgDraftStale, "stale", true
 	}
 	switch p.Kind {

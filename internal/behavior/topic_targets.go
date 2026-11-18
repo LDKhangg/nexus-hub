@@ -65,19 +65,29 @@ func (t topicTarget) contextLine() string {
 // is already scoped; a returned row that names another workspace,
 // integration, chat or thread is ignored as well.
 func (w *InboxWorker) topicOf(ctx context.Context, u InboundUpdate) (Topic, bool) {
+	topic, ok, err := w.topicOfChecked(ctx, u)
+	return topic, ok && err == nil
+}
+
+// topicOfChecked is topicOf that tells a thread with no topic (ok is false,
+// no error) from a lookup that failed (an error).
+func (w *InboxWorker) topicOfChecked(ctx context.Context, u InboundUpdate) (Topic, bool, error) {
 	if u.ThreadID <= 0 || u.ChatID == 0 || w.d.Topics == nil {
-		return Topic{}, false
+		return Topic{}, false, nil
 	}
 	topic, err := w.d.Topics.TopicByThread(ctx, u.WorkspaceID, u.IntegrationID, u.ChatID, u.ThreadID)
+	if errors.Is(err, ErrNotFound) {
+		return Topic{}, false, nil
+	}
 	if err != nil {
-		return Topic{}, false
+		return Topic{}, false, err
 	}
 	if (topic.WorkspaceID != "" && !strings.EqualFold(topic.WorkspaceID, u.WorkspaceID)) ||
 		(topic.IntegrationID != "" && !strings.EqualFold(topic.IntegrationID, u.IntegrationID)) ||
 		(topic.ChatID != 0 && topic.ChatID != u.ChatID) || (topic.ThreadID != 0 && topic.ThreadID != u.ThreadID) {
-		return Topic{}, false
+		return Topic{}, false, nil
 	}
-	return topic, true
+	return topic, true, nil
 }
 
 // topicTarget resolves the subject of u's topic and its active executions in

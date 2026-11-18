@@ -323,7 +323,8 @@ func (n *WorkerNotifier) failedWith(ctx context.Context, route LocalTaskRoute, j
 		n.say(ctx, route, text, extra)
 		return
 	}
-	payload, _ := json.Marshal(workerJobPayload{ChatID: route.ChatID, JobID: job.ID, ExecutionID: job.ExecutionID, Attempt: job.Attempt})
+	payload, _ := json.Marshal(workerJobPayload{ChatID: route.ChatID, JobID: job.ID, ExecutionID: job.ExecutionID, Attempt: job.Attempt,
+		ReportButton: len(extra) > 0})
 	ap, err := n.d.Approvals.CreateApproval(ctx, job.WorkspaceID, NewApproval{
 		Kind: ApprovalWorkerJob, Action: "retry_or_cancel", Resource: "worker_job:" + job.ID, Payload: payload,
 		Nonce: nonce, ExpiresAt: n.now().Add(workerButtonLifetime),
@@ -353,6 +354,40 @@ type workerJobPayload struct {
 	JobID       string `json:"job_id"`
 	ExecutionID int64  `json:"execution_id"`
 	Attempt     int    `json:"attempt"`
+	// ReportButton: the message also shows "📤 Đăng lên ClickUp".
+	ReportButton bool `json:"report_button,omitempty"`
+}
+
+// MessageKeyboardEditor is the optional part of a Messenger that replaces a
+// message's inline keyboard and keeps its text.
+type MessageKeyboardEditor interface {
+	SetButtons(ctx context.Context, to ChatRef, messageID int64, rows [][]Button) error
+}
+
+// keepWorkerReportButton leaves only the report button on a failure message
+// whose Cancel was pressed. It returns false when the message has no report
+// button or the keyboard cannot be edited, so the caller removes the
+// buttons. A failed edit returns true: the next press tries again, and the
+// report button is never lost.
+func (w *InboxWorker) keepWorkerReportButton(ctx context.Context, u InboundUpdate, to ChatRef, messageID int64, a Approval) bool {
+	var p workerJobPayload
+	if messageID <= 0 || json.Unmarshal(a.Payload, &p) != nil || !p.ReportButton || p.ChatID != u.ChatID {
+		return false
+	}
+	editor, ok := w.d.Messenger.(MessageKeyboardEditor)
+	if !ok {
+		return false
+	}
+	b, ok := ExecutionReportButton(p.ExecutionID)
+	if !ok {
+		return false
+	}
+	rctx, cancel := context.WithTimeout(ctx, w.settings.RequestTimeout)
+	defer cancel()
+	if err := editor.SetButtons(rctx, to, messageID, [][]Button{{b}}); err != nil {
+		log.Print("worker job buttons: report button not kept")
+	}
+	return true
 }
 
 var workerPhaseText = map[string]string{

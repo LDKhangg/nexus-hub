@@ -1242,7 +1242,8 @@ func (r *stepRun) runWorker(t PlanTaskRecord, explicitRepo string) (workflow.Ste
 	}
 	r.jobRef = job.ID
 	evidence := []string{r.execRef("job", job.ID)}
-	extra := map[string]string{"job_id": job.ID, "branch": job.Branch, "pr_url": job.PRURL, "test_outcome": job.TestOutcome}
+	extra := map[string]string{"job_id": job.ID, "branch": job.Branch, "pr_url": job.PRURL, "test_outcome": job.TestOutcome,
+		"summary": boundResultText(job.Summary)}
 	switch job.State {
 	case JobSucceeded:
 		if strings.HasPrefix(job.PRURL, "https://") {
@@ -1590,6 +1591,17 @@ func (r *stepRun) reportText(term DecisionRecord) string {
 		s.Used.Tokens, s.Caps.Tokens, s.Used.PlanIterations, s.Caps.PlanIterations, s.Used.Replans, s.Caps.Replans,
 		int(r.budget.Elapsed()/time.Minute), int(s.Caps.Wall/time.Minute))
 	return capText(b.String(), maxReportRunes)
+}
+
+// boundResultText cleans a worker's text for a stored task result and cuts
+// it on a rune boundary to the size endTask keeps.
+func boundResultText(s string) string {
+	s = sanitizeText(s, maxResultTextBytes)
+	for len(s) > maxResultTextBytes {
+		_, size := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-size]
+	}
+	return strings.TrimSpace(s)
 }
 
 func capText(s string, n int) string {

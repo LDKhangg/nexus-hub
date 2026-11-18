@@ -109,12 +109,22 @@ func (w *InboxWorker) explicitRepo(ctx context.Context, workspaceID, rest string
 
 // topicTaskRef is the ClickUp task whose topic the update was written in.
 func (w *InboxWorker) topicTaskRef(ctx context.Context, u InboundUpdate) (TaskRef, bool) {
-	if topic, ok := w.topicOf(ctx, u); ok && topic.SubjectKind == TopicSubjectClickUpTask {
+	ref, ok, err := w.topicTaskRefChecked(ctx, u)
+	return ref, ok && err == nil
+}
+
+// topicTaskRefChecked is topicTaskRef that reports a failed topic lookup.
+func (w *InboxWorker) topicTaskRefChecked(ctx context.Context, u InboundUpdate) (TaskRef, bool, error) {
+	topic, ok, err := w.topicOfChecked(ctx, u)
+	if err != nil {
+		return TaskRef{}, false, err
+	}
+	if ok && topic.SubjectKind == TopicSubjectClickUpTask {
 		if key := strings.TrimSpace(topic.SubjectKey); taskIDRe.MatchString(key) {
-			return TaskRef{ID: key}, true
+			return TaskRef{ID: key}, true, nil
 		}
 	}
-	return TaskRef{}, false
+	return TaskRef{}, false, nil
 }
 
 // startPlan is the path shared by /plan and the start_task tool: validate the

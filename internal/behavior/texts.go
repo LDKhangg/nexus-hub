@@ -265,4 +265,7 @@ const (
 	msgReportDraftOpen     = "Đã có bản nháp đang chờ bạn xem."
 	msgReportDraftMade     = "Đã tạo bản nháp, xem bên dưới."
 	msgReportPreviewFailed = "Đã tạo bản nháp nhưng chưa gửi được bản xem trước."
+	// The outcome line of a report whose execution did not finish well.
+	msgReportOutcomeFailed    = "Trạng thái: việc thất bại, đây không phải kết quả hoàn tất."
+	msgReportOutcomeCancelled = "Trạng thái: việc đã bị huỷ, đây không phải kết quả hoàn tất."
 )

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/LDKhangg/nexus-hub/internal/domain"
@@ -23,6 +24,9 @@ const (
 	assistantMentionNameRunes = 80
 	// assistantMentionCandidates bounds the candidates told to the model.
 	assistantMentionCandidates = 5
+	// assistantMentionSearchLimit bounds one directory search. A full page
+	// may hide another match, so it never resolves a name by itself.
+	assistantMentionSearchLimit = 50
 )
 
 var draftClickUpCommentTool = domain.ToolDef{Name: toolDraftClickUpComment,
@@ -145,7 +149,12 @@ func (w *InboxWorker) draftTask(ctx context.Context, tt *assistantToolTurn, rawT
 		}
 		explicit = id
 	}
-	if ref, ok := w.topicTaskRef(ctx, tt.u); ok {
+	ref, ok, err := w.topicTaskRefChecked(ctx, tt.u)
+	if err != nil {
+		// Never fall back to the model's task when the topic is unreadable.
+		return "", "task_unreadable"
+	}
+	if ok {
 		if explicit != "" && explicit != ref.ID {
 			return "", "task_mismatch"
 		}
@@ -164,14 +173,11 @@ func (w *InboxWorker) draftParent(ctx context.Context, tt *assistantToolTurn, ta
 	if tt.u.ReplyToMessageID <= 0 || w.d.CommentLinks == nil {
 		return "", ""
 	}
-	link, err := w.d.CommentLinks.LookupCommentLink(ctx, tt.u.WorkspaceID, tt.u.IntegrationID, tt.u.ChatID, tt.u.ReplyToMessageID)
-	switch {
-	case errors.Is(err, ErrNotFound):
-		return "", ""
-	case err != nil:
+	link, ok, err := lookupReplyComment(ctx, w.d.CommentLinks, tt.u.WorkspaceID, tt.u.IntegrationID, tt.u.ChatID, tt.u.ReplyToMessageID)
+	if err != nil {
 		return "", "reply_unreadable"
 	}
-	if !ValidCommentLink(link) || !draftCommentIDRe.MatchString(link.CommentID) {
+	if !ok {
 		return "", ""
 	}
 	if link.TaskID != taskID {
@@ -196,19 +202,15 @@ func (w *InboxWorker) resolveMentions(ctx context.Context, workspaceID string, n
 		report []map[string]any
 	)
 	for _, name := range names {
-		contacts, err := w.d.People.List(ctx, workspaceID, "clickup", name, 10)
+		contacts, err := w.d.People.List(ctx, workspaceID, "clickup", escapeLikeTerm(name), assistantMentionSearchLimit)
 		if err != nil {
 			return nil, map[string]any{"status": "mentions_unreadable"}
 		}
-		matches := clickUpContacts(contacts)
-		pick := matches
-		if exact := exactContacts(matches, name); len(exact) > 0 {
-			pick = exact
-		}
-		switch len(pick) {
-		case 0:
+		pick, certain := pickMentionContacts(contacts, name)
+		switch {
+		case len(pick) == 0:
 			report = append(report, map[string]any{"name": oneLine(name, assistantMentionNameRunes), "result": "not_found"})
-		case 1:
+		case len(pick) == 1 && certain:
 			id := clickUpAccountID(pick[0])
 			if id == "" {
 				// One person with several ClickUp accounts: never guess.
@@ -267,12 +269,93 @@ func clickUpContacts(cs []people.Contact) []people.Contact {
 	return out
 }
 
+// pickMentionContacts returns the contacts a name may mean. certain is true
+// only for an exact match or a whole-word match with exactly one contact,
+// on a search that was not cut off; a substring-only match is never certain.
+func pickMentionContacts(contacts []people.Contact, name string) ([]people.Contact, bool) {
+	complete := len(contacts) < assistantMentionSearchLimit
+	matches := clickUpContacts(contacts)
+	if exact := exactContacts(matches, name); len(exact) > 0 {
+		return exact, complete
+	}
+	if words := wholeWordContacts(matches, name); len(words) > 0 {
+		return words, complete && len(words) == 1
+	}
+	return matches, false
+}
+
+// contactNames lists the names a contact is known by on ClickUp.
+func contactNames(c people.Contact) []string {
+	names := []string{c.Name, c.Alias}
+	for _, a := range c.Accounts {
+		if a.Platform == "clickup" {
+			names = append(names, a.PlatformName, a.Username)
+		}
+	}
+	return names
+}
+
+// exactContacts keeps the contacts whose full name, alias or username is
+// name, ignoring case.
 func exactContacts(cs []people.Contact, name string) []people.Contact {
 	var out []people.Contact
 	for _, c := range cs {
-		if strings.EqualFold(c.Name, name) || (c.Alias != "" && strings.EqualFold(c.Alias, name)) {
-			out = append(out, c)
+		for _, known := range contactNames(c) {
+			if known != "" && strings.EqualFold(known, name) {
+				out = append(out, c)
+				break
+			}
 		}
 	}
 	return out
 }
+
+// wholeWordContacts keeps the contacts with a name that contains the words
+// of name in order, as whole words ("Nam" is in "Nguyễn Văn Nam", "An" is
+// not in "Hoàng Anh").
+func wholeWordContacts(cs []people.Contact, name string) []people.Contact {
+	want := nameWords(name)
+	if len(want) == 0 {
+		return nil
+	}
+	var out []people.Contact
+	for _, c := range cs {
+		for _, known := range contactNames(c) {
+			if containsWords(nameWords(known), want) {
+				out = append(out, c)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// nameWords splits a name into words of letters, digits and combining marks.
+func nameWords(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && !unicode.IsMark(r)
+	})
+}
+
+// containsWords reports whether want occurs in words as a contiguous run.
+func containsWords(words, want []string) bool {
+	for i := 0; i+len(want) <= len(words); i++ {
+		match := true
+		for j := range want {
+			if !strings.EqualFold(words[i+j], want[j]) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+// likeTermEscaper escapes the LIKE wildcards of a search term.
+var likeTermEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// escapeLikeTerm makes a name match literally in the directory's ILIKE.
+func escapeLikeTerm(s string) string { return likeTermEscaper.Replace(s) }

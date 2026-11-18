@@ -51,6 +51,13 @@ type ReplyTaskLookup interface {
 	ReplyHasTask(ctx context.Context, workspaceID, integrationID string, chatID, messageID int64) bool
 }
 
+// ReplyCommentLookup is the optional part of a ReplyTaskLookup that knows
+// the Telegram messages showing a ClickUp comment. An error makes Telegram
+// deliver the update again, so a reply never becomes a note on a guess.
+type ReplyCommentLookup interface {
+	ReplyHasComment(ctx context.Context, workspaceID, integrationID string, chatID, messageID int64) (bool, error)
+}
+
 // TelegramHandler receives Telegram updates for the owner. It verifies the
 // secret token, keeps only the owner's updates, stores them once per
 // update_id and answers at once; all work runs later from storage.
@@ -436,11 +443,22 @@ func (h *TelegramHandler) normalize(ctx context.Context, integration tenant.Webh
 		}
 		// noOpenReply: a reply with no open approval or template prompt goes
 		// to the assistant only when it replies to a hub message about a
-		// ClickUp task; otherwise it keeps the note.
+		// ClickUp task or to a message showing a ClickUp comment; otherwise
+		// it keeps the note.
 		noOpenReply := func() (behavior.InboundUpdate, bool, error) {
-			if h.assistant != nil && h.replyTasks != nil &&
-				h.replyTasks.ReplyHasTask(ctx, workspaceID, integration.ID, m.Chat.ID, replyTo) {
-				return stageAssistant()
+			if h.assistant != nil && h.replyTasks != nil {
+				if h.replyTasks.ReplyHasTask(ctx, workspaceID, integration.ID, m.Chat.ID, replyTo) {
+					return stageAssistant()
+				}
+				if comments, ok := h.replyTasks.(ReplyCommentLookup); ok {
+					linked, err := comments.ReplyHasComment(ctx, workspaceID, integration.ID, m.Chat.ID, replyTo)
+					if err != nil {
+						return u, true, err
+					}
+					if linked {
+						return stageAssistant()
+					}
+				}
 			}
 			u.Note = behavior.NoteNoOpenReply
 			return u, true, nil

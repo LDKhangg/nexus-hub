@@ -263,7 +263,7 @@ var _ orchestrator.WorkerJobs = OrchestratorJobs{}
 func orchestratorJob(j WorkerJob) orchestrator.WorkerJob {
 	out := orchestrator.WorkerJob{ID: j.ID, State: j.State}
 	if r := j.Result; r != nil {
-		out.ReasonCode, out.Branch, out.PRURL, out.TestOutcome = r.ReasonCode, r.Branch, r.PRURL, r.TestOutcome
+		out.ReasonCode, out.Branch, out.PRURL, out.TestOutcome, out.Summary = r.ReasonCode, r.Branch, r.PRURL, r.TestOutcome, r.Summary
 	}
 	return out
 }
