@@ -145,13 +145,6 @@ func clipRunes(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-func short(sha string) string {
-	if len(sha) > 7 {
-		return sha[:7]
-	}
-	return sha
-}
-
 // pull is the subset of a pull request the tools use.
 type pull struct {
 	Number         int64                  `json:"number"`

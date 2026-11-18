@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -79,6 +80,8 @@ type Plan struct {
 func (p Plan) Task(key string) (PlanTask, bool) {
 	for _, t := range p.Tasks {
 		if t.Key == key {
+			// A copy: changing it never changes the plan.
+			t.Capabilities, t.DependsOn, t.Merge = slices.Clone(t.Capabilities), slices.Clone(t.DependsOn), cloneMerge(t.Merge)
 			return t, true
 		}
 	}

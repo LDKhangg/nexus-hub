@@ -205,9 +205,15 @@ var mergedSHARe = regexp.MustCompile(`([0-9a-f]{7,40})\s*$`)
 func mergeOutcome(res tools.CallResult, t orchestrator.MergeTarget) orchestrator.TaskOutcome {
 	switch {
 	case res.Status == tools.StatusOK:
+		// The live call ends with the full merge SHA, and so does a replay
+		// of it (the tool's stored summary). A replay of a run recorded
+		// before the summary kept the full SHA has only a short one.
 		sha := ""
 		if mm := mergedSHARe.FindStringSubmatch(res.Content); mm != nil {
 			sha = mm[1]
+		}
+		if len(sha) != 40 {
+			log.Printf("orchestrator merge: PR #%d merged, full merge SHA not in the result", t.Number)
 		}
 		ref := fmt.Sprintf("github:merge:%s#%d:%s", t.Repo, t.Number, sha)
 		if len(ref) > 128 {
