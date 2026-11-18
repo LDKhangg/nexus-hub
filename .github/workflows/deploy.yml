@@ -25,8 +25,10 @@ permissions:
   contents: read
 
 jobs:
-  deploy:
-    name: build and ship to the VPS
+  # A develop push that changed only docs (scripts/ci-docs-only.sh) is not
+  # deployed: the running binary would be the same. A manual run always deploys.
+  gate:
+    name: docs only?
     if: >-
       vars.DEPLOY_ENABLED == 'true' && (
         github.event_name == 'workflow_dispatch' || (
@@ -35,6 +37,29 @@ jobs:
           github.event.workflow_run.head_branch == 'develop'
         )
       )
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.d.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.ref }}
+          fetch-depth: 2
+          persist-credentials: false
+      - id: d
+        env:
+          GITHUB_EVENT_NAME: push
+          GITHUB_REF: ${{ github.event_name == 'workflow_run' && 'refs/heads/develop' || 'manual' }}
+        run: |
+          v=$(scripts/ci-docs-only.sh)
+          echo "docs_only=$v" >> "$GITHUB_OUTPUT"
+          [ "$v" = true ] && echo "### Docs-only change: not deployed" >> "$GITHUB_STEP_SUMMARY" || true
+
+  deploy:
+    name: build and ship to the VPS
+    needs: gate
+    if: needs.gate.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production

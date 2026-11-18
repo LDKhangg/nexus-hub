@@ -1,6 +1,9 @@
 # CI: format, vet and build on every push and PR; the full race-enabled
 # test suite against a throwaway PostgreSQL (reused on a develop merge whose
 # tree equals an already green branch head); on develop, a container image.
+# A change that touches only docs (*.md, docs/**, LICENSE; see
+# scripts/ci-docs-only.sh) runs only the doc path check: no Go checks, no
+# suite, no image, and deploy skips it.
 # Tests use fakes only; no repository secret is needed or exposed here.
 name: ci
 
@@ -19,17 +22,40 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: docs only?
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.d.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: d
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          v=$(scripts/ci-docs-only.sh)
+          echo "docs_only=$v" >> "$GITHUB_OUTPUT"
+          [ "$v" = true ] && echo "### Docs-only change: doc path check only" >> "$GITHUB_STEP_SUMMARY" || true
+
   check:
     name: fmt · vet · build
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      CODE: ${{ needs.changes.outputs.docs_only != 'true' }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v7
+        if: env.CODE == 'true'
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: gofmt
+        if: env.CODE == 'true'
         run: |
           out=$(gofmt -l cmd internal)
           if [ -n "$out" ]; then
@@ -38,12 +64,15 @@ jobs:
             exit 1
           fi
       - run: go vet ./...
+        if: env.CODE == 'true'
       - run: go build ./...
+        if: env.CODE == 'true'
       - name: doc paths
         run: scripts/check-doc-paths.sh
 
   test:
     name: test (race, postgres)
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -70,12 +99,21 @@ jobs:
       # A merge into develop whose tree equals the merged branch head, when
       # that head already passed this job, is not tested again: same code.
       # If develop moved meanwhile, the trees differ and the suite runs.
+      # A docs-only change is not tested (the job still passes, so a later
+      # merge can reuse it); see the changes job.
       - name: reuse branch result
         id: reuse
-        if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
         env:
           GH_TOKEN: ${{ github.token }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          DEVELOP_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/develop' }}
         run: |
+          if [ "$DOCS_ONLY" = true ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "### Tests skipped: docs-only change" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          [ "$DEVELOP_PUSH" = true ] || exit 0
           head=$(git rev-parse -q --verify HEAD^2 || true)
           [ -n "$head" ] || exit 0
           [ "$(git rev-parse HEAD^{tree})" = "$(git rev-parse "$head^{tree}")" ] || exit 0
@@ -142,8 +180,10 @@ jobs:
 
   image:
     name: container image
-    needs: [check, test]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [changes, check, test]
+    if: >-
+      needs.changes.outputs.docs_only != 'true' && github.event_name == 'push' &&
+      (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
