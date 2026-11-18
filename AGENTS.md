@@ -100,6 +100,11 @@ kept 14 days) and writes failed/skipped tests, races and panics to the run
 summary. On `develop` and `v*` tags it publishes `ghcr.io/<repo>` tagged with
 the short SHA (and `latest` on develop). Deploying to the VPS is a later phase.
 
+- A change that touches only docs (`*.md`, `docs/**`, `LICENSE`, the whole
+  branch against develop; see `scripts/ci-docs-only.sh`) runs only the doc
+  path check: no Go checks, no suite, no image, no deploy.
+- A develop merge whose tree equals an already green branch head reuses that
+  test result instead of running the suite again.
 - CI is where the suite runs. The Tester writes tests and reports the CI
   run; nobody runs the full suite locally (see `docs/agents/tester.md`).
 - The Lead may read CI results (`gh run view`, `gh run download`) to judge a
