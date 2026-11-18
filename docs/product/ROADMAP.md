@@ -84,20 +84,21 @@ P1 notices ─► P2 agent core ─► P3 behavior engine ─► P4 identity + e
                                     P7b orchestrator (DELEGATE → 7a worker)
                                                    │
                                                    ▼
-                                    P8 workers + scheduler (multi-slot)
+                                    P10 response router + outbound  ── ends MVP 1
                                                    │
                                                    ▼
-                                    P9 policy + approvals ─► P10 response router + outbound
-                                                                     │
-                                                                     ▼
-                                    P11 admin UI + API (needs P5–P10 data)
-                                                                     │
-                                                                     ▼
+                                    P9 policy + approvals (after MVP 1)
+                                                   │
+                                                   ▼
                                     P12 reliability + security ─► P13 deployment + acceptance
+
+    P8 workers + scheduler (multi-slot): deferred, D7
+    P11 admin UI + API: replaced by the CLI and Telegram, D2
 ```
 
-P11 can start its read-only screens (executions, health) after P5. It only
-finishes after P10.
+Order after 7b (D7, 2026-11-18): **P10 → P9 → P12 → P13**. MVP 1 ends with
+P10. Until P9 lands, P10's outbound actions are gated by the existing Phase 2
+tiered tool policy and the behavior autonomy levels (P3).
 
 ## 4. Phases
 
@@ -319,7 +320,13 @@ orchestrator follows and can `DELEGATE` to that worker.
   - the EPIC 05 acceptance criteria are tested with the fake provider;
   - an over-budget plan ends in `FAILED` or blocked, never in a loop.
 
-### Phase 8: Worker runtime and scheduler (remainder after 7a)
+### Phase 8: Worker runtime and scheduler (remainder after 7a) — DEFERRED (D7)
+
+> Deferred by the owner on 2026-11-18 (D7): one background worker with one
+> Claude profile on the laptop is enough for now. The multi-slot items below
+> (NFR-009, E2E-002, FR-101, FR-102, FR-104, several devices/accounts) wait
+> until the owner reopens this phase; they are not part of MVP 1. Single-worker
+> carry-ins from 7b moved to Phase 10.
 
 - **Goal:** two isolated worker slots execute tasks in parallel under
   scheduler control.
@@ -341,7 +348,10 @@ orchestrator follows and can `DELEGATE` to that worker.
   - E2E-002 and E2E-007 pass with fakes.
 - **Decisions:** D1 is resolved by 7a (tests run on the laptop worker).
 
-### Phase 9: Policy engine and approvals
+### Phase 9: Policy engine and approvals — after MVP 1 (D7)
+
+> Runs after Phase 10 (owner, 2026-11-18). Until then Phase 10 outbound
+> actions use the Phase 2 tool policy and P3 autonomy levels.
 
 - **Goal:** the user's rules decide, and risky actions wait for the user's OK
   from the phone.
@@ -366,7 +376,7 @@ orchestrator follows and can `DELEGATE` to that worker.
   - E2E-004 and E2E-009 pass with fakes;
   - a stale approval cannot authorize a different action.
 
-### Phase 10: Response router and outbound actions
+### Phase 10: Response router and outbound actions — NEXT, ends MVP 1 (D7)
 
 - **Goal:** results go to the right place on every platform, exactly once.
 - **PCC:**
@@ -389,6 +399,13 @@ orchestrator follows and can `DELEGATE` to that worker.
   - GitHub inbound events;
   - a demo adapter with contract tests.
   - This phase ends the Phase 2 rule "post nothing to ClickUp".
+  - Policy gate until Phase 9: the Phase 2 tiered tool policy plus the
+    behavior autonomy levels; no new approval flow in this phase.
+  - Carry-ins from Phase 7b (single worker): wire the `behavior-actions`
+    executor (`clickup.write`, `telegram.notify`) so Plan may offer them;
+    progress message and Retry/Cancel buttons for orchestrated worker jobs;
+    a real worker wait state instead of `WAITING_FOR_USER` (a worker that
+    never returns no longer waits for the 24 h deadline).
 - **Exit criteria:**
   - the EPIC 02 and EPIC 12 acceptance criteria are tested;
   - E2E-008 and E2E-010 pass;
@@ -468,6 +485,7 @@ orchestrator follows and can `DELEGATE` to that worker.
 | D4 | Users ↔ workspaces | Decided (revised 2026-11-13) | One user can belong to many workspaces (owner, in chat: "1 user nhiều ws được"), through a user ↔ workspace membership table with a role per workspace. Only the owner uses the system for now; `users` and `external_identities` let other people be added later, when the owner opens the next stage of the product. Superseded: "one user owns one workspace". |
 | D5 | Hosting and remote access | Decided | Host on the VPS, with a public domain and port for HTTPS (reverse proxy + TLS). Webhooks are public; administration uses the CLI over SSH. |
 | D6 | Real-service acceptance | Decided | Use the real ClickUp tasks assigned to the owner (no test workspace needed). The owner's primary use cases are listed in §7. |
+| D7 | Order after Phase 7b | Decided 2026-11-18 | Owner: one background worker with one Claude profile is enough, so Phase 8 (multi-slot workers and scheduler) is deferred; Phase 10 runs next and ends MVP 1; Phase 9 runs after MVP 1; then P12, P13. NFR-009, E2E-002, FR-101, FR-102, FR-104 stay `PENDING` (phase `8`, deferred) until the owner reopens Phase 8 or accepts them as a PCC exception at Phase 13. |
 
 ## 6. Carry-over items already known
 
