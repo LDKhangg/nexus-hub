@@ -32,3 +32,7 @@ Known limitations:
 - A timed-out topic create that Telegram did perform can still leave a second topic after the 60 s lease (the Bot API cannot list topics). No message is lost.
 - Agent comment-pipeline reports and digests have no jump button (P4 ruling Q2).
 - A topic closes up to ~30 s after the last execution ends (sweep, P4 ruling Q1).
+
+## Route-eval result (REQ-11, appended 2026-11-18)
+
+After the Phase 7b merge (`8395bda`, router prompt rules from 7b C1) `nh assistant route-eval` on the VPS: 15/15 cases routed as expected (answer 6/6, work 7/7, deep 2/2), 0 router errors, model `claude-haiku-5-5`, 19226 input / 1139 output tokens. Earlier runs: 13/15 and 12/15.
