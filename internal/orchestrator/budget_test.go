@@ -41,10 +41,10 @@ func wantExceeded(t *testing.T, err error, kind BudgetKind) {
 
 func TestDefaultBudgetCaps(t *testing.T) {
 	c := DefaultBudgetCaps()
-	if c.PlanIterations != 3 || c.Replans != 2 || c.RepairAttempts != 2 || c.Tokens != 80000 || c.Wall != 20*time.Minute {
+	if c.PlanIterations != 3 || c.Replans != 2 || c.RepairAttempts != 2 || c.Tokens != 80000 || c.Wall != 90*time.Minute {
 		t.Fatalf("%+v", c)
 	}
-	if c.PlanCaps() != (BudgetRequest{PlanIterations: 3, Replans: 2, Tokens: 80000, WallSeconds: 1200}) {
+	if c.PlanCaps() != (BudgetRequest{PlanIterations: 3, Replans: 2, Tokens: 80000, WallSeconds: 5400}) {
 		t.Fatalf("%+v", c.PlanCaps())
 	}
 }
@@ -340,7 +340,7 @@ func TestBudget_ExtendPerKind(t *testing.T) {
 	if err := b.Extend(BudgetWall); err != nil {
 		t.Fatal(err)
 	}
-	if got := b.Snapshot().Caps.Wall; got != 30*time.Minute {
+	if got := b.Snapshot().Caps.Wall; got != 100*time.Minute {
 		t.Fatalf("wall +10m: %v", got)
 	}
 }
@@ -378,7 +378,7 @@ func TestBudget_ExtendLeavesTenMinutes(t *testing.T) {
 	for _, kind := range []BudgetKind{BudgetPlanIterations, BudgetReplans, BudgetRepairAttempts, BudgetTokens, BudgetWall} {
 		t.Run(string(kind), func(t *testing.T) {
 			b, clk := newTestBudget(DefaultBudgetCaps())
-			clk.Advance(45 * time.Minute) // wall long spent
+			clk.Advance(2 * time.Hour) // wall long spent
 			wantExceeded(t, b.CanCall(0), BudgetWall)
 			if err := b.Extend(kind); err != nil {
 				t.Fatal(err)
@@ -394,7 +394,7 @@ func TestBudget_ExtendLeavesTenMinutes(t *testing.T) {
 	// Plenty left: the floor does not shrink or inflate the wall cap.
 	b, _ := newTestBudget(DefaultBudgetCaps())
 	_ = b.Extend(BudgetReplans)
-	if b.Snapshot().Caps.Wall != 20*time.Minute {
+	if b.Snapshot().Caps.Wall != 90*time.Minute {
 		t.Fatalf("wall changed to %v", b.Snapshot().Caps.Wall)
 	}
 }
