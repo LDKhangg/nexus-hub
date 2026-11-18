@@ -533,6 +533,40 @@ type OutboundAction struct {
 	SentAt            pgtype.Timestamptz
 }
 
+// Workspace-scoped audit of every policy engine decision; metadata and an input hash only.
+type PolicyDecision struct {
+	ID             int64
+	WorkspaceID    pgtype.UUID
+	Action         string
+	Tier           string
+	ResourceKey    string
+	Effect         string
+	Reason         string
+	RuleSetVersion pgtype.Int4
+	RuleKey        string
+	ActorKind      string
+	ExecutionID    pgtype.Int8
+	ToolRunID      pgtype.Int8
+	ApprovalID     pgtype.Int8
+	InputSha256    string
+	CreatedAt      pgtype.Timestamptz
+}
+
+// Workspace-scoped, immutable policy rule set versions; exactly one active per workspace; written only by the owner CLI.
+type PolicyRuleSet struct {
+	ID                  int64
+	WorkspaceID         pgtype.UUID
+	Version             int32
+	Schema              string
+	Body                []byte
+	BodySha256          string
+	CreatedBy           string
+	RestoredFromVersion pgtype.Int4
+	IsActive            bool
+	CreatedAt           pgtype.Timestamptz
+	ActivatedAt         pgtype.Timestamptz
+}
+
 type ReportPreference struct {
 	UserID        pgtype.UUID
 	WorkspaceID   pgtype.UUID

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LDKhangg/nexus-hub/internal/adapters/storage"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/google/uuid"
@@ -102,6 +103,12 @@ func initNotices(ctx context.Context, pool *pgxpool.Pool, args []string, out io.
 		return errors.New("workspace setup failed")
 	}
 	if _, err := sqlc.New(tx).EnsureWorkspaceOwner(ctx, workspaceKey); err != nil {
+		return errors.New("workspace setup failed")
+	}
+	// A new workspace starts with policy rule set v1 (Phase 9), the same
+	// set the 00035 migration seeds for existing workspaces. Idempotent: a
+	// workspace that has any rule set keeps it.
+	if _, err := storage.EnsureDefaultPolicyRuleSet(ctx, sqlc.New(tx), workspaceKey); err != nil {
 		return errors.New("workspace setup failed")
 	}
 	// Merge owned configuration fields only. Never select or overwrite credentials.

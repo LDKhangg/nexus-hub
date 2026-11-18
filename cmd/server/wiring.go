@@ -28,6 +28,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/memory"
 	"github.com/LDKhangg/nexus-hub/internal/orchestrator"
+	"github.com/LDKhangg/nexus-hub/internal/policy"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/secrets"
@@ -45,6 +46,9 @@ type agentServices struct {
 	limits       tools.Limits
 	people       *storage.PeopleRepository
 	store        *storage.AgentStore
+	// policy is the Phase 9 policy engine. P1 constructs it; the tool
+	// executor and the orchestrator actions call it from P2/P3.
+	policy *policy.Engine
 
 	conversations workflow.ConversationStore
 	// provider returns the workspace's default LLM provider.
@@ -191,8 +195,33 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		PollInterval: s.AgentPollInterval, Limits: limits, AllowDangerous: s.AllowDangerous,
 		MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
 	})
+	policyStore, err := storage.NewPolicyStore(pool)
+	if err != nil {
+		return agentServices{}, errors.New("policy store startup failed")
+	}
+	policyEngine := policy.NewEngine(policyStore, policyKnownActions(reg))
 	worker := relay.NewActionWorker(actions, sender, relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout}, conversations)
-	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, investigators: investigators, people: directory, store: store, conversations: conversations}, nil
+	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, investigators: investigators, people: directory, store: store, conversations: conversations, policy: policyEngine}, nil
+}
+
+// policyKnownActions is the closed set of names a rule set may use: every
+// tool name of the registry, the code and workspace tools even when git is
+// unavailable here (so a stored rule set naming them stays valid), and the
+// orchestrator capability names.
+func policyKnownActions(reg *tools.Registry) policy.KnownActions {
+	known := policy.KnownActions{}
+	for name := range reg.Tiers() {
+		known[name] = true
+	}
+	static := append([]tools.Tool{}, codetools.NewReadTools(nil, "/nonexistent")...)
+	static = append(static, codetools.NewWorkspaceTools(nil, nil, "/nonexistent", 0, nil)...)
+	for _, t := range static {
+		known[t.Spec().Name] = true
+	}
+	for _, c := range orchestrator.NewCapabilityRegistry().KnownCapabilities() {
+		known[c] = true
+	}
+	return known
 }
 
 // buildBehaviorEngine wires the behavior run executor and the action
