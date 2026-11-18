@@ -578,6 +578,19 @@ type RunItem struct {
 	UpdatedAt    pgtype.Timestamptz
 }
 
+// Workspace-scoped map of a Telegram message to the ClickUp comment it shows; ids only, pruned after the retention setting.
+type TelegramMessageLink struct {
+	ID            int64
+	WorkspaceID   pgtype.UUID
+	IntegrationID pgtype.UUID
+	ChatID        int64
+	MessageID     int64
+	SubjectKind   string
+	TaskID        string
+	CommentID     string
+	CreatedAt     pgtype.Timestamptz
+}
+
 // Workspace-scoped binding of a Telegram forum topic to one subject; topic names, task names and message text are never stored.
 type TelegramTopic struct {
 	ID            int64

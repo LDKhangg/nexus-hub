@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -164,9 +165,11 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 	if err := tenant.ValidateTelegramTarget(integration, target); err != nil {
 		return result, err
 	}
-	if _, err := tenant.ParseTelegramTargetConfig(tenant.OwnerTargetConfig(target.Config)); err != nil {
+	targetConf, err := tenant.ParseTelegramTargetConfig(tenant.OwnerTargetConfig(target.Config))
+	if err != nil {
 		return result, err
 	}
+	topics := newTaskTopicLookup(q, workspace, targetID, targetConf)
 	agentEnabled := r.agentEnabledAtIngest(integration)
 	triggers := newIngestTriggers(q, workspace)
 	owner, ownerRead := "", false
@@ -188,9 +191,26 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 		if err != nil {
 			return result, err
 		}
-		if e.EventType == domain.EventAssigneeChanged {
-			// Assignee events only feed behaviors: no thread, notice or
-			// agent job, exactly as when they were ignored.
+		// A task with a topic gets every event in that topic (Phase 10
+		// REQ-1/2): mentions-only does not filter, but a comment the hub
+		// posted, or one that started a behavior run (the run reports it),
+		// gets no notice.
+		inTopic, err := topics.has(ctx, e.ExternalID)
+		if err != nil {
+			return result, err
+		}
+		if inTopic && (e.FromOwnBot || runs > 0) {
+			if started > 0 {
+				result.Accepted++
+			} else {
+				result.Ignored++
+			}
+			continue
+		}
+		if e.EventType == domain.EventAssigneeChanged && !inTopic {
+			// Assignee events of a task without a topic only feed
+			// behaviors: no thread, notice or agent job, exactly as when
+			// they were ignored.
 			if started > 0 {
 				result.Accepted++
 			} else {
@@ -199,7 +219,7 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 			continue
 		}
 		toAgent := agentEnabled && e.EventType == domain.EventCommandPosted
-		if !toAgent && config.MentionsOnly {
+		if !toAgent && !inTopic && config.MentionsOnly {
 			if !ownerRead {
 				if owner, err = triggers.ownerClickUpID(ctx); err != nil {
 					return result, err
@@ -285,6 +305,47 @@ func (r *NoticeRepository) accept(ctx context.Context, events []domain.Normalize
 		}
 	}
 	return result, nil
+}
+
+// taskTopicLookup tells whether a ClickUp task has a created topic in the
+// notice target's chat. It reads each task once per callback. A target with
+// a fixed message thread, or whose chat id is not numeric, never routes to
+// task topics (the notice worker does not route there either).
+type taskTopicLookup struct {
+	q                 *sqlc.Queries
+	workspace, target pgtype.UUID
+	chat              int64
+	seen              map[string]bool
+}
+
+func newTaskTopicLookup(q *sqlc.Queries, workspace, target pgtype.UUID, conf tenant.TelegramTargetConfig) *taskTopicLookup {
+	l := &taskTopicLookup{q: q, workspace: workspace, target: target, seen: map[string]bool{}}
+	if conf.MessageThreadID != nil {
+		return l
+	}
+	if chat, err := strconv.ParseInt(conf.ChatID, 10, 64); err == nil {
+		l.chat = chat
+	}
+	return l
+}
+
+func (l *taskTopicLookup) has(ctx context.Context, taskID string) (bool, error) {
+	if l.chat == 0 || taskID == "" || len(taskID) > 128 {
+		return false, nil
+	}
+	if v, ok := l.seen[taskID]; ok {
+		return v, nil
+	}
+	_, err := l.q.GetClickUpTaskTopicThread(ctx, sqlc.GetClickUpTaskTopicThreadParams{WorkspaceID: l.workspace, IntegrationID: l.target, ChatID: l.chat, TaskID: taskID})
+	switch {
+	case err == nil:
+		l.seen[taskID] = true
+	case errors.Is(err, pgx.ErrNoRows):
+		l.seen[taskID] = false
+	default:
+		return false, err
+	}
+	return l.seen[taskID], nil
 }
 
 // noticeWanted reports, for a source with notice_mentions_only, whether an

@@ -32,8 +32,22 @@ func FormatNotice(e domain.NormalizedEvent) string {
 		actor = "Unknown user"
 	}
 	kind := "Comment"
-	if e.EventType == domain.EventStatusChanged {
+	body := e.Content
+	switch e.EventType {
+	case domain.EventStatusChanged:
 		kind = "Status changed"
+	case domain.EventAssigneeChanged:
+		// The added assignee: the directory name the delivery set, else
+		// the ClickUp user id. The event carries no other text.
+		kind = "Assignee added"
+		who := e.Metadata["assignee_name"]
+		if who == "" {
+			who = e.Metadata["assignee_added"]
+		}
+		if who == "" {
+			who = "Unknown user"
+		}
+		body = "+ " + clip(who, 200)
 	}
 	url := "https://app.clickup.com/t/" + e.ExternalID
 	if e.Metadata["task_url"] != "" {
@@ -42,7 +56,6 @@ func FormatNotice(e domain.NormalizedEvent) string {
 	header := fmt.Sprintf("ClickUp · %s\n%s\nBy %s\n", kind, clip(title, 300), clip(actor, 200))
 	footer := "\n" + clip(url, 500)
 	budget := 4000 - len(utf16.Encode([]rune(header+footer)))
-	body := e.Content
 	if len(utf16.Encode([]rune(body))) > budget {
 		body = clip(body, budget-12) + " [truncated]"
 	}

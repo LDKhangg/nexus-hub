@@ -119,6 +119,8 @@ func run() error {
 		return err
 	}
 	engine.SetTopics(topics)
+	// ClickUp notices of a task with a topic go to that topic (Phase 10).
+	worker.SetNoticeRouter(topics)
 	commands.SetTaskResolver(topics)
 	ag.actions.SetThreadRouter(topics)
 	workspaces, err := storage.NewWorkspaceRepository(pool)

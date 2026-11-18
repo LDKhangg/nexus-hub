@@ -989,6 +989,7 @@ func (e *Engine) sendOnce(ctx context.Context, run Run, key string, chat ChatRef
 		}
 		return 0, err
 	}
+	e.linkRunComment(ctx, run, key, chat, id)
 	if err := e.d.Store.SetMessageID(ctx, ws, runID, key, id); err != nil {
 		log.Printf("behavior run %d corr=%s: message %s sent, id not stored", runID, run.CorrelationID, key)
 		return id, err
@@ -998,6 +999,24 @@ func (e *Engine) sendOnce(ctx context.Context, run Run, key string, chat ChatRef
 	bindCancel()
 	log.Printf("behavior run %d corr=%s: message %s sent", runID, run.CorrelationID, key)
 	return id, nil
+}
+
+// linkRunComment records, for a run started by a ClickUp comment, that the
+// delivered message shows that comment (Phase 10 REQ-5), so a reply to it
+// can answer the comment. Approval messages are not linked. Ids only.
+func (e *Engine) linkRunComment(ctx context.Context, run Run, key string, chat ChatRef, messageID int64) {
+	if e.d.Topics == nil || messageID <= 0 || strings.HasPrefix(key, "approval:") || len(run.Trigger) == 0 {
+		return
+	}
+	t, err := DecodeTriggerData(run.Trigger)
+	if err != nil || t.CommentID == "" {
+		return
+	}
+	taskID := t.TaskID
+	if taskID == "" {
+		taskID = runTaskID(run)
+	}
+	e.d.Topics.recordCommentLink(ctx, chat, messageID, taskID, t.CommentID)
 }
 
 // routed marks chat so the engine resolves the topic of rc's execution when
@@ -1052,6 +1071,19 @@ func (e *Engine) deliver(ctx context.Context, chat ChatRef, m OutMessage) (int64
 			m = withJumpButton(m, b)
 		}
 	}
+	// taskButton adds the button that opens the ClickUp task's topic on
+	// demand to a notice sent to General or a fixed topic. A "general"
+	// report that went into the task's own topic (thread set) needs none.
+	taskButton := func(to ChatRef) {
+		if intent == nil || e.d.Topics == nil || (to.ThreadID != 0 && strings.TrimSpace(intent.Mode) == ReportTopicGeneral) {
+			return
+		}
+		bctx, bcancel := context.WithTimeout(context.WithoutCancel(ctx), e.s.RequestTimeout)
+		defer bcancel()
+		if b, ok := e.d.Topics.TaskTopicButton(bctx, to.WorkspaceID, *intent); ok {
+			m = withDataButton(m, b)
+		}
+	}
 	if chat.topic != nil {
 		in := *chat.topic
 		intent = &in
@@ -1059,13 +1091,7 @@ func (e *Engine) deliver(ctx context.Context, chat ChatRef, m OutMessage) (int64
 		chat = e.d.Topics.Destination(tctx, chat, in)
 		cancel()
 		jump(chat)
-		// A notice sent to General or a fixed topic gets the button that
-		// opens its ClickUp task's topic on demand.
-		bctx, bcancel := context.WithTimeout(context.WithoutCancel(ctx), e.s.RequestTimeout)
-		if b, ok := e.d.Topics.TaskTopicButton(bctx, chat.WorkspaceID, in); ok {
-			m = withDataButton(m, b)
-		}
-		bcancel()
+		taskButton(chat)
 	}
 	id, err := send(chat)
 	if err == nil {
@@ -1078,6 +1104,7 @@ func (e *Engine) deliver(ctx context.Context, chat ChatRef, m OutMessage) (int64
 		if ok {
 			chat = again
 			jump(chat)
+			taskButton(chat)
 			id, err = send(chat)
 			if err == nil {
 				e.d.Topics.NoteSent(chat)

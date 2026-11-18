@@ -359,6 +359,7 @@ func buildTopicLifecycle(pool *pgxpool.Pool, s settings.Settings, integrations *
 	return behavior.NewTopicLifecycle(behavior.TopicLifecycleDeps{
 		Store: store, Closer: closer, Executions: ag.conversations, Reader: reader,
 		CloseStatuses: s.TopicCloseStatuses,
+		LinkRetention: time.Duration(s.MessageLinkRetentionDays) * 24 * time.Hour,
 		Workspaces: func(ctx context.Context) ([]string, error) {
 			var ids []string
 			for offset := int32(0); ; offset += 100 {

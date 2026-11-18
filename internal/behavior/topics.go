@@ -261,6 +261,11 @@ func (r *TopicRouter) Destination(ctx context.Context, base ChatRef, in TopicInt
 	if r == nil || base.ChatID == 0 || base.ThreadID != 0 {
 		return base
 	}
+	// Report topic "general" with a ClickUp task that has a topic: the
+	// task's topic (Phase 10 REQ-3). Otherwise General, as before.
+	if to, ok := r.generalTaskDestination(ctx, base, in); ok {
+		return to
+	}
 	kind, key := r.subject(ctx, base.WorkspaceID, in)
 	if kind == "" {
 		return base
