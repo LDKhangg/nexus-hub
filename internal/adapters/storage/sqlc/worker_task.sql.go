@@ -180,10 +180,16 @@ SELECT j.workspace_id, j.execution_id, j.step_id
 FROM public.worker_jobs j
 JOIN public.workflow_executions e ON e.workspace_id = j.workspace_id AND e.id = j.execution_id
 JOIN public.execution_steps s ON s.workspace_id = j.workspace_id AND s.execution_id = j.execution_id AND s.step_key = j.step_id
-WHERE (j.state IN ('SUCCEEDED', 'CANCELLED')
-       OR (j.state IN ('FAILED', 'NEEDS_INPUT') AND s.kind = 'orchestrator.run_task'))
+WHERE ((j.state IN ('SUCCEEDED', 'CANCELLED')
+        AND NOT COALESCE(jsonb_path_exists(s.checkpoint,
+            '$.references[*] ? (@.kind == "orchestrator_wait" && (@.reference_id starts with "gate:" || @.reference_id starts with "clarify:"))',
+            '{}'::jsonb, true), false))
+       OR (j.state IN ('FAILED', 'NEEDS_INPUT', 'INTERRUPTED') AND s.kind = 'orchestrator.run_task'
+           AND COALESCE(jsonb_path_exists(s.checkpoint,
+               '$.references[*] ? (@.kind == "orchestrator_wait" && @.reference_id starts with "job:")',
+               '{}'::jsonb, true), false)))
   AND s.state = 'WAITING'
-  AND e.state IN ('WAITING_FOR_USER', 'WAITING_FOR_APPROVAL')
+  AND e.state IN ('WAITING_FOR_USER', 'WAITING_FOR_APPROVAL', 'WAITING_FOR_WORKER')
 ORDER BY j.updated_at
 LIMIT $1
 `
@@ -195,8 +201,12 @@ type ListWorkerJobsToWakeRow struct {
 }
 
 // Jobs that ended in a way that finishes their workflow step (succeeded or
-// cancelled; for an orchestrated task step also failed or needs input)
-// while the step still waits: the wake-up was missed.
+// cancelled) while the step still waits: the wake-up was missed. An
+// orchestrated task step that waits for an owner gate or answer is left
+// alone (it re-checks its job once the owner decided). An orchestrated
+// task step still waiting for its worker (wait marker job:<id>) is also
+// woken when the job failed, needs input or was interrupted, so it moves to
+// the owner's Retry/Cancel wait (Phase 10 REQ-11/12).
 func (q *Queries) ListWorkerJobsToWake(ctx context.Context, rowLimit int32) ([]ListWorkerJobsToWakeRow, error) {
 	rows, err := q.db.Query(ctx, listWorkerJobsToWake, rowLimit)
 	if err != nil {
@@ -379,5 +389,45 @@ type SetWorkerTaskWaitingNoticeParams struct {
 
 func (q *Queries) SetWorkerTaskWaitingNotice(ctx context.Context, arg SetWorkerTaskWaitingNoticeParams) error {
 	_, err := q.db.Exec(ctx, setWorkerTaskWaitingNotice, arg.WaitingNotice, arg.WorkspaceID, arg.ExecutionID)
+	return err
+}
+
+const upsertOrchestratedWorkerRoute = `-- name: UpsertOrchestratedWorkerRoute :exec
+INSERT INTO public.worker_task_routes (workspace_id, execution_id, integration_id, chat_id, thread_id, repo, task_ref, clickup_task_id, instruction_version)
+VALUES ($1, $2, $3, $4, $5,
+        $6, $7, $8, $9)
+ON CONFLICT (workspace_id, execution_id) DO UPDATE
+SET repo = EXCLUDED.repo, progress_message_id = 0, progress_job_attempt = 0, waiting_notice = '',
+    instruction_version = EXCLUDED.instruction_version
+`
+
+type UpsertOrchestratedWorkerRouteParams struct {
+	WorkspaceID        pgtype.UUID
+	ExecutionID        int64
+	IntegrationID      pgtype.UUID
+	ChatID             int64
+	ThreadID           int64
+	Repo               string
+	TaskRef            string
+	ClickupTaskID      string
+	InstructionVersion int64
+}
+
+// The topic route of an orchestrated execution's worker job (Phase 10
+// REQ-12): the same row a local task has, so the job gets the same topic
+// messages, progress message and Retry/Cancel buttons. One row per
+// execution: a later job of the execution starts a new progress message.
+func (q *Queries) UpsertOrchestratedWorkerRoute(ctx context.Context, arg UpsertOrchestratedWorkerRouteParams) error {
+	_, err := q.db.Exec(ctx, upsertOrchestratedWorkerRoute,
+		arg.WorkspaceID,
+		arg.ExecutionID,
+		arg.IntegrationID,
+		arg.ChatID,
+		arg.ThreadID,
+		arg.Repo,
+		arg.TaskRef,
+		arg.ClickupTaskID,
+		arg.InstructionVersion,
+	)
 	return err
 }

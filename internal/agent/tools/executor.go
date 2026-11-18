@@ -126,6 +126,11 @@ type Executor struct {
 	// agent jobs never do, so their policy is unchanged. A listed tool must
 	// still be enabled, and pass budgets, audit and idempotency.
 	UnscopedWrites []string
+	// AuditInput, when set, rewrites a call's input before it is stored in
+	// the audit row or a dry-run summary (for example to keep a hash of a
+	// text instead of the text). The tool and the idempotency key still use
+	// the real input.
+	AuditInput func(tool string, input json.RawMessage) json.RawMessage
 
 	mu           sync.Mutex
 	calls        int
@@ -187,7 +192,7 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 	// The audit row stores only validated identifiers: an unregistered tool
 	// name from the LLM is replaced by a placeholder, never stored verbatim.
 	start := RunStart{WorkspaceID: e.workspaceID, JobID: e.jobID, Step: step, Tool: InvalidToolName, Tier: tenant.TierRead}
-	start.InputRedacted = e.redactInput(input)
+	start.InputRedacted = e.redactInput(e.auditInput(name, input))
 	defer func() { res.Tool = start.Tool }()
 
 	e.mu.Lock()
@@ -316,7 +321,7 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 	}
 	// 9. dry run
 	if tier != tenant.TierRead && e.policy.DryRun {
-		msg := fmt.Sprintf("DRY RUN: would call %s (%s) with %s", name, tier, e.san.CleanOutbound(string(input), false))
+		msg := fmt.Sprintf("DRY RUN: would call %s (%s) with %s", name, tier, e.san.CleanOutbound(string(e.auditInput(name, input)), false))
 		msg = capText(msg, e.limits.OutputCap)
 		e.finish(ctx, RunFinish{RunID: runID, Status: StatusDryRun, Summary: summarize(msg)})
 		return CallResult{Content: msg, Status: StatusDryRun, Tier: tier}
@@ -459,6 +464,14 @@ func (e *Executor) redactInput(input json.RawMessage) json.RawMessage {
 	}
 	b, _ := json.Marshal(e.san.CleanOutbound(strings.ToValidUTF8(s, ""), false))
 	return b
+}
+
+// auditInput is the input as audit rows and summaries may keep it.
+func (e *Executor) auditInput(name string, input json.RawMessage) json.RawMessage {
+	if e.AuditInput == nil {
+		return input
+	}
+	return e.AuditInput(name, input)
 }
 
 // key is the idempotency key of a call in this executor's scope.

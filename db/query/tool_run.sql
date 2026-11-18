@@ -13,8 +13,8 @@ LIMIT 1;
 
 -- name: InsertToolRun :one
 -- A behavior run's or workflow execution's row takes its correlation ID.
-INSERT INTO public.tool_runs(workspace_id, agent_job_id, behavior_run_id, workflow_execution_id, step, tool, tier, repo, account, idempotency_key, input_redacted, status, error_code, correlation_id)
-VALUES (sqlc.arg(workspace_id), sqlc.narg(agent_job_id), sqlc.narg(behavior_run_id), sqlc.narg(workflow_execution_id), sqlc.arg(step), sqlc.arg(tool), sqlc.arg(tier),
+INSERT INTO public.tool_runs(workspace_id, agent_job_id, behavior_run_id, workflow_execution_id, clickup_draft_id, step, tool, tier, repo, account, idempotency_key, input_redacted, status, error_code, correlation_id)
+VALUES (sqlc.arg(workspace_id), sqlc.narg(agent_job_id), sqlc.narg(behavior_run_id), sqlc.narg(workflow_execution_id), sqlc.narg(clickup_draft_id), sqlc.arg(step), sqlc.arg(tool), sqlc.arg(tier),
         sqlc.narg(repo), sqlc.narg(account), sqlc.arg(idempotency_key), sqlc.narg(input_redacted), sqlc.arg(status), sqlc.narg(error_code),
         COALESCE(
             (SELECT r.correlation_id FROM public.behavior_runs r
@@ -56,6 +56,14 @@ SELECT COUNT(*)::int AS writes,
        COUNT(*) FILTER (WHERE tier = 'dangerous')::int AS dangerous
 FROM public.tool_runs
 WHERE workflow_execution_id = sqlc.arg(workflow_execution_id)::bigint AND tier <> 'read'
+  AND status IN ('started','ok','timeout','unknown_outcome','dry_run');
+
+-- name: CountClickUpDraftBudgetRuns :one
+-- The same count as CountJobBudgetRuns for the tool runs of a ClickUp draft.
+SELECT COUNT(*)::int AS writes,
+       COUNT(*) FILTER (WHERE tier = 'dangerous')::int AS dangerous
+FROM public.tool_runs
+WHERE clickup_draft_id = sqlc.arg(clickup_draft_id)::bigint AND tier <> 'read'
   AND status IN ('started','ok','timeout','unknown_outcome','dry_run');
 
 -- name: ListToolRunsForBehaviorRun :many

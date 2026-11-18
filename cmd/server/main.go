@@ -119,6 +119,13 @@ func run() error {
 		return err
 	}
 	engine.SetTopics(topics)
+	// ClickUp drafts: every hub-written ClickUp comment asks the owner first.
+	clickUpDrafts, err := buildClickUpDrafts(pool, s, behaviors, integrations, ag, redactor, resolver, messenger)
+	if err != nil {
+		return err
+	}
+	// ClickUp notices of a task with a topic go to that topic (Phase 10).
+	worker.SetNoticeRouter(topics)
 	commands.SetTaskResolver(topics)
 	ag.actions.SetThreadRouter(topics)
 	workspaces, err := storage.NewWorkspaceRepository(pool)
@@ -145,25 +152,31 @@ func run() error {
 		taskStore      *storage.WorkerTaskStore
 		workerNotifier *behavior.WorkerNotifier
 		orchPorts      orchestratorPorts
+		// The report button of a final report (Phase 10 REQ-9) reads the
+		// stored result of an ended /task or /plan execution.
+		reports = &behavior.ExecutionReports{}
 	)
 	workflows, err := buildWorkflowRuntime(pool, s, ag, behaviors, runs, engine, func(reg *workflow.Registry, store *storage.WorkflowStore) error {
 		var err error
 		if taskStore, err = storage.NewWorkerTaskStore(pool, workerStore, store); err != nil {
 			return err
 		}
+		reports.Executions, reports.Routes, reports.Jobs = store, taskStore, workerStore
 		workerNotifier = behavior.NewWorkerNotifier(behavior.WorkerNotifierDeps{
 			Routes: taskStore, Messenger: messenger, Topics: topics, Approvals: behaviors,
 			Devices: workerStore, Telemetry: workerStore, Thresholds: thresholds, Waker: taskStore,
+			ReportButtons: reports,
 		})
 		step := &behavior.WorkerRunStep{Jobs: workerStore, Routes: taskStore, Instructions: ag.conversations, Queued: workerNotifier}
 		if err := step.Register(reg); err != nil {
 			return err
 		}
-		return registerOrchestratorSteps(&orchPorts, reg, pool, store, s, ag, behaviors, messenger, topics, workerStore, taskStore, integrations, redactor)
+		return registerOrchestratorSteps(&orchPorts, reg, pool, store, s, ag, behaviors, messenger, topics, workerStore, taskStore, integrations, redactor, clickUpDrafts, workerNotifier)
 	})
 	if err != nil {
 		return err
 	}
+	reports.PlanRoutes, reports.Plans = orchPorts.Routes, orchPorts.Plans
 	workerStore.SetObserver(workerNotifier)
 	// The Telegram assistant keeps the owner's conversation in memory and
 	// uses the configured provider's tool-calling path. Workflow reads and
@@ -182,7 +195,7 @@ func run() error {
 			Timeout: s.AssistantTimeout, RatePerMinute: int(s.AssistantRatePerMinute),
 		}
 		telegramHandler.WithAssistant(assistant.Inbox)
-		telegramHandler.WithReplyTasks(behavior.ReplyTasks{Conversations: ag.conversations})
+		telegramHandler.WithReplyTasks(behavior.ReplyTasks{Conversations: ag.conversations, Links: topics})
 	}
 	inbox := behavior.NewInboxWorker(behavior.InboxDeps{
 		Workers: workerStore, WorkerTelemetry: workerStore, LocalTasks: taskStore, WorkerJobs: workerStore, WorkerNotifier: workerNotifier,
@@ -199,6 +212,8 @@ func run() error {
 		Links:             topics,
 		InstructionWaker:  &orchestrator.InstructionWaker{Steps: workflows.store, Waker: taskStore},
 		OrchestratedTasks: orchPorts.Tasks, OrchestratorPlans: orchPorts.Plans,
+		ClickUpDrafts: clickUpDrafts, ReportDrafts: clickUpDrafts, CommentLinks: topics,
+		ExecutionReports: reports,
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout, CommandTopic: s.TelegramCommandTopic})
 	// A done/closed ClickUp task closes its topic once no execution of it is
 	// active (status events and a periodic sweep).
@@ -208,7 +223,7 @@ func run() error {
 	}
 	notices.SetStatusObserver(lifecycle.StatusChanged)
 	topics.OnTaskTopicOpen(lifecycle.TopicReopened)
-	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows, lifecycle, &behavior.WorkerSweeper{Store: workerStore}, workerNotifier, &behavior.WorkerTaskSweeper{Store: taskStore}}
+	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows, lifecycle, &behavior.WorkerSweeper{Store: workerStore}, workerNotifier, &behavior.WorkerTaskSweeper{Store: taskStore}, clickUpDrafts}
 	// Telegram updates arrive by webhook, or by long polling when the hub
 	// has no public URL (telegram_mode, see settings.TelegramPolling). Both
 	// paths end in the same handler.

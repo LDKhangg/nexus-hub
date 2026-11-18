@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"strconv"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/domain"
@@ -35,7 +36,12 @@ type NoticeWorker struct {
 	settings WorkerSettings
 	now      func() time.Time
 	wait     func(context.Context, time.Duration) error
+	router   NoticeRouter
 }
+
+// SetNoticeRouter routes ClickUp notices to their task's existing topic.
+// Call it before Run.
+func (w *NoticeWorker) SetNoticeRouter(r NoticeRouter) { w.router = r }
 
 func NewNoticeWorker(store NoticeDeliveryStore, sender NoticeSender, settings WorkerSettings) *NoticeWorker {
 	if settings.PollInterval <= 0 {
@@ -83,9 +89,7 @@ func (w *NoticeWorker) processNext(ctx context.Context) error {
 		}
 		return err // Transient database failure: retain lease for recovery.
 	}
-	sendCtx, cancel := context.WithTimeout(ctx, w.settings.RequestTimeout)
-	receipt, err := w.sender.Send(sendCtx, target, job.Event)
-	cancel()
+	receipt, err := w.deliver(ctx, *job, target)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -115,4 +119,57 @@ func (w *NoticeWorker) processNext(ctx context.Context) error {
 		delay = after
 	}
 	return w.store.MarkRetry(ctx, *job, w.now().Add(delay), code)
+}
+
+// deliver sends the job's notice. With a router and no configured thread,
+// a notice about a ClickUp task that has a topic goes to that topic; a
+// send the topic made fail (rejected, so nothing was delivered) is resent
+// once, in the reopened topic or in General. A notice that goes to
+// General carries the router's button when the sender supports buttons.
+// The receipt names the chat and thread the notice went to.
+func (w *NoticeWorker) deliver(ctx context.Context, job NoticeJob, target tenant.TelegramTargetConfig) (DeliveryReceipt, error) {
+	chat, perr := strconv.ParseInt(target.ChatID, 10, 64)
+	routable := w.router != nil && target.MessageThreadID == nil && perr == nil && chat != 0 && job.Event.ExternalID != ""
+	var routed int64
+	if routable {
+		rctx, rcancel := context.WithTimeout(ctx, w.settings.RequestTimeout)
+		routed = w.router.NoticeThread(rctx, job.WorkspaceID, job.TargetIntegrationID, chat, job.Event.ExternalID)
+		rcancel()
+	}
+	send := func(thread int64) (DeliveryReceipt, error) {
+		to := target
+		if thread > 0 {
+			to.MessageThreadID = &thread
+		}
+		sendCtx, cancel := context.WithTimeout(ctx, w.settings.RequestTimeout)
+		defer cancel()
+		var receipt DeliveryReceipt
+		var err error
+		if bs, ok := w.sender.(ButtonNoticeSender); ok && routable && thread == 0 {
+			var button *NoticeButton
+			if b, ok := w.router.NoticeButton(job.Event.ExternalID); ok {
+				button = &b
+			}
+			receipt, err = bs.SendNotice(sendCtx, to, job.Event, button)
+		} else {
+			receipt, err = w.sender.Send(sendCtx, to, job.Event)
+		}
+		if err == nil {
+			receipt.ChatID = chat
+			if to.MessageThreadID != nil {
+				receipt.ThreadID = *to.MessageThreadID
+			}
+		}
+		return receipt, err
+	}
+	receipt, err := send(routed)
+	if err != nil && routed > 0 && ctx.Err() == nil {
+		rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), w.settings.RequestTimeout)
+		next, ok := w.router.NoticeThreadRejected(rctx, job.WorkspaceID, job.TargetIntegrationID, chat, routed, err)
+		rcancel()
+		if ok {
+			receipt, err = send(next)
+		}
+	}
+	return receipt, err
 }

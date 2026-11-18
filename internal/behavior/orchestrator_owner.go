@@ -51,6 +51,9 @@ type OrchestratorOwner struct {
 	Topics    orchestratorTopics // nil: messages go to the route chat
 	Gates     OrchestratorGateStore
 	Now       func() time.Time
+	// ReportButton adds "📤 Đăng lên ClickUp" to the final report of an
+	// execution on a ClickUp task (Phase 10 REQ-9).
+	ReportButton bool
 }
 
 var _ orchestrator.Owner = (*OrchestratorOwner)(nil)
@@ -80,14 +83,7 @@ func (o *OrchestratorOwner) send(ctx context.Context, route orchestrator.Route, 
 	if o.Messenger == nil {
 		return 0, ErrNotAvailable
 	}
-	chat := ChatRef{WorkspaceID: route.WorkspaceID, IntegrationID: route.IntegrationID, ChatID: route.ChatID, ThreadID: route.ThreadID}
-	if o.Topics != nil {
-		intent := TopicIntent{Mode: ReportTopicWorkflow, ExecutionID: route.ExecutionID}
-		if route.ClickUpTaskID != "" {
-			intent = TopicIntent{Mode: ReportTopicTask, ExecutionID: route.ExecutionID, TaskID: route.ClickUpTaskID}
-		}
-		chat = o.Topics.Destination(ctx, ChatRef{WorkspaceID: route.WorkspaceID, IntegrationID: route.IntegrationID, ChatID: route.ChatID}, intent)
-	}
+	chat := o.TopicChat(ctx, route)
 	id, err := o.Messenger.SendMessage(ctx, chat, m)
 	if err == nil {
 		if o.Topics != nil {
@@ -106,11 +102,41 @@ func (o *OrchestratorOwner) send(ctx context.Context, route orchestrator.Route, 
 	return 0, err
 }
 
+// TopicChat is where the owner messages of route go: the task topic, else
+// the workflow topic, else the route chat. It sends nothing (a draft
+// preview of the behavior-actions executor uses it, Phase 10 REQ-10).
+func (o *OrchestratorOwner) TopicChat(ctx context.Context, route orchestrator.Route) ChatRef {
+	chat := ChatRef{WorkspaceID: route.WorkspaceID, IntegrationID: route.IntegrationID, ChatID: route.ChatID, ThreadID: route.ThreadID}
+	if o.Topics != nil {
+		intent := TopicIntent{Mode: ReportTopicWorkflow, ExecutionID: route.ExecutionID}
+		if route.ClickUpTaskID != "" {
+			intent = TopicIntent{Mode: ReportTopicTask, ExecutionID: route.ExecutionID, TaskID: route.ClickUpTaskID}
+		}
+		chat = o.Topics.Destination(ctx, ChatRef{WorkspaceID: route.WorkspaceID, IntegrationID: route.IntegrationID, ChatID: route.ChatID}, intent)
+	}
+	return chat
+}
+
 // Say sends one message.
 func (o *OrchestratorOwner) Say(ctx context.Context, route orchestrator.Route, text string) error {
 	_, err := o.send(ctx, route, OutMessage{Text: capRunes(text, maxTelegramRunes)})
 	return err
 }
+
+// SayFinal sends the final report; with ReportButton on and a ClickUp task
+// it carries "📤 Đăng lên ClickUp".
+func (o *OrchestratorOwner) SayFinal(ctx context.Context, route orchestrator.Route, text string) error {
+	m := OutMessage{Text: capRunes(text, maxTelegramRunes)}
+	if o.ReportButton && route.ClickUpTaskID != "" {
+		if b, ok := ExecutionReportButton(route.ExecutionID); ok {
+			m.Buttons = [][]Button{{b}}
+		}
+	}
+	_, err := o.send(ctx, route, m)
+	return err
+}
+
+var _ orchestrator.FinalSayer = (*OrchestratorOwner)(nil)
 
 func runFence(f orchestrator.Fence) RunFence {
 	return RunFence{JobID: f.JobID, WorkspaceID: f.WorkspaceID, ExecutionID: f.ExecutionID, StepKey: f.StepKey,
@@ -222,9 +248,14 @@ func (w *InboxWorker) noteInstructionAdded(ctx context.Context, workspaceID stri
 
 // --- worker jobs and repos for orchestrated tasks ---
 
-// OrchestratorJobs adapts the 7a job store to orchestrator.WorkerJobs.
+// OrchestratorJobs adapts the 7a job store to orchestrator.WorkerJobs. With
+// Routes and Queued set, an orchestrated job gets the topic messages of a
+// 7a /task job (Phase 10 REQ-12): its route is stored before the job is
+// created, and the "waiting for a machine" notice follows the creation.
 type OrchestratorJobs struct {
-	Jobs LocalTaskJobs
+	Jobs   LocalTaskJobs
+	Routes OrchestratorWorkerRoutes // nil: no topic messages for the job
+	Queued WorkerJobQueued          // nil: no waiting notice
 }
 
 var _ orchestrator.WorkerJobs = OrchestratorJobs{}
@@ -232,7 +263,7 @@ var _ orchestrator.WorkerJobs = OrchestratorJobs{}
 func orchestratorJob(j WorkerJob) orchestrator.WorkerJob {
 	out := orchestrator.WorkerJob{ID: j.ID, State: j.State}
 	if r := j.Result; r != nil {
-		out.ReasonCode, out.Branch, out.PRURL, out.TestOutcome = r.ReasonCode, r.Branch, r.PRURL, r.TestOutcome
+		out.ReasonCode, out.Branch, out.PRURL, out.TestOutcome, out.Summary = r.ReasonCode, r.Branch, r.PRURL, r.TestOutcome, r.Summary
 	}
 	return out
 }
@@ -249,6 +280,9 @@ func (a OrchestratorJobs) CreateJob(ctx context.Context, workspaceID string, exe
 	j, err := a.Jobs.CreateJob(ctx, workspaceID, executionID, stepKey, caps, payload)
 	if err != nil {
 		return orchestrator.WorkerJob{}, err
+	}
+	if a.Queued != nil {
+		a.Queued.WorkerJobQueued(ctx, j)
 	}
 	return orchestratorJob(j), nil
 }

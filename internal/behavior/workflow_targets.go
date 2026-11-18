@@ -57,11 +57,25 @@ func (w *InboxWorker) workflowOrAssistant(ctx context.Context, u InboundUpdate, 
 		return w.reply(ctx, to, msgHint, "")
 	}
 	key := strings.TrimPrefix(strings.TrimSpace(u.Args), AssistantTextPrefix)
+	// The link is read before the text is taken, so a retry still has it.
+	link, linked, err := lookupReplyComment(ctx, w.d.CommentLinks, u.WorkspaceID, u.IntegrationID, u.ChatID, u.ReplyToMessageID)
+	if err != nil {
+		if u.Attempts < w.settings.MaxAttempts {
+			return outcome{code: "storage", retry: true}
+		}
+		a.Inbox.take(u.WorkspaceID, key, w.now())
+		return w.reply(ctx, to, msgFailed, "comment_link_unreadable")
+	}
 	text, ok := a.Inbox.take(u.WorkspaceID, key, w.now())
 	if !ok {
 		return w.reply(ctx, to, msgAssistantGone, "assistant_text_gone")
 	}
 	trimmed := strings.TrimSpace(text)
+	// A reply to a message showing a ClickUp comment is always for the
+	// assistant: it never becomes a worker note or a clarification.
+	if linked && trimmed != "" && !strings.HasPrefix(trimmed, "/") {
+		return w.queueAssistantJob(ctx, assistantJob{u: u, to: to, actor: actor, corr: corr, text: text, replyContext: replyCommentContext(link.TaskID)})
+	}
 	// A message that is only a ClickUp task link, written in General, gets
 	// the "Mở topic" button of that task's topic.
 	if w.d.Links != nil {

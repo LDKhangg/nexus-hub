@@ -73,7 +73,7 @@ JOIN public.execution_steps st
 JOIN public.workflow_signals sg
   ON sg.workspace_id = st.workspace_id AND sg.execution_id = st.execution_id
  AND sg.step_key = st.step_key AND sg.consumed_at IS NULL
-WHERE e.state IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL')
+WHERE e.state IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','WAITING_FOR_WORKER')
   AND NOT EXISTS (SELECT 1 FROM public.jobs j
                   WHERE j.workspace_id = e.workspace_id AND j.execution_id = e.id
                     AND j.status IN ('pending','processing'))

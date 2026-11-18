@@ -248,6 +248,45 @@ func buildBehaviorEngine(pool *pgxpool.Pool, s settings.Settings, store *storage
 	return runs, engine, nil
 }
 
+// buildClickUpDrafts wires the ClickUp draft-and-confirm flow (Phase 10
+// REQ-7): drafts and their audit rows in PostgreSQL, the approval store for
+// the preview buttons, the workspace's ClickUp source credential and policy,
+// and the task link shown after posting. Nothing posts without "Đăng".
+func buildClickUpDrafts(pool *pgxpool.Pool, s settings.Settings, approvals behavior.ApprovalStore, integrations *storage.IntegrationRepository, ag agentServices, redactor *agent.Redactor, resolver *secrets.Resolver, messenger behavior.Messenger) (*behavior.ClickUpDrafts, error) {
+	store, err := storage.NewClickUpDraftStore(pool)
+	if err != nil {
+		return nil, errors.New("clickup draft store startup failed")
+	}
+	audit, err := storage.NewClickUpDraftToolRunStore(pool)
+	if err != nil {
+		return nil, errors.New("clickup draft tool run store startup failed")
+	}
+	policies := behaviorPolicies{integrations: integrations, known: ag.known}
+	reader := clickuptools.NewTaskReader(netguard.Client(s.ToolTimeout, netguard.DefaultHosts), resolver)
+	drafts, err := behavior.NewClickUpDrafts(behavior.ClickUpDraftDeps{
+		Store: store, Approvals: approvals, Messenger: messenger, Policies: policies,
+		Callers: behavior.DraftExecutorFactory(ag.reg, audit, redactor, ag.limits),
+		People:  ag.people, Redactor: redactor,
+		TaskURL: func(ctx context.Context, workspaceID, taskID string) string {
+			cfg, err := policies.RunPolicy(ctx, workspaceID, "")
+			if err != nil {
+				return ""
+			}
+			st, err := reader.ReadTask(ctx, workspaceID, cfg.ClickUpTokenRef, taskID)
+			if err != nil {
+				return ""
+			}
+			return st.URL
+		},
+	}, behavior.ClickUpDraftSettings{
+		Expiry: time.Duration(s.ClickUpDraftExpiryHours) * time.Hour, RequestTimeout: s.NoticeRequestTimeout,
+	})
+	if err != nil {
+		return nil, errors.New("clickup drafts startup failed")
+	}
+	return drafts, nil
+}
+
 // taskReader adapts the ClickUp exact task reader to the engine.
 type taskReader struct{ r *clickuptools.TaskReader }
 
@@ -359,6 +398,7 @@ func buildTopicLifecycle(pool *pgxpool.Pool, s settings.Settings, integrations *
 	return behavior.NewTopicLifecycle(behavior.TopicLifecycleDeps{
 		Store: store, Closer: closer, Executions: ag.conversations, Reader: reader,
 		CloseStatuses: s.TopicCloseStatuses,
+		LinkRetention: time.Duration(s.MessageLinkRetentionDays) * 24 * time.Hour,
 		Workspaces: func(ctx context.Context) ([]string, error) {
 			var ids []string
 			for offset := int32(0); ; offset += 100 {
@@ -718,11 +758,14 @@ func orchestratorStepSettings(s settings.Settings) orchestrator.StepSettings {
 // jobs go through the 7a job store, owner decisions through bound
 // approvals. Read-only tasks run in process on the investigate executor
 // (the Tier-2 read loop under the ClickUp source's tool policy, read tools
-// only). The behavior-actions executor is not wired (Phase 8), so Plan is
-// never offered clickup.write or telegram.notify.
+// only). The behavior-actions executor (Phase 10 REQ-10) turns clickup.write
+// into a ClickUp draft the owner must confirm (never a direct post) and
+// telegram.notify into a topic message; a draft that ends wakes its step.
+// Worker jobs of an orchestrated execution get the /task topic messages,
+// progress and Retry/Cancel (REQ-12).
 func registerOrchestratorSteps(ports *orchestratorPorts, reg *workflow.Registry, pool *pgxpool.Pool, store *storage.WorkflowStore, s settings.Settings, ag agentServices,
 	behaviors *storage.BehaviorStore, messenger behavior.Messenger, topics orchestratorTopics, jobs behavior.LocalTaskJobs, tasks *storage.WorkerTaskStore,
-	integrations *storage.IntegrationRepository, redactor *agent.Redactor) error {
+	integrations *storage.IntegrationRepository, redactor *agent.Redactor, drafts *behavior.ClickUpDrafts, queued behavior.WorkerJobQueued) error {
 	plans, err := storage.NewOrchestratorStore(pool)
 	if err != nil {
 		return err
@@ -739,6 +782,20 @@ func registerOrchestratorSteps(ports *orchestratorPorts, reg *workflow.Registry,
 	template.ClassifyModel = s.TriageModel
 	template.MaxRepair = int(s.OrchestratorMaxRepair)
 	template.MinConfidence = s.OrchestratorMinConfidence
+	owner := behavior.NewOrchestratorOwner(messenger, topics, behaviors)
+	owner.ReportButton = drafts != nil
+	executors := map[string]orchestrator.TaskExecutor{
+		orchestrator.ExecutorInvestigate: &behavior.OrchestratorInvestigate{
+			Policies:      behaviorPolicies{integrations: integrations, known: ag.known},
+			Investigators: ag.investigators,
+			Registry:      ag.reg, Sanitizer: redactor, Limits: ag.limits, Audit: investigateAudit,
+			MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
+		},
+	}
+	if drafts != nil {
+		executors[orchestrator.ExecutorBehaviorActions] = &behavior.OrchestratorActions{Drafts: drafts, Owner: owner, Chat: owner.TopicChat}
+		drafts.OnFinished(behavior.OrchestratorDraftWaker(tasks))
+	}
 	steps := &orchestrator.Steps{
 		Runtime: func(ctx context.Context, ws string) (orchestrator.AIRuntime, error) {
 			p, err := ag.provider(ctx, ws)
@@ -749,23 +806,16 @@ func registerOrchestratorSteps(ports *orchestratorPorts, reg *workflow.Registry,
 		},
 		Template: *template, Registry: orchestrator.NewCapabilityRegistry(), Plans: plans, Steps: store,
 		Instructions: ag.conversations, Routes: routes,
-		Repos: behavior.OrchestratorRepos{Starter: tasks, Memory: tasks},
-		Jobs:  behavior.OrchestratorJobs{Jobs: jobs},
-		Owner: behavior.NewOrchestratorOwner(messenger, topics, behaviors),
-		Executors: map[string]orchestrator.TaskExecutor{
-			orchestrator.ExecutorInvestigate: &behavior.OrchestratorInvestigate{
-				Policies:      behaviorPolicies{integrations: integrations, known: ag.known},
-				Investigators: ag.investigators,
-				Registry:      ag.reg, Sanitizer: redactor, Limits: ag.limits, Audit: investigateAudit,
-				MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
-			},
-		},
-		Settings: orchestratorStepSettings(s),
+		Repos:     behavior.OrchestratorRepos{Starter: tasks, Memory: tasks},
+		Jobs:      behavior.OrchestratorJobs{Jobs: jobs, Routes: tasks, Queued: queued},
+		Owner:     owner,
+		Executors: executors,
+		Settings:  orchestratorStepSettings(s),
 	}
 	if err := steps.Register(reg); err != nil {
 		return err
 	}
-	ports.Tasks, ports.Plans = routes, plans
+	ports.Tasks, ports.Plans, ports.Routes = routes, plans, routes
 	return nil
 }
 
@@ -773,6 +823,7 @@ func registerOrchestratorSteps(ports *orchestratorPorts, reg *workflow.Registry,
 // (/plan, start_task, /status). Both stay nil when the orchestrator is not
 // registered.
 type orchestratorPorts struct {
-	Tasks behavior.OrchestratedTaskStarter
-	Plans behavior.OrchestratorPlanReader
+	Tasks  behavior.OrchestratedTaskStarter
+	Plans  behavior.OrchestratorPlanReader
+	Routes orchestrator.RouteReader
 }

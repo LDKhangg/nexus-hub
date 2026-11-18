@@ -97,6 +97,17 @@ type InboxDeps struct {
 	// OrchestratorPlans adds the plan, task, decision and budget lines to
 	// /status of an orchestrated execution. Optional.
 	OrchestratorPlans OrchestratorPlanReader
+	// ClickUpDrafts backs the "Đăng" / "Sửa" / "Huỷ" / "Thử lại" buttons
+	// and the edit replies of ClickUp drafts. Nil answers "not available".
+	ClickUpDrafts ClickUpDraftHandler
+	// ExecutionReports and ReportDrafts back "📤 Đăng lên ClickUp" of a final
+	// report (Phase 10 REQ-9). Nil answers "not available".
+	ExecutionReports ExecutionReportSource
+	// ReportDrafts also backs the draft_clickup_comment tool (nil hides it).
+	ReportDrafts ReportDrafts
+	// CommentLinks finds the ClickUp comment a replied-to Telegram message
+	// shows, so a draft is a threaded reply. Optional.
+	CommentLinks CommentLinkReader
 }
 
 // InboxWorker processes stored Telegram updates: built-in commands,
@@ -247,6 +258,9 @@ func (w *InboxWorker) dispatch(ctx context.Context, u InboundUpdate, corr string
 		}
 		if strings.HasPrefix(u.Command, taskTopicCallbackPrefix) {
 			return w.taskTopicCallback(ctx, u, to)
+		}
+		if strings.HasPrefix(u.Command, executionReportCallbackPrefix) {
+			return w.executionReportCallback(ctx, u, to)
 		}
 		return w.callback(ctx, u, to, actor, corr)
 	case UpdateCommand, UpdateText, UpdateOther:
@@ -404,6 +418,8 @@ func (w *InboxWorker) command(ctx context.Context, u InboundUpdate, to ChatRef, 
 		return w.taskCommand(ctx, u, to, args)
 	case "/plan":
 		return w.planCommand(ctx, u, to, args)
+	case "/comment":
+		return w.commentCommand(ctx, u, to, actor, corr)
 	case "/retry":
 		reply, err = w.retryCommand(hctx, u, args)
 	case "/status", "/list", "/cancel", "/resume", "/note":
@@ -434,6 +450,7 @@ func (w *InboxWorker) helpText(ctx context.Context, workspaceID string) string {
 	b.WriteString("\n/worker [enroll|list|revoke <tên>]: máy local làm việc")
 	b.WriteString("\n/task [TASK-ID] <yêu cầu>: giao việc cho máy local\n/retry [WF-id]: thử lại việc của máy local")
 	b.WriteString("\n/plan [TASK-ID] <yêu cầu>: AI lập kế hoạch rồi làm từng bước")
+	b.WriteString("\n/comment <nội dung>: soạn bình luận ClickUp cho task của topic (xem trước rồi mới đăng)")
 	b.WriteString("\n/note [WF-id] <nội dung>: bổ sung yêu cầu\n/cancel [WF-id]: đề nghị huỷ\n/resume [WF-id]: đề nghị tiếp tục")
 	if w.d.Defs == nil {
 		return b.String()
@@ -472,6 +489,12 @@ func callbackArgs(args string) (string, int64) {
 	qid, msg, _ := strings.Cut(args, " ")
 	id, _ := strconv.ParseInt(msg, 10, 64)
 	return qid, id
+}
+
+// draftLiveButtons is implemented by a draft handler that can tell whether a
+// message still shows a live approval of the draft.
+type draftLiveButtons interface {
+	HasLiveButtons(ctx context.Context, p DraftPress) bool
 }
 
 func (w *InboxWorker) callback(ctx context.Context, u InboundUpdate, to ChatRef, actor, corr string) outcome {
@@ -540,16 +563,50 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 		return w.workflowTargetCallback(ctx, u, to, data, a, actor, corr)
 	}
 	if a.Kind == ApprovalWorkerJob {
-		if a.Decision != "" || !w.now().Before(a.ExpiresAt) {
-			return msgStale, "stale", true
+		toast, code, remove := msgStale, "stale", true
+		if a.Decision == "" && w.now().Before(a.ExpiresAt) {
+			toast, code, remove = w.workerJobCallback(ctx, u, data, a, actor)
 		}
-		return w.workerJobCallback(ctx, u, data, a, actor)
+		// Cancel, even pressed twice, keeps "📤 Đăng lên ClickUp".
+		if remove && data.Kind == CallbackReject && w.keepWorkerReportButton(ctx, u, to, msgID, a) {
+			remove = false
+		}
+		return toast, code, remove
 	}
 	if a.Kind == ApprovalOrchestratorGate {
 		if a.Decision != "" || !w.now().Before(a.ExpiresAt) {
 			return msgStale, "stale", true
 		}
 		return w.orchestratorGateCallback(ctx, u, data, a, actor)
+	}
+	if a.Kind == ApprovalClickUpDraft {
+		// A press whose decision was saved but whose claim or cancel was not
+		// (a storage error or a crash) is replayed by the same owner; the
+		// handler checks the draft is still open with the same binding.
+		replay := a.DecidedBy == actor && (a.Decision == DecisionApproved && data.Kind == CallbackApprove ||
+			a.Decision == DecisionRejected && data.Kind == CallbackReject)
+		if a.Decision != "" && !replay || !w.now().Before(a.ExpiresAt) {
+			// A stale press never wipes buttons that are live on the message.
+			remove := true
+			if lc, ok := w.d.ClickUpDrafts.(draftLiveButtons); ok && lc != nil {
+				hctx, cancel := context.WithTimeout(ctx, w.settings.HandlerTimeout)
+				remove = !lc.HasLiveButtons(hctx, DraftPress{
+					WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, MessageID: msgID,
+					Kind: data.Kind, Approval: a, Actor: actor,
+				})
+				cancel()
+			}
+			return msgStale, "stale", remove
+		}
+		if w.d.ClickUpDrafts == nil {
+			return msgNotAvailable, "not_available", false
+		}
+		hctx, cancel := context.WithTimeout(ctx, w.settings.HandlerTimeout)
+		defer cancel()
+		return w.d.ClickUpDrafts.HandleDraftPress(hctx, DraftPress{
+			WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, MessageID: msgID,
+			Kind: data.Kind, Approval: a, Actor: actor,
+		})
 	}
 	if data.Kind.Decides() && (a.Decision != "" || !w.now().Before(a.ExpiresAt)) {
 		return msgStale, "stale", true
@@ -598,11 +655,26 @@ func (w *InboxWorker) freeText(ctx context.Context, u InboundUpdate, to ChatRef,
 		return w.reply(ctx, to, msgNoAnswer, "no_pending_answer")
 	}
 	hctx, cancel := context.WithTimeout(ctx, w.settings.HandlerTimeout)
-	reply, err := w.d.Callbacks.HandleFreeText(hctx, FreeTextAnswer{
-		WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, ThreadID: u.ThreadID,
-		Approval: a, Answer: a.PendingAnswer, Actor: actor, CorrelationID: corr,
-	})
+	var reply string
+	switch {
+	case a.Kind == ApprovalClickUpDraft && w.d.ClickUpDrafts == nil:
+		err = ErrNotAvailable
+	case a.Kind == ApprovalClickUpDraft:
+		reply, err = w.d.ClickUpDrafts.HandleDraftReply(hctx, DraftReply{
+			WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID,
+			Approval: a, Text: a.PendingAnswer, Actor: actor,
+		})
+	default:
+		reply, err = w.d.Callbacks.HandleFreeText(hctx, FreeTextAnswer{
+			WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, ThreadID: u.ThreadID,
+			Approval: a, Answer: a.PendingAnswer, Actor: actor, CorrelationID: corr,
+		})
+	}
 	cancel()
+	if errors.Is(err, ErrDraftRetry) && u.Attempts < w.settings.MaxAttempts {
+		// Replay-safe draft step failed: keep the staged reply, run it again.
+		return outcome{code: "storage", retry: true}
+	}
 	text, code := handlerText(reply, err)
 	// Handed on or refused: the staged text is never kept for a retry.
 	if cerr := w.d.Approvals.ClearPendingAnswer(ctx, u.WorkspaceID, a.ID); cerr != nil {

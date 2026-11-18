@@ -26,9 +26,15 @@ const (
 	gatePrefix    = "gate:"
 	clarifyPrefix = "clarify:"
 	jobPrefix     = "job:"
-	stepMarker    = "step:"
-	budgetPurpose = "budget_"
-	approvalGate  = "approval"
+	// jobOwnerPrefix: the step's worker job failed, needs input or was
+	// interrupted; the step waits for the owner's Retry or Cancel.
+	jobOwnerPrefix = "job_owner:"
+	// taskWaitPrefix: an in-process executor's task waits; the executor's
+	// own reference follows.
+	taskWaitPrefix = "task:"
+	stepMarker     = "step:"
+	budgetPurpose  = "budget_"
+	approvalGate   = "approval"
 
 	maxRefBytes        = 200
 	maxStoredRefs      = 16
@@ -36,6 +42,8 @@ const (
 	maxReportRunes     = 3500
 	maxQuestionRunes   = 600
 	maxResultTextBytes = 500
+	maxWaitRefBytes    = 128
+	maxTaskInputs      = 8
 )
 
 var reasonCodeRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
@@ -56,6 +64,9 @@ type stepRun struct {
 	tasks     []PlanTaskRecord // of the latest plan
 	decisions []DecisionRecord
 	wait      string // the wait marker of the step's own checkpoint
+	// prevWait keeps the wait marker the step woke from (resumeWait clears
+	// wait).
+	prevWait string
 
 	taskRef string // CheckpointTask of a run slot
 	jobRef  string // CheckpointWorkerJob of a run slot
@@ -152,6 +163,7 @@ func (s *Steps) load(ctx context.Context, sc workflow.StepContext) (*stepRun, er
 		}
 	}
 	r.wait = refValue(sc.Checkpoint, CheckpointWait)
+	r.prevWait = r.wait
 	r.taskRef = refValue(sc.Checkpoint, CheckpointTask)
 	route, err := s.Routes.GetRoute(ctx, r.ws, r.id)
 	if errors.Is(err, ErrRouteNotFound) {
@@ -226,6 +238,27 @@ func (r *stepRun) totalUsage() workflow.Usage {
 
 func (r *stepRun) success() (workflow.StepResult, error) {
 	return workflow.StepResult{Checkpoint: &workflow.Checkpoint{References: r.refs()}, Usage: r.totalUsage()}, nil
+}
+
+// waitWorker waits for the step's worker job (or for the owner's Retry or
+// Cancel of it) with a durable wake time at the end of the wall-time budget
+// (Phase 10 REQ-11): the step then runs again, finds the wall time spent and
+// takes the O4 outcome, so a worker that never returns cannot hold the
+// execution until its 24 h deadline.
+func (r *stepRun) waitWorker(state workflow.State, marker string) (workflow.StepResult, error) {
+	snap := r.budget.Snapshot()
+	wake := snap.StartedAt.Add(max(snap.Caps.Wall, 0))
+	secs := wake.Unix()
+	if wake.Nanosecond() > 0 {
+		secs++ // never before the budget's end
+	}
+	refs := append(r.refs(),
+		workflow.CheckpointReference{Kind: CheckpointWait, ReferenceID: marker},
+		workflow.CheckpointReference{Kind: CheckpointWakeAt, ReferenceID: strconv.FormatInt(secs, 10)})
+	return workflow.StepResult{
+		Checkpoint: &workflow.Checkpoint{References: refs}, Usage: r.totalUsage(),
+		WaitState: state, WaitReferences: refs,
+	}, nil
 }
 
 func (r *stepRun) waitFor(state workflow.State, marker string) (workflow.StepResult, error) {
@@ -678,9 +711,16 @@ func (r *stepRun) request() (string, error) {
 	return strings.Join(parts, "\n\n"), nil
 }
 
+// planInput offers the capabilities of wired executors; clickup.write only
+// when the execution works on a ClickUp task (a ClickUp write never names
+// another task, Phase 10 REQ-10).
 func (r *stepRun) planInput(request string) PlanInput {
+	caps := r.s.offeredCapabilities()
+	if r.route.ClickUpTaskID == "" {
+		caps = slices.DeleteFunc(caps, func(c string) bool { return c == CapClickUpWrite })
+	}
 	return PlanInput{
-		Request: request, Capabilities: r.s.offeredCapabilities(), MaxTasks: r.s.Settings.MaxTasks,
+		Request: request, Capabilities: caps, MaxTasks: r.s.Settings.MaxTasks,
 		Caps: r.budget.Snapshot().Caps.PlanCaps(),
 	}
 }
@@ -915,11 +955,21 @@ func (r *stepRun) execRef(kind, id string) string { return fmt.Sprintf("wf%d:%s:
 // finishTask stores a task result: fixed outcome and reason labels, ids
 // and links only.
 func (r *stepRun) finishTask(t PlanTaskRecord, ok bool, reason string, evidence []string, extra map[string]string) error {
-	outcome := "failed"
-	t.State = TaskFailed
+	outcome, state := "failed", TaskFailed
 	if ok {
-		outcome, t.State = "succeeded", TaskSucceeded
+		outcome, state = "succeeded", TaskSucceeded
 	}
+	return r.endTask(t, state, outcome, reason, evidence, extra)
+}
+
+// blockTask stores a BLOCKED result: the task did not fail, but cannot go
+// on (the owner cancelled it, or it expired); Evaluate decides.
+func (r *stepRun) blockTask(t PlanTaskRecord, reason string, evidence []string, extra map[string]string) error {
+	return r.endTask(t, TaskBlocked, "blocked", reason, evidence, extra)
+}
+
+func (r *stepRun) endTask(t PlanTaskRecord, state, outcome, reason string, evidence []string, extra map[string]string) error {
+	t.State = state
 	if !reasonCodeRe.MatchString(reason) {
 		reason = ""
 	}
@@ -966,17 +1016,33 @@ func (r *stepRun) runTask(t PlanTaskRecord, explicitRepo string) (workflow.StepR
 	if prof.Worker {
 		return r.runWorker(t, explicitRepo)
 	}
-	if t.State == TaskRunning && t.ResultStepID == r.key {
-		// A retry of this step found its in-process task still running: the
-		// earlier attempt was interrupted after it may have spent tokens and
-		// made tool calls. Never run it a second time; fail it and let
-		// Evaluate decide.
-		if err := r.finishTask(t, false, ReasonExecutorInterrupted, nil, nil); err != nil {
+	ex := r.s.Executors[t.Executor]
+	resumer, _ := ex.(TaskResumer)
+	if t.ResultStepID == r.key && (t.State == TaskRunning || t.State == TaskWaiting) {
+		if resumer == nil {
+			// A retry of this step found its in-process task still running:
+			// the earlier attempt was interrupted after it may have spent
+			// tokens and made tool calls. Never run it a second time; fail
+			// it and let Evaluate decide.
+			if err := r.finishTask(t, false, ReasonExecutorInterrupted, nil, nil); err != nil {
+				return r.failStep(ReasonStorageUnavailable, true)
+			}
+			return r.success()
+		}
+		// The task waits (or an attempt stopped before it recorded the
+		// wait): the executor reads its state again and never repeats a
+		// side effect (Phase 10 REQ-10).
+		ref := ""
+		if t.State == TaskWaiting && strings.HasPrefix(r.prevWait, taskWaitPrefix) {
+			ref = strings.TrimPrefix(r.prevWait, taskWaitPrefix)
+		}
+		out, err := resumer.ResumeTask(r.ctx, r.taskRun(t, ""), ref)
+		if err != nil {
 			return r.failStep(ReasonStorageUnavailable, true)
 		}
-		return r.success()
+		r.recordUsage(out.Usage)
+		return r.applyOutcome(t, out, true)
 	}
-	ex := r.s.Executors[t.Executor]
 	if ex == nil {
 		if err := r.finishTask(t, false, ReasonExecutorUnavailable, nil, nil); err != nil {
 			return r.failStep(ReasonStorageUnavailable, true)
@@ -995,17 +1061,74 @@ func (r *stepRun) runTask(t PlanTaskRecord, explicitRepo string) (workflow.StepR
 	if err := r.putTask(t); err != nil {
 		return r.failStep(ReasonStorageUnavailable, true)
 	}
-	snap := r.budget.Snapshot()
-	out, err := ex.RunTask(r.ctx, TaskRun{
-		WorkspaceID: r.ws, ExecutionID: r.id, StepKey: r.key, Task: planFromRecords([]PlanTaskRecord{t}).Tasks[0], Route: r.route, Fence: r.fence(),
-		Request: request, TokensLeft: max(snap.Caps.Tokens-snap.Used.Tokens, 0),
-	})
+	out, err := ex.RunTask(r.ctx, r.taskRun(t, request))
 	r.recordUsage(out.Usage)
 	if err != nil {
 		if r.ctx.Err() != nil {
 			return r.failStep(ReasonStorageUnavailable, true)
 		}
-		out = TaskOutcome{ReasonCode: "executor_failed"}
+		out = TaskOutcome{ReasonCode: ReasonExecutorFailed}
+	}
+	return r.applyOutcome(t, out, resumer != nil)
+}
+
+// taskRun is what an in-process executor gets for task t.
+func (r *stepRun) taskRun(t PlanTaskRecord, request string) TaskRun {
+	snap := r.budget.Snapshot()
+	return TaskRun{
+		WorkspaceID: r.ws, ExecutionID: r.id, StepKey: r.key, Task: planFromRecords([]PlanTaskRecord{t}).Tasks[0], Route: r.route, Fence: r.fence(),
+		Request: request, TokensLeft: max(snap.Caps.Tokens-snap.Used.Tokens, 0), Inputs: r.taskInputs(t),
+	}
+}
+
+// taskInputs are the bounded results of t's succeeded dependencies: the
+// stored summary, PR URL and branch (ids, links and short texts only).
+func (r *stepRun) taskInputs(t PlanTaskRecord) []string {
+	var out []string
+	for _, key := range t.DependsOn {
+		d, ok := r.task(key)
+		if !ok || d.State != TaskSucceeded || len(out) == maxTaskInputs {
+			continue
+		}
+		var res map[string]string
+		_ = json.Unmarshal(d.Result, &res)
+		var parts []string
+		if v := strings.TrimSpace(res["summary"]); v != "" {
+			parts = append(parts, v)
+		}
+		if v := strings.TrimSpace(res["pr_url"]); strings.HasPrefix(v, "https://") {
+			parts = append(parts, "PR: "+v)
+		}
+		if v := strings.TrimSpace(res["branch"]); v != "" {
+			parts = append(parts, "Nhánh: "+v)
+		}
+		if len(parts) > 0 {
+			out = append(out, capText(d.Title, 80)+": "+strings.Join(parts, " · "))
+		}
+	}
+	return out
+}
+
+func validWaitRef(ref string) bool {
+	return ref != "" && len(ref) <= maxWaitRefBytes && utf8.ValidString(ref) && !strings.ContainsAny(ref, " \t\r\n")
+}
+
+// applyOutcome stores an in-process executor's outcome: a wait (only for a
+// TaskResumer) keeps the task WAITING and the step waits for the owner;
+// otherwise the task succeeds, fails or is blocked with its evidence.
+func (r *stepRun) applyOutcome(t PlanTaskRecord, out TaskOutcome, canWait bool) (workflow.StepResult, error) {
+	if out.Wait != "" {
+		if !canWait || !validWaitRef(out.Wait) {
+			out = TaskOutcome{ReasonCode: ReasonExecutorFailed}
+		} else {
+			if t.State != TaskWaiting || t.ResultStepID != r.key {
+				t.State, t.ResultStepID = TaskWaiting, r.key
+				if err := r.putTask(t); err != nil {
+					return r.failStep(ReasonStorageUnavailable, true)
+				}
+			}
+			return r.waitFor(workflow.StateWaitingForApproval, taskWaitPrefix+out.Wait)
+		}
 	}
 	evidence := []string{r.execRef("step", r.key)}
 	for _, e := range out.Evidence {
@@ -1015,7 +1138,13 @@ func (r *stepRun) runTask(t PlanTaskRecord, explicitRepo string) (workflow.StepR
 	if out.Summary != "" {
 		extra = map[string]string{"summary": out.Summary}
 	}
-	if err := r.finishTask(t, out.Succeeded, out.ReasonCode, evidence, extra); err != nil {
+	var err error
+	if out.Blocked && !out.Succeeded {
+		err = r.blockTask(t, out.ReasonCode, evidence, extra)
+	} else {
+		err = r.finishTask(t, out.Succeeded, out.ReasonCode, evidence, extra)
+	}
+	if err != nil {
 		return r.failStep(ReasonStorageUnavailable, true)
 	}
 	return r.success()
@@ -1056,9 +1185,19 @@ type workerJobPayload struct {
 	InstructionVersion int64  `json:"instruction_version"`
 }
 
-// runWorker delegates a repo.write task to a 7a worker job (REQ-14) and
-// waits for its result in WAITING_FOR_USER (the 7a local-task wait; there
-// is no VPS fallback). The wait counts against the wall time, not tokens.
+// runWorker delegates a repo.write task to a 7a worker job (REQ-14; there
+// is no VPS fallback) and follows it (Phase 10 REQ-11/12):
+//   - waiting, leased, running or cancelling: the step waits in
+//     WAITING_FOR_WORKER;
+//   - failed, needs input or interrupted: the topic shows the job's
+//     Retry/Cancel buttons and the step waits for the owner in
+//     WAITING_FOR_USER (a retried job is followed again);
+//   - succeeded: the task succeeds; cancelled: the task fails
+//     (worker_cancelled) and Evaluate decides.
+//
+// Both waits carry a durable wake time at the end of the wall-time budget;
+// the step then takes the O4 outcome (budget gate). The wait counts against
+// the wall time, not tokens.
 func (r *stepRun) runWorker(t PlanTaskRecord, explicitRepo string) (workflow.StepResult, error) {
 	if r.s.Jobs == nil {
 		if err := r.finishTask(t, false, ReasonExecutorUnavailable, nil, nil); err != nil {
@@ -1103,7 +1242,8 @@ func (r *stepRun) runWorker(t PlanTaskRecord, explicitRepo string) (workflow.Ste
 	}
 	r.jobRef = job.ID
 	evidence := []string{r.execRef("job", job.ID)}
-	extra := map[string]string{"job_id": job.ID, "branch": job.Branch, "pr_url": job.PRURL, "test_outcome": job.TestOutcome}
+	extra := map[string]string{"job_id": job.ID, "branch": job.Branch, "pr_url": job.PRURL, "test_outcome": job.TestOutcome,
+		"summary": boundResultText(job.Summary)}
 	switch job.State {
 	case JobSucceeded:
 		if strings.HasPrefix(job.PRURL, "https://") {
@@ -1113,14 +1253,8 @@ func (r *stepRun) runWorker(t PlanTaskRecord, explicitRepo string) (workflow.Ste
 			return r.failStep(ReasonStorageUnavailable, true)
 		}
 		return r.success()
-	case JobCancelled, JobFailed, JobNeedsInput:
-		reason := ReasonWorkerFailed
-		if job.State == JobCancelled {
-			reason = ReasonWorkerCancelled
-		} else if reasonCodeRe.MatchString(job.ReasonCode) {
-			reason = job.ReasonCode
-		}
-		if err := r.finishTask(t, false, reason, evidence, extra); err != nil {
+	case JobCancelled:
+		if err := r.finishTask(t, false, ReasonWorkerCancelled, evidence, extra); err != nil {
 			return r.failStep(ReasonStorageUnavailable, true)
 		}
 		return r.success()
@@ -1128,13 +1262,17 @@ func (r *stepRun) runWorker(t PlanTaskRecord, explicitRepo string) (workflow.Ste
 	if err := r.budget.CheckWall(); err != nil {
 		return r.budgetGate(err)
 	}
-	if t.State != TaskWaiting {
+	if t.State != TaskWaiting || t.ResultStepID != r.key {
 		t.State, t.ResultStepID = TaskWaiting, r.key
 		if err := r.putTask(t); err != nil {
 			return r.failStep(ReasonStorageUnavailable, true)
 		}
 	}
-	return r.waitFor(workflow.StateWaitingForUser, jobPrefix+job.ID)
+	switch job.State {
+	case JobFailed, JobNeedsInput, JobInterrupted:
+		return r.waitWorker(workflow.StateWaitingForUser, jobOwnerPrefix+job.ID)
+	}
+	return r.waitWorker(workflow.StateWaitingForWorker, jobPrefix+job.ID)
 }
 
 func (r *stepRun) createJob(t PlanTaskRecord, repo string) (WorkerJob, error) {
@@ -1168,6 +1306,11 @@ func (r *stepRun) createJob(t PlanTaskRecord, repo string) (WorkerJob, error) {
 	})
 	if err != nil {
 		return WorkerJob{}, &workflow.StepError{Code: ReasonStorageUnavailable}
+	}
+	if p, ok := r.s.Jobs.(WorkerJobRoutes); ok {
+		if err := p.PrepareJob(r.ctx, r.route, r.key, repo, version); err != nil {
+			log.Printf("orchestrator execution %d step %s: worker job topic route not stored", r.id, r.key)
+		}
 	}
 	job, err := r.s.Jobs.CreateJob(r.ctx, r.ws, r.id, r.key, []string{CapRepoWrite}, payload)
 	if err != nil {
@@ -1369,7 +1512,11 @@ func (r *stepRun) reportStep() (workflow.StepResult, error) {
 	if err := r.setPlanStatus(status); err != nil {
 		return r.failStep(ReasonStorageUnavailable, true)
 	}
-	if err := r.s.Owner.Say(r.ctx, r.route, r.reportText(term)); err != nil {
+	say := r.s.Owner.Say
+	if fs, ok := r.s.Owner.(FinalSayer); ok {
+		say = fs.SayFinal
+	}
+	if err := say(r.ctx, r.route, r.reportText(term)); err != nil {
 		log.Printf("orchestrator execution %d: report not sent", r.id)
 	}
 	if term.Decision != DecisionFail {
@@ -1444,6 +1591,17 @@ func (r *stepRun) reportText(term DecisionRecord) string {
 		s.Used.Tokens, s.Caps.Tokens, s.Used.PlanIterations, s.Caps.PlanIterations, s.Used.Replans, s.Caps.Replans,
 		int(r.budget.Elapsed()/time.Minute), int(s.Caps.Wall/time.Minute))
 	return capText(b.String(), maxReportRunes)
+}
+
+// boundResultText cleans a worker's text for a stored task result and cuts
+// it on a rune boundary to the size endTask keeps.
+func boundResultText(s string) string {
+	s = sanitizeText(s, maxResultTextBytes)
+	for len(s) > maxResultTextBytes {
+		_, size := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-size]
+	}
+	return strings.TrimSpace(s)
 }
 
 func capText(s string, n int) string {

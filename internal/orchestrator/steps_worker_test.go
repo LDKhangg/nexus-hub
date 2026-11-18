@@ -62,8 +62,13 @@ func TestWorkerPath_RepoResolutionOrder(t *testing.T) {
 			h.repos.registered, h.repos.last = c.registered, c.last
 			h.routes.route.Repo, h.routes.route.ClickUpTaskID = c.explicit, c.clickup
 			res, err := h.step("run_01")
-			if err != nil || res.WaitState != workflow.StateWaitingForUser {
-				t.Fatalf("%q %v", res.WaitState, err)
+			// A clarification waits for the owner; a created job waits for the worker (K1 ruling 1).
+			wantState := workflow.StateWaitingForWorker
+			if c.wantRepo == "" {
+				wantState = workflow.StateWaitingForUser
+			}
+			if err != nil || res.WaitState != wantState {
+				t.Fatalf("%q %v, want %q", res.WaitState, err, wantState)
 			}
 			if c.wantRepo == "" {
 				if len(h.jobs.created) != 0 {
@@ -101,7 +106,7 @@ func TestWorkerPath_ClarificationOnNoRepo(t *testing.T) {
 
 	h.instr.add("WF-1 org/beta")
 	res, err = h.step("run_01")
-	if err != nil || res.WaitState != workflow.StateWaitingForUser {
+	if err != nil || res.WaitState != workflow.StateWaitingForWorker {
 		t.Fatalf("after answer: %q %v", res.WaitState, err)
 	}
 	p := jobPayload(t, h)
@@ -148,7 +153,8 @@ func TestWorkerPath_PayloadIdentifiers(t *testing.T) {
 func TestWorkerPath_JobCreatedOnce(t *testing.T) {
 	h := startWorker(t)
 	for i := 0; i < 3; i++ {
-		if res, err := h.step("run_01"); err != nil || res.WaitState != workflow.StateWaitingForUser {
+		// K1 ruling 1 (Phase 10 REQ-11): an orchestrated worker wait is WAITING_FOR_WORKER.
+		if res, err := h.step("run_01"); err != nil || res.WaitState != workflow.StateWaitingForWorker {
 			t.Fatalf("%d: %q %v", i, res.WaitState, err)
 		}
 	}
@@ -157,17 +163,16 @@ func TestWorkerPath_JobCreatedOnce(t *testing.T) {
 	}
 }
 
-// B1-W5 (REQ-14): job FAILED, NEEDS_INPUT and CANCELLED end the task as
-// FAILED with a fixed reason; the worker's own reason code is kept only
-// when it is a safe code.
+// B1-W5 (REQ-14; K1 rulings 1-3): a CANCELLED job ends the task as FAILED with the
+// fixed reason worker_cancelled. A FAILED, NEEDS_INPUT or INTERRUPTED job no longer
+// ends the task: the step waits for the owner's Retry or Cancel (see
+// TestP10Worker_FailedJobWaitsForOwner).
 func TestWorkerPath_JobFailureEndsTask(t *testing.T) {
 	cases := []struct {
 		name, state, reason, want string
 	}{
-		{"failed with code", JobFailed, "tests_failed", "tests_failed"},
-		{"needs input", JobNeedsInput, "", ReasonWorkerFailed},
 		{"cancelled", JobCancelled, "tests_failed", ReasonWorkerCancelled},
-		{"unsafe reason code", JobFailed, "Bad Reason!", ReasonWorkerFailed},
+		{"cancelled with unsafe reason code", JobCancelled, "Bad Reason!", ReasonWorkerCancelled},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -229,12 +234,18 @@ func TestWorkerPath_WaitingDoesNotChargeTokens(t *testing.T) {
 	h := startWorker(t)
 	before := shBudget(t, workflow.StepResult{Checkpoint: h.steps.steps[StepKeyPlan].Checkpoint})
 	calls := len(h.rt.Requests())
+	// K1 rulings 1-2: waiting for the worker is WAITING_FOR_WORKER; an interrupted job
+	// waits for the owner (Retry/Cancel) in WAITING_FOR_USER with the job_owner marker.
 	for _, state := range []string{JobWaiting, JobLeased, JobRunning, JobInterrupted} {
+		wantState, wantWait := workflow.StateWaitingForWorker, "job:job-1"
+		if state == JobInterrupted {
+			wantState, wantWait = workflow.StateWaitingForUser, "job_owner:job-1"
+		}
 		if len(h.jobs.created) > 0 {
 			h.jobs.set("run_01", func(j *WorkerJob) { j.State = state })
 		}
 		res, err := h.step("run_01")
-		if err != nil || res.WaitState != workflow.StateWaitingForUser {
+		if err != nil || res.WaitState != wantState {
 			t.Fatalf("%s: %q %v", state, res.WaitState, err)
 		}
 		if res.Usage != (workflow.Usage{}) {
@@ -243,7 +254,7 @@ func TestWorkerPath_WaitingDoesNotChargeTokens(t *testing.T) {
 		if got := shBudget(t, res); got.Used != before.Used {
 			t.Fatalf("%s: counters moved %+v -> %+v", state, before.Used, got.Used)
 		}
-		if refValue(res.Checkpoint, CheckpointWait) != "job:job-1" || refValue(res.Checkpoint, CheckpointWorkerJob) != "job-1" {
+		if refValue(res.Checkpoint, CheckpointWait) != wantWait || refValue(res.Checkpoint, CheckpointWorkerJob) != "job-1" {
 			t.Fatalf("%s: refs %+v", state, res.Checkpoint.References)
 		}
 	}
@@ -291,7 +302,7 @@ func TestWorkerPath_WallExtensionResumesWait(t *testing.T) {
 	h.step("run_01")
 	h.owner.decide(GateApproved)
 	res, err := h.step("run_01")
-	if err != nil || res.WaitState != workflow.StateWaitingForUser {
+	if err != nil || res.WaitState != workflow.StateWaitingForWorker {
 		t.Fatalf("%q %v", res.WaitState, err)
 	}
 	if len(h.jobs.created) != 1 || shBudget(t, res).Extensions != 1 {

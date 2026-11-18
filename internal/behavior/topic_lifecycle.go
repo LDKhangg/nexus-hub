@@ -50,7 +50,14 @@ type TopicLifecycleDeps struct {
 	// CloseStatuses is the comma-separated topic_close_statuses setting.
 	CloseStatuses string
 	Interval      time.Duration
+	// LinkRetention is how long Telegram message to ClickUp comment links
+	// are kept (default DefaultMessageLinkRetention). The sweep prunes
+	// older ones about hourly when Store implements MessageLinkPruner.
+	LinkRetention time.Duration
 }
+
+// linkPruneEvery is the least wait between two message link prunes.
+const linkPruneEvery = time.Hour
 
 type lifecycleKey struct{ ws, task string }
 
@@ -81,6 +88,9 @@ func NewTopicLifecycle(d TopicLifecycleDeps) (*TopicLifecycle, error) {
 	}
 	if d.Interval <= 0 {
 		d.Interval = topicSweepInterval
+	}
+	if d.LinkRetention <= 0 {
+		d.LinkRetention = DefaultMessageLinkRetention
 	}
 	if strings.TrimSpace(d.CloseStatuses) == "" {
 		d.CloseStatuses = DefaultTopicCloseStatuses
@@ -158,14 +168,42 @@ func (l *TopicLifecycle) Run(ctx context.Context) error {
 	defer l.bg.Wait()
 	t := time.NewTicker(l.d.Interval)
 	defer t.Stop()
+	var lastPrune time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-t.C:
 			l.Sweep(ctx)
+			if l.now().Sub(lastPrune) >= linkPruneEvery && l.PruneLinks(ctx) {
+				lastPrune = l.now()
+			}
 		}
 	}
+}
+
+// PruneLinks deletes the Telegram message to ClickUp comment links older
+// than LinkRetention. It reports whether the prune ran without error (a
+// store that keeps no links counts as done).
+func (l *TopicLifecycle) PruneLinks(ctx context.Context) bool {
+	if l == nil {
+		return false
+	}
+	pruner, ok := l.d.Store.(MessageLinkPruner)
+	if !ok {
+		return true
+	}
+	n, err := pruner.PruneMessageLinks(ctx, l.now().Add(-l.d.LinkRetention))
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Print("telegram message links: prune failed")
+		}
+		return false
+	}
+	if n > 0 {
+		log.Printf("telegram message links: pruned %d", n)
+	}
+	return true
 }
 
 // Sweep checks every open task topic once.

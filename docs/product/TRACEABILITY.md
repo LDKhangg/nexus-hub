@@ -4,6 +4,8 @@ Status of every PCC-001 requirement. Statuses follow PCC §10.1.2: `PENDING`, `I
 
 Snapshot: 2026-11-12. Phase 1 merged; Phase 2 under test and review. Nothing is `VERIFIED` against the PCC yet: Phase 1/2 work covers parts of the IDs marked `IN_PROGRESS`.
 
+Update 2026-11-18 (Phase 10): task topics and ClickUp outbound implemented, Test PASS (CI 44332870926) + Review APPROVE on feature/phase10 code a507263; touched IDs noted per row, IN_PROGRESS until merge. FR-134, FR-136, FR-137 moved to Phase 10b (unchanged).
+
 Update 2026-11-18: owner decision D7 re-orders the roadmap after 7b: Phase 10 next (ends MVP 1), then 9, 12, 13; Phase 8 (multi-slot, scheduler) deferred. IDs with phase `8` only (FR-101, FR-102, FR-104, FR-105, NFR-009, E2E-002) stay `PENDING` while deferred. No status changed.
 
 Update 2026-11-16: roadmap Phase 7 split into 7a (local worker bridge, plan approved) and 7b (AI orchestrator, the former Phase 7 plan). Phase column: orchestrator IDs `7` → `7b`; IDs covered by the 7a plan gained `7a`. No status changed.
@@ -26,7 +28,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-010 | Platform Adapter Registry. | 4 | PENDING |  |
 | FR-011 | Capability discovery. | 4 | PENDING |  |
 | FR-012 | Inbound event normalization. | 4, 6b | IN_PROGRESS | Phase 6b: Test PASS (CI 43823427615) + Review APPROVE on feature/phase6b 6b514c8: Telegram inbound carries the forum thread id; full gateway Phase 4b |
-| FR-013 | Outbound action execution. | 10 | PENDING |  |
+| FR-013 | Outbound action execution. | 10 | IN_PROGRESS | Phase 10: ClickUp comment post (threaded reply, structured mentions, status) only through draft + owner confirm; orchestrator `clickup.write` creates a draft (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
 | FR-014 | Connection lifecycle management. | 10 | PENDING |  |
 | FR-015 | Credentials được mã hóa khi lưu. | 2 | IN_PROGRESS | Phase 2: AES-256-GCM credentials table (awaiting Test/Review PASS) |
 | FR-016 | Health check cho integration. | 10 | PENDING |  |
@@ -62,26 +64,26 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-046 | Complexity estimation. | 7b | DONE | Phase 7b: Classify complexity (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
 | FR-047 | Capability requirements. | 7b | DONE | Phase 7b: plan task capabilities, Go-checked (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
 | FR-048 | Execution plan generation. | 7b | DONE | Phase 7b: Plan with Go checks, /plan + start_task (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
-| FR-049 | Worker selection recommendation. | 7b | DONE | Phase 7b: least-privilege executor matching, repo.write → 7a worker (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
+| FR-049 | Worker selection recommendation. | 7b, 10 | DONE | Phase 7b: least-privilege executor matching, repo.write → 7a worker (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending); Phase 10: `behavior-actions` executor wired (clickup.write → draft, telegram.notify) (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
 | FR-050 | Task decomposition. | 7b | DONE | Phase 7b: decomposition with dependencies (DAG) (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
 | FR-051 | Result evaluation. | 7b | DONE | Phase 7b: Evaluate with evidence refs (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
 | FR-052 | Next-action recommendation. | 7b | DONE | Phase 7b: 7 decisions + next action (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
 | FR-053 | Clarification request generation. | 7b | DONE | Phase 7b: REQUEST_CLARIFICATION bound to WF-n (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
 | FR-054 | Plan revision. | 7b | DONE | Phase 7b: REPLAN v+1, finished tasks carried (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
 | FR-055 | Structured outputs và schema validation. | 2, 7b | IN_PROGRESS | Phase 2: triage JSON validated; Phase 7b: versioned JSON schemas + bounded repair (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
-| FR-056 | Configurable reasoning/iteration budget. | 2, 7b, 6a | IN_PROGRESS | Phase 2: token budget, step limit; Phase 6a: fast/work/deep model settings, history turns (8bd07d9); Phase 7b: per-execution budgets, O4a gate (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
+| FR-056 | Configurable reasoning/iteration budget. | 2, 7b, 6a, 10 | IN_PROGRESS | Phase 2: token budget, step limit; Phase 6a: fast/work/deep model settings, history turns (8bd07d9); Phase 7b: per-execution budgets, O4a gate (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending); Phase 10: wall-time budget enforced while waiting for a worker (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
 | FR-057 | Worker registry. | 7a, 8 | IN_PROGRESS | Phase 7a: device enrollment, hashed tokens, revoke (c85e9ca, CI 44009727911; live laptop check pending) |
 | FR-058 | Worker capability profiles. | 7a, 8 | IN_PROGRESS | Phase 7a: device capability profiles (c85e9ca, CI 44009727911; live laptop check pending) |
 | FR-059 | Worker availability tracking. | 7a, 8 | IN_PROGRESS | Phase 7a: presence, offline after 90 s, telemetry card (c85e9ca, CI 44009727911; live laptop check pending) |
 | FR-060 | Worker task assignment. | 7a, 8 | IN_PROGRESS | Phase 7a: lease protocol, /task → local-task worker.run (c85e9ca, CI 44009727911; live laptop check pending); Phase 7b: DELEGATE → 7a worker job (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
 | FR-061 | Isolated working directories. | 7a, 8 | IN_PROGRESS | Phase 7a: per-job git worktree on the laptop (c85e9ca, CI 44009727911; live laptop check pending) |
 | FR-062 | Tool permission enforcement. | 2, 8 | IN_PROGRESS | Phase 2: tiered tool policy executor |
-| FR-063 | Execution timeout. | 2, 7a, 8 | IN_PROGRESS | Phase 2: tool timeouts; Phase 7a: 60 min wall, turn limit, test timeout, sleep inhibitor (c85e9ca, CI 44009727911; live laptop check pending) |
-| FR-064 | Cancellation support. | 7a, 8 | IN_PROGRESS | Phase 7a: /cancel and Cancel button stop the executor (c85e9ca, CI 44009727911; live laptop check pending) |
+| FR-063 | Execution timeout. | 2, 7a, 8, 10 | IN_PROGRESS | Phase 2: tool timeouts; Phase 7a: 60 min wall, turn limit, test timeout, sleep inhibitor (c85e9ca, CI 44009727911; live laptop check pending); Phase 10: orchestrated worker wait ends at the wall-time budget (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
+| FR-064 | Cancellation support. | 7a, 8, 10 | IN_PROGRESS | Phase 7a: /cancel and Cancel button stop the executor (c85e9ca, CI 44009727911; live laptop check pending); Phase 10: Cancel on orchestrated worker jobs (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
 | FR-065 | Captured tool results. | 2, 8 | IN_PROGRESS | Phase 2: tool_runs audit with summaries |
-| FR-066 | Task progress reporting. | 7a, 8 | IN_PROGRESS | Phase 7a: one in-place progress message per job (c85e9ca, CI 44009727911; live laptop check pending) |
+| FR-066 | Task progress reporting. | 7a, 8, 10 | IN_PROGRESS | Phase 7a: one in-place progress message per job (c85e9ca, CI 44009727911; live laptop check pending); Phase 10: orchestrated worker jobs show the 7a progress message (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
 | FR-067 | Worker result contract. | 7a, 8 | IN_PROGRESS | Phase 7a: idempotent result contract (c85e9ca, CI 44009727911; live laptop check pending) |
-| FR-068 | Worker failure reporting. | 7a, 8 | IN_PROGRESS | Phase 7a: fixed failure reason codes, Retry/Cancel buttons (c85e9ca, CI 44009727911; live laptop check pending) |
+| FR-068 | Worker failure reporting. | 7a, 8, 10 | IN_PROGRESS | Phase 7a: fixed failure reason codes, Retry/Cancel buttons (c85e9ca, CI 44009727911; live laptop check pending); Phase 10: orchestrated worker jobs show Retry/Cancel; the execution sees the outcome (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
 | FR-069 | Worker execution iteration limit. | 2, 8 | IN_PROGRESS | Phase 2: Tier-2 step limit |
 | FR-070 | Artifact references. | 7a, 8 | IN_PROGRESS | Phase 7a: result carries branch, PR URL, artifact refs (c85e9ca, CI 44009727911; live laptop check pending) |
 | FR-071 | Workspace cleanup và retention. | 7a, 8 | IN_PROGRESS | Phase 7a: worktree retention and nh worker clean (c85e9ca, CI 44009727911; live laptop check pending) |
@@ -110,7 +112,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-094 | Execution timeout. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-095 | Dead-letter hoặc failed-job inspection. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-096 | Dependency-aware task progression. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
-| FR-097 | Không giữ worker khi đang chờ user. | 7a, 8 | IN_PROGRESS | Phase 7a: job waits WAITING_FOR_WORKER, no VPS fallback (c85e9ca, CI 44009727911; live laptop check pending) |
+| FR-097 | Không giữ worker khi đang chờ user. | 7a, 8, 10 | IN_PROGRESS | Phase 7a: job waits WAITING_FOR_WORKER, no VPS fallback (c85e9ca, CI 44009727911; live laptop check pending); Phase 10: orchestrated worker waits use WAITING_FOR_WORKER (00033) and wake on the job result or wall time (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
 | FR-098 | Optimistic locking/leases để tránh nhiều scheduler cùng claim một job. | 2, 5 | IN_PROGRESS | Phase 2: agent job leases + thread lock; Phase 5: generic queue leases + fenced claims, merged develop 65be4ac |
 | FR-099 | Reconciliation sau process restart. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
 | FR-100 | Persistent job queue. | 5 | VERIFIED | Phase 5: Test PASS (CI 43630791438, 1120 tests) + Review APPROVE on 2ac779b; merged develop 65be4ac (CI 43631958237 green) |
@@ -144,17 +146,17 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-128 | Resume workflow sau approval. | 9 | PENDING |  |
 | FR-129 | Ghi lại actor và thời gian quyết định. | 9 | PENDING |  |
 | FR-130 | Revalidate policy/action context trước khi thực thi sau approval. | 9 | PENDING |  |
-| FR-131 | Destination resolution. | 6b, 10 | IN_PROGRESS | Phase 6b: Test PASS (CI 43823427615) + Review APPROVE on feature/phase6b 6b514c8: Telegram task/workflow/fixed topics with General fallback; other platforms Phase 10 |
-| FR-132 | Original thread replies. | 6b, 10 | IN_PROGRESS | Phase 6b: Test PASS (CI 43823427615) + Review APPROVE on feature/phase6b 6b514c8: Telegram replies stay in the inbound forum topic (is_topic_message); GitHub/ClickUp Phase 10 |
-| FR-133 | Cross-platform notifications. | 10 | PENDING |  |
+| FR-131 | Destination resolution. | 6b, 10 | IN_PROGRESS | Phase 6b: Test PASS (CI 43823427615) + Review APPROVE on feature/phase6b 6b514c8: Telegram task/workflow/fixed topics with General fallback; other platforms Phase 10; Phase 10: ClickUp task events and general behavior reports go to the task's forum topic; closed topic reopened; deleted topic → General once with 📌 button (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
+| FR-132 | Original thread replies. | 6b, 10 | IN_PROGRESS | Phase 6b: Test PASS (CI 43823427615) + Review APPROVE on feature/phase6b 6b514c8: Telegram replies stay in the inbound forum topic (is_topic_message); GitHub/ClickUp Phase 10; Phase 10: Telegram message ↔ ClickUp comment links; a reply (or `/comment`) on a linked comment drafts a threaded ClickUp reply (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
+| FR-133 | Cross-platform notifications. | 10 | IN_PROGRESS | Phase 10: ClickUp activity in the Telegram task topic; `/task`/`/plan` result posted back to ClickUp via 📤 Đăng lên ClickUp (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
 | FR-134 | On-started notification policy. | 10 | PENDING |  |
-| FR-135 | On-completed notification policy. | 10 | PENDING |  |
+| FR-135 | On-completed notification policy. | 10 | IN_PROGRESS | Phase 10: completed/failed `/task` and `/plan` reports carry 📤 (draft with summary, PR link, outcome line) (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
 | FR-136 | On-blocked notification policy. | 10 | PENDING |  |
 | FR-137 | On-failed notification policy. | 10 | PENDING |  |
-| FR-138 | Notification deduplication. | 10 | PENDING |  |
-| FR-139 | Transactional outbox. | 1, 10 | IN_PROGRESS | Phase 1: notification_outbox; Phase 2: outbound_actions |
-| FR-140 | Delivery retry. | 1, 10 | IN_PROGRESS | Phase 1: notice retry with backoff |
-| FR-141 | Delivery status tracking. | 1, 10 | IN_PROGRESS | Phase 1: delivery status in outbox |
+| FR-138 | Notification deduplication. | 10 | IN_PROGRESS | Phase 10: no duplicate topic message on webhook redelivery; own-bot comments never shown; one draft per press (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
+| FR-139 | Transactional outbox. | 1, 10 | IN_PROGRESS | Phase 1: notification_outbox; Phase 2: outbound_actions; Phase 10: ClickUp drafts table (00032/00034) with idempotent post key = draft id (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
+| FR-140 | Delivery retry. | 1, 10 | IN_PROGRESS | Phase 1: notice retry with backoff; Phase 10: Thử lại on a failed post (same idempotency key); posting-state sweep replays stuck posts (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
+| FR-141 | Delivery status tracking. | 1, 10 | IN_PROGRESS | Phase 1: delivery status in outbox; Phase 10: draft states pending/posting/posted/cancelled/expired/failed/failed_final shown in the preview (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
 | FR-142 | Rate limiting và notification aggregation. | 10 | PENDING |  |
 | FR-143 | Có fallback destination nếu platform chính không khả dụng và user đã cấu hình. | 10 | PENDING |  |
 | UI-001 | Hiển thị active workflows. | 11 | PENDING |  |
@@ -220,7 +222,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | NFR-031 | Health/readiness endpoints. | 3 | PENDING |  |
 | NFR-032 | Có cảnh báo hoặc notification cho stuck/failed workflows. | 12 | PENDING |  |
 | NFR-033 | Có README. | 3 | PENDING |  |
-| NFR-034 | Có architecture documentation. | every | IN_PROGRESS | docs/architecture.md predates PCC; ROADMAP.md added; Phase 6 runbook section; Phase 7b: docs/architecture.md §7 AIRuntime boundary (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
+| NFR-034 | Có architecture documentation. | every, 10 | IN_PROGRESS | docs/architecture.md predates PCC; ROADMAP.md added; Phase 6 runbook section; Phase 7b: docs/architecture.md §7 AIRuntime boundary (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending); Phase 10: runbook "Task topics and ClickUp replies (Phase 10)" incl. `/comment`; architecture note on destination resolution and message links (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
 | NFR-035 | Có database migrations. | 3 | IN_PROGRESS | goose migrations 00001–00003 |
 | NFR-036 | Có OpenAPI hoặc tài liệu API tương đương. | 11 | PENDING |  |
 | NFR-037 | Có automated tests. | 3 | IN_PROGRESS | Go tests exist; CI missing (P3) |
@@ -246,6 +248,6 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | E2E-005 | Server Restart Recovery | 5, 12, 13 | IN_PROGRESS | Phase 5: fake-provider crash/restart/reclaim tests pass on 2ac779b; live evidence is Phase 12/13 |
 | E2E-006 | Duplicate Webhook | 4, 13 | PENDING |  |
 | E2E-007 | Worker Failure | 7a, 8, 13 | IN_PROGRESS | Phase 7a: fake-executor failure paths in CI (c85e9ca, CI 44009727911; live laptop check pending) |
-| E2E-008 | Cross-Platform Response | 10, 13 | PENDING |  |
+| E2E-008 | Cross-Platform Response | 10, 13 | IN_PROGRESS | Phase 10: journey with fakes: `/plan` on a ClickUp task → 📤 → Đăng → exactly one ClickUp comment with the PR link (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge) |
 | E2E-009 | Policy Violation | 9, 13 | PENDING |  |
 | E2E-010 | New Integration | 10, 13 | PENDING |  |

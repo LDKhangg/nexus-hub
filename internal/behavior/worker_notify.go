@@ -63,6 +63,9 @@ type WorkerNotifierDeps struct {
 	Telemetry  WorkerTelemetryReader
 	Thresholds WorkerThresholds
 	Waker      LocalTaskWaker
+	// ReportButtons adds "📤 Đăng lên ClickUp" to the final report of a
+	// /task job on a ClickUp task. Nil: no button.
+	ReportButtons ExecutionReportButtons
 }
 
 // WorkerNotifier tells the owner, in the task topic, what happens to a local
@@ -204,7 +207,7 @@ func (n *WorkerNotifier) finished(ctx context.Context, route LocalTaskRoute, job
 	ref := workflow.FormatRef(job.ExecutionID)
 	switch job.State {
 	case WorkerJobSucceeded:
-		n.say(ctx, route, ref+": hoàn tất.\n"+workerResultText(job.Result), nil)
+		n.say(ctx, route, ref+": hoàn tất.\n"+workerResultText(job.Result), n.reportRow(ctx, route, job))
 	case WorkerJobCancelled:
 		n.say(ctx, route, ref+": đã huỷ.", nil)
 	case WorkerJobNeedsInput:
@@ -214,7 +217,7 @@ func (n *WorkerNotifier) finished(ctx context.Context, route LocalTaskRoute, job
 		}
 		n.failed(ctx, route, job, text+"\nGửi thêm yêu cầu trong topic rồi bấm Thử lại, hoặc Huỷ.")
 	case WorkerJobFailed:
-		n.failed(ctx, route, job, workerFailureText(job.Result))
+		n.failedWith(ctx, route, job, workerFailureText(job.Result), n.reportRow(ctx, route, job))
 	}
 	// A job that ended for good finishes its workflow step.
 	if (job.State == WorkerJobSucceeded || job.State == WorkerJobCancelled) && n.d.Waker != nil {
@@ -291,33 +294,53 @@ func workerFailureText(r *WorkerResult) string {
 // failed sends the failure text with Retry and Cancel buttons bound to this
 // chat and attempt, valid for 24 hours.
 func (n *WorkerNotifier) failed(ctx context.Context, route LocalTaskRoute, job WorkerJob, text string) {
+	n.failedWith(ctx, route, job, text, nil)
+}
+
+// reportRow is the row with the report button of a /task job's final
+// report; nil when the task has no ClickUp task or the execution is not a
+// local task (a job of an orchestrated plan is not the execution's report).
+func (n *WorkerNotifier) reportRow(ctx context.Context, route LocalTaskRoute, job WorkerJob) [][]Button {
+	if n.d.ReportButtons == nil || route.ClickUpTaskID == "" {
+		return nil
+	}
+	b, ok := n.d.ReportButtons.LocalTaskReportButton(ctx, job.WorkspaceID, job.ExecutionID)
+	if !ok {
+		return nil
+	}
+	return [][]Button{{b}}
+}
+
+// failedWith is failed with extra button rows below Retry and Cancel.
+func (n *WorkerNotifier) failedWith(ctx context.Context, route LocalTaskRoute, job WorkerJob, text string, extra [][]Button) {
 	text = workflow.FormatRef(job.ExecutionID) + ": " + text
 	if n.d.Approvals == nil {
-		n.say(ctx, route, text, nil)
+		n.say(ctx, route, text, extra)
 		return
 	}
 	nonce, err := NewNonce()
 	if err != nil {
-		n.say(ctx, route, text, nil)
+		n.say(ctx, route, text, extra)
 		return
 	}
-	payload, _ := json.Marshal(workerJobPayload{ChatID: route.ChatID, JobID: job.ID, ExecutionID: job.ExecutionID, Attempt: job.Attempt})
+	payload, _ := json.Marshal(workerJobPayload{ChatID: route.ChatID, JobID: job.ID, ExecutionID: job.ExecutionID, Attempt: job.Attempt,
+		ReportButton: len(extra) > 0})
 	ap, err := n.d.Approvals.CreateApproval(ctx, job.WorkspaceID, NewApproval{
 		Kind: ApprovalWorkerJob, Action: "retry_or_cancel", Resource: "worker_job:" + job.ID, Payload: payload,
 		Nonce: nonce, ExpiresAt: n.now().Add(workerButtonLifetime),
 	})
 	if err != nil {
-		n.say(ctx, route, text, nil)
+		n.say(ctx, route, text, extra)
 		return
 	}
 	retry, err1 := (CallbackData{Kind: CallbackApprove, Nonce: ap.Nonce, Option: -1}).Encode()
 	cancel, err2 := (CallbackData{Kind: CallbackReject, Nonce: ap.Nonce, Option: -1}).Encode()
 	if err1 != nil || err2 != nil {
 		log.Print("worker notifier: buttons not encoded, sending text only")
-		n.say(ctx, route, text, nil)
+		n.say(ctx, route, text, extra)
 		return
 	}
-	id := n.say(ctx, route, text, [][]Button{{{Text: btnWorkerRetry, Data: retry}, {Text: btnWorkerCancel, Data: cancel}}})
+	id := n.say(ctx, route, text, append([][]Button{{{Text: btnWorkerRetry, Data: retry}, {Text: btnWorkerCancel, Data: cancel}}}, extra...))
 	if id > 0 {
 		if err := n.d.Approvals.SetApprovalMessage(ctx, job.WorkspaceID, ap.ID, id); err != nil {
 			log.Print("worker notifier: button message not saved")
@@ -331,6 +354,55 @@ type workerJobPayload struct {
 	JobID       string `json:"job_id"`
 	ExecutionID int64  `json:"execution_id"`
 	Attempt     int    `json:"attempt"`
+	// ReportButton: the message also shows "📤 Đăng lên ClickUp".
+	ReportButton bool `json:"report_button,omitempty"`
+}
+
+// MessageKeyboardEditor is the optional part of a Messenger that replaces a
+// message's inline keyboard and keeps its text.
+type MessageKeyboardEditor interface {
+	SetButtons(ctx context.Context, to ChatRef, messageID int64, rows [][]Button) error
+}
+
+// keepWorkerReportButton leaves only the report button on a failure message
+// whose Cancel was pressed. It returns false when the message has no report
+// button or the keyboard cannot be edited, so the caller removes the
+// buttons. A failed edit returns true: the next press tries again, and the
+// report button is never lost.
+func (w *InboxWorker) keepWorkerReportButton(ctx context.Context, u InboundUpdate, to ChatRef, messageID int64, a Approval) bool {
+	if messageID <= 0 {
+		return false
+	}
+	rows, ok := workerReportKeyboard(a, u.ChatID)
+	if !ok {
+		return false
+	}
+	editor, ok := w.d.Messenger.(MessageKeyboardEditor)
+	if !ok {
+		return false
+	}
+	rctx, cancel := context.WithTimeout(ctx, w.settings.RequestTimeout)
+	defer cancel()
+	if err := editor.SetButtons(rctx, to, messageID, rows); err != nil {
+		log.Print("worker job buttons: report button not kept")
+	}
+	return true
+}
+
+// workerReportKeyboard is the keyboard a worker_job message keeps once its
+// Retry and Cancel are gone: only "📤 Đăng lên ClickUp". It returns false
+// when the payload is unreadable, has no report button, names another chat
+// than chatID, or has no valid execution.
+func workerReportKeyboard(a Approval, chatID int64) ([][]Button, bool) {
+	var p workerJobPayload
+	if a.Kind != ApprovalWorkerJob || json.Unmarshal(a.Payload, &p) != nil || !p.ReportButton || p.ChatID != chatID {
+		return nil, false
+	}
+	b, ok := ExecutionReportButton(p.ExecutionID)
+	if !ok {
+		return nil, false
+	}
+	return [][]Button{{b}}, true
 }
 
 var workerPhaseText = map[string]string{
@@ -618,6 +690,14 @@ func (w *InboxWorker) workerJobCallback(ctx context.Context, u InboundUpdate, da
 	}
 	if data.Kind == CallbackApprove {
 		w.noteWorkerRetried(ctx, u.WorkspaceID, p)
+	}
+	// An orchestrated execution follows its job again at once (it waited
+	// for the owner's Retry/Cancel; Phase 10 REQ-12). For a /task job this
+	// wakes nothing; the sweeper repairs a missed wake.
+	if w.d.InstructionWaker != nil && p.ExecutionID > 0 {
+		if err := w.d.InstructionWaker.InstructionAdded(ctx, u.WorkspaceID, p.ExecutionID); err != nil {
+			log.Print("worker job buttons: orchestrator step not woken; the sweeper retries")
+		}
 	}
 	return toast, "", true
 }

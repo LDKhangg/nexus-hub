@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
+	"github.com/LDKhangg/nexus-hub/internal/behavior"
+	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/jackc/pgx/v5"
@@ -39,7 +41,28 @@ func (r *NoticeRepository) Claim(ctx context.Context, now time.Time) (*relay.Not
 		// A malformed stored event must not keep cycling through expired leases.
 		return nil, r.MarkFailed(ctx, *job, "invalid_stored_event")
 	}
+	r.resolveNoticeNames(ctx, job)
 	return job, nil
+}
+
+// resolveNoticeNames fills the display names a notice shows (the sender and
+// an added assignee) from the people directory; the stored event keeps no
+// names. Unknown accounts keep the notice's fallback.
+func (r *NoticeRepository) resolveNoticeNames(ctx context.Context, job *relay.NoticeJob) {
+	e := &job.Event
+	if r.people == nil || job.WorkspaceID == "" {
+		return
+	}
+	if e.SenderName == "" && e.SenderID != "" {
+		if name, ok := r.people.DisplayName(ctx, job.WorkspaceID, "clickup", e.SenderID); ok {
+			e.SenderName = name
+		}
+	}
+	if id := e.Metadata["assignee_added"]; id != "" && e.Metadata["assignee_name"] == "" {
+		if name, ok := r.people.DisplayName(ctx, job.WorkspaceID, "clickup", id); ok {
+			e.Metadata["assignee_name"] = name
+		}
+	}
 }
 func (r *NoticeRepository) ResolveTarget(ctx context.Context, job relay.NoticeJob) (tenant.TelegramTargetConfig, error) {
 	token, err := parseDBID(job.ClaimToken)
@@ -92,8 +115,49 @@ func (r *NoticeRepository) MarkSent(ctx context.Context, job relay.NoticeJob, re
 	if err != nil {
 		return err
 	}
-	count, err := r.queries.MarkNoticeSent(ctx, sqlc.MarkNoticeSentParams{ID: job.ID, Token: token, MessageID: receipt.MessageID})
-	return noticeTransition(count, err)
+	link, linked := noticeCommentLink(job, receipt)
+	if !linked {
+		count, err := r.queries.MarkNoticeSent(ctx, sqlc.MarkNoticeSentParams{ID: job.ID, Token: token, MessageID: receipt.MessageID})
+		return noticeTransition(count, err)
+	}
+	// A notice that shows a ClickUp comment records its message link with
+	// the sent state (Phase 10 REQ-5).
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("transition notice: %w", err)
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(cleanup)
+	}()
+	q := r.queries.WithTx(tx)
+	count, err := q.MarkNoticeSent(ctx, sqlc.MarkNoticeSentParams{ID: job.ID, Token: token, MessageID: receipt.MessageID})
+	if err := noticeTransition(count, err); err != nil {
+		return err
+	}
+	if err := insertCommentLink(ctx, q, link); err != nil {
+		return fmt.Errorf("record message link: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("transition notice: %w", err)
+	}
+	return nil
+}
+
+// noticeCommentLink returns the message link of a delivered notice that
+// shows a ClickUp comment; ok is false for other notices or a receipt
+// without a chat.
+func noticeCommentLink(job relay.NoticeJob, receipt relay.DeliveryReceipt) (behavior.CommentLink, bool) {
+	if job.Event.EventType != domain.EventCommandPosted || receipt.ChatID == 0 {
+		return behavior.CommentLink{}, false
+	}
+	commentID, ok := behavior.CommentIDFromMessageRef(job.Event.ExternalMessageID)
+	if !ok {
+		return behavior.CommentLink{}, false
+	}
+	l := behavior.CommentLink{WorkspaceID: job.WorkspaceID, IntegrationID: job.TargetIntegrationID, ChatID: receipt.ChatID, MessageID: receipt.MessageID, TaskID: job.Event.ExternalID, CommentID: commentID}
+	return l, behavior.ValidCommentLink(l)
 }
 func (r *NoticeRepository) MarkRetry(ctx context.Context, job relay.NoticeJob, next time.Time, code string) error {
 	token, err := parseDBID(job.ClaimToken)

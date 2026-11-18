@@ -210,6 +210,32 @@ type ClickupChatPoll struct {
 	UpdatedAt              pgtype.Timestamptz
 }
 
+// Workspace-scoped ClickUp comment drafts awaiting the owner's confirm; the body is cleared when posted, cancelled or expired.
+type ClickupDraft struct {
+	ID               int64
+	WorkspaceID      pgtype.UUID
+	IntegrationID    pgtype.UUID
+	ChatID           int64
+	ThreadID         int64
+	TaskID           string
+	ParentCommentID  string
+	MentionUserIds   []string
+	NewStatus        string
+	Body             pgtype.Text
+	BodySha256       string
+	State            string
+	Source           string
+	ExecutionID      pgtype.Int8
+	PlanTaskKey      string
+	PreviewMessageID int64
+	PostedCommentID  string
+	ReasonCode       string
+	ExpiresAt        pgtype.Timestamptz
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
+	FinishedAt       pgtype.Timestamptz
+}
+
 type Contact struct {
 	ID          pgtype.UUID
 	WorkspaceID pgtype.UUID
@@ -578,6 +604,19 @@ type RunItem struct {
 	UpdatedAt    pgtype.Timestamptz
 }
 
+// Workspace-scoped map of a Telegram message to the ClickUp comment it shows; ids only, pruned after the retention setting.
+type TelegramMessageLink struct {
+	ID            int64
+	WorkspaceID   pgtype.UUID
+	IntegrationID pgtype.UUID
+	ChatID        int64
+	MessageID     int64
+	SubjectKind   string
+	TaskID        string
+	CommentID     string
+	CreatedAt     pgtype.Timestamptz
+}
+
 // Workspace-scoped binding of a Telegram forum topic to one subject; topic names, task names and message text are never stored.
 type TelegramTopic struct {
 	ID            int64
@@ -655,6 +694,7 @@ type ToolRun struct {
 	// The behavior run's correlation ID; NULL for agent job rows.
 	CorrelationID       pgtype.UUID
 	WorkflowExecutionID pgtype.Int8
+	ClickupDraftID      pgtype.Int8
 }
 
 type User struct {

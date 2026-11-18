@@ -139,7 +139,7 @@ WHERE j.status = 'pending' AND j.due_at <= sqlc.arg(at_time)::timestamptz
   -- A resume job continues the step's current attempt, so it is claimable
   -- even when that attempt was the last one.
   AND (j.attempts < j.max_attempts OR j.continues_attempt)
-  AND e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','COMPLETED','FAILED','CANCELLED')
+  AND e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','WAITING_FOR_WORKER','COMPLETED','FAILED','CANCELLED')
   AND (e.deadline_at IS NULL OR e.deadline_at > sqlc.arg(at_time)::timestamptz)
 ORDER BY CASE WHEN j.status = 'processing' THEN 0 ELSE 1 END, j.due_at, j.id
 -- Lock the job and its execution together without waiting, so a claim never
@@ -236,7 +236,7 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(executio
 SELECT e.* FROM public.workflow_executions e
 WHERE e.state NOT IN ('COMPLETED','FAILED','CANCELLED')
   AND (e.deadline_at IS NOT NULL AND e.deadline_at <= sqlc.arg(at_time)::timestamptz
-       OR e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL')
+       OR e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','WAITING_FOR_WORKER')
           AND NOT EXISTS (SELECT 1 FROM public.jobs j WHERE j.execution_id = e.id AND j.status IN ('pending','processing')))
 ORDER BY e.updated_at, e.id
 FOR UPDATE OF e SKIP LOCKED

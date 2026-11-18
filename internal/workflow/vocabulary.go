@@ -21,6 +21,12 @@ const StateRunning State = "RUNNING"
 const StateEvaluating State = "EVALUATING"
 const StateWaitingForUser State = "WAITING_FOR_USER"
 const StateWaitingForApproval State = "WAITING_FOR_APPROVAL"
+
+// StateWaitingForWorker: the execution waits for a local worker job (an
+// orchestrated task's repo.write step, Phase 10 REQ-11). Like the other
+// waiting states it holds no lease; the job's end or a wake time queues the
+// step again.
+const StateWaitingForWorker State = "WAITING_FOR_WORKER"
 const StateCompleted State = "COMPLETED"
 const StateFailed State = "FAILED"
 const StateCancelled State = "CANCELLED"

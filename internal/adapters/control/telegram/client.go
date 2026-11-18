@@ -38,6 +38,15 @@ func NewClient(client *http.Client, resolver SecretResolver) *Client {
 }
 
 func (c *Client) Send(ctx context.Context, target tenant.TelegramTargetConfig, e domain.NormalizedEvent) (relay.DeliveryReceipt, error) {
+	return c.SendNotice(ctx, target, e, nil)
+}
+
+var _ relay.ButtonNoticeSender = (*Client)(nil)
+
+// SendNotice sends the notice of e, with one inline callback button when
+// button is set (its text and data come from the hub, never from the
+// event).
+func (c *Client) SendNotice(ctx context.Context, target tenant.TelegramTargetConfig, e domain.NormalizedEvent, button *relay.NoticeButton) (relay.DeliveryReceipt, error) {
 	fail := func(code string, retry bool, after time.Duration) (relay.DeliveryReceipt, error) {
 		return relay.DeliveryReceipt{}, &relay.DeliveryError{Code: code, Retryable: retry, RetryAfter: after}
 	}
@@ -48,19 +57,39 @@ func (c *Client) Send(ctx context.Context, target tenant.TelegramTargetConfig, e
 	if err != nil || token == "" {
 		return fail(secretCode(err), false, 0)
 	}
-	return c.call(ctx, token, target.ChatID, target.MessageThreadID, FormatNotice(e))
+	return c.callWith(ctx, token, target.ChatID, target.MessageThreadID, FormatNotice(e), button)
 }
 
 // call posts one plain-text sendMessage; errors are *relay.DeliveryError.
 func (c *Client) call(ctx context.Context, token, chatID string, topic *int64, text string) (relay.DeliveryReceipt, error) {
+	return c.callWith(ctx, token, chatID, topic, text, nil)
+}
+
+type noticeKeyboard struct {
+	InlineKeyboard [][]noticeKey `json:"inline_keyboard"`
+}
+
+type noticeKey struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data"`
+}
+
+// callWith posts one plain-text sendMessage with an optional callback
+// button; errors are *relay.DeliveryError.
+func (c *Client) callWith(ctx context.Context, token, chatID string, topic *int64, text string, button *relay.NoticeButton) (relay.DeliveryReceipt, error) {
 	fail := func(code string, retry bool, after time.Duration) (relay.DeliveryReceipt, error) {
 		return relay.DeliveryReceipt{}, &relay.DeliveryError{Code: code, Retryable: retry, RetryAfter: after}
 	}
+	var markup *noticeKeyboard
+	if button != nil && button.Text != "" && button.Data != "" && len(button.Data) <= 64 {
+		markup = &noticeKeyboard{InlineKeyboard: [][]noticeKey{{{Text: button.Text, CallbackData: button.Data}}}}
+	}
 	body, _ := json.Marshal(struct {
-		ChatID string `json:"chat_id"`
-		Text   string `json:"text"`
-		Topic  *int64 `json:"message_thread_id,omitempty"`
-	}{chatID, text, topic})
+		ChatID string          `json:"chat_id"`
+		Text   string          `json:"text"`
+		Topic  *int64          `json:"message_thread_id,omitempty"`
+		Markup *noticeKeyboard `json:"reply_markup,omitempty"`
+	}{chatID, text, topic, markup})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/bot"+token+"/sendMessage", bytes.NewReader(body))
 	if err != nil {
 		return fail("invalid_request", false, 0)

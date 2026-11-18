@@ -2,6 +2,7 @@ package behavior
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
@@ -139,12 +140,49 @@ func MessageTaskID(ctx context.Context, store workflow.ConversationStore, worksp
 // that task as context) instead of "no open reply".
 type ReplyTasks struct {
 	Conversations workflow.ConversationStore
+	// Links finds the messages that show a ClickUp comment; nil: none.
+	Links CommentLinkReader
 }
 
 // ReplyHasTask reports whether the message names exactly one ClickUp task.
 func (r ReplyTasks) ReplyHasTask(ctx context.Context, workspaceID, integrationID string, chatID, messageID int64) bool {
 	_, ok := MessageTaskID(ctx, r.Conversations, workspaceID, integrationID, chatID, messageID)
 	return ok
+}
+
+// ReplyHasComment reports whether the message shows a ClickUp comment the
+// owner can answer. An error means the link could not be read.
+func (r ReplyTasks) ReplyHasComment(ctx context.Context, workspaceID, integrationID string, chatID, messageID int64) (bool, error) {
+	_, ok, err := lookupReplyComment(ctx, r.Links, workspaceID, integrationID, chatID, messageID)
+	return ok, err
+}
+
+// lookupReplyComment returns the usable comment link of a Telegram message.
+func lookupReplyComment(ctx context.Context, links CommentLinkReader, workspaceID, integrationID string, chatID, messageID int64) (CommentLink, bool, error) {
+	if links == nil || messageID <= 0 {
+		return CommentLink{}, false, nil
+	}
+	link, err := links.LookupCommentLink(ctx, workspaceID, integrationID, chatID, messageID)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return CommentLink{}, false, nil
+	case err != nil:
+		return CommentLink{}, false, err
+	}
+	return link, replyableCommentLink(link), nil
+}
+
+// replyableCommentLink reports whether a draft can be threaded under l.
+func replyableCommentLink(l CommentLink) bool {
+	return ValidCommentLink(l) && draftCommentIDRe.MatchString(l.CommentID)
+}
+
+// replyCommentContext is the fixed owner-turn prefix for a reply to a
+// message showing a ClickUp comment. It names only the task's identifier,
+// never the comment's text.
+func replyCommentContext(taskID string) string {
+	return "[Context] This message replies to a ClickUp comment on task " + taskID +
+		". To answer on ClickUp, call draft_clickup_comment; the hub threads the draft under that comment."
 }
 
 // replyTaskContext is the fixed owner-turn prefix for a reply to a hub

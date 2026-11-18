@@ -253,3 +253,22 @@ func capRunes(s string, n int) string {
 
 // maxTelegramRunes keeps a message under Telegram's 4096-character limit.
 const maxTelegramRunes = 3800
+
+// Fixed owner-facing texts of the ClickUp draft entry points (Phase 10 W2).
+const (
+	btnPostToClickUp = "📤 Đăng lên ClickUp"
+	// msgReportHead opens the comment text of an execution report.
+	msgReportHead          = "Kết quả"
+	msgReportNoResult      = "Chưa có kết quả để đăng."
+	msgReportNoTask        = "Việc này không gắn với task ClickUp."
+	msgReportFailed        = "Không tạo được bản nháp, hãy bấm lại."
+	msgReportDraftOpen     = "Đã có bản nháp đang chờ bạn xem."
+	msgReportDraftMade     = "Đã tạo bản nháp, xem bên dưới."
+	msgReportPreviewFailed = "Đã tạo bản nháp nhưng chưa gửi được bản xem trước."
+	// The outcome line of a report whose execution did not finish well.
+	msgReportOutcomeFailed    = "Trạng thái: việc thất bại, đây không phải kết quả hoàn tất."
+	msgReportOutcomeCancelled = "Trạng thái: việc đã bị huỷ, đây không phải kết quả hoàn tất."
+)
+
+// usageComment answers /comment without text or outside a ClickUp task topic.
+const usageComment = "Cú pháp: /comment <nội dung> (gõ trong topic của một task ClickUp)"

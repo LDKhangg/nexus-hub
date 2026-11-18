@@ -58,3 +58,40 @@ ON CONFLICT (workspace_id, execution_id) DO NOTHING;
 -- name: GetOrchestratorRoute :one
 SELECT * FROM public.orchestrator_routes
 WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id);
+
+-- name: ListOrchestratorStepsToWake :many
+-- Waiting orchestrated task run steps that must run again without a
+-- signal (Phase 10 REQ-10/11): the wall-time budget of a worker wait is
+-- over (the step's orchestrator_wake_at reference, unix seconds); the
+-- worker job the step waits on for the owner (job_owner:<id>) was retried
+-- and runs again; or the ClickUp draft the step waits on (task:draft:<id>)
+-- has ended (posted, cancelled, expired or failed_final). Executions past
+-- their deadline are left to the reconciler, and
+-- one with a live queue row is already running.
+SELECT s.workspace_id, s.execution_id, s.step_key
+FROM public.execution_steps s
+JOIN public.workflow_executions e ON e.workspace_id = s.workspace_id AND e.id = s.execution_id
+WHERE s.kind = 'orchestrator.run_task' AND s.state = 'WAITING'
+  AND e.state IN ('WAITING_FOR_USER', 'WAITING_FOR_APPROVAL', 'WAITING_FOR_WORKER')
+  AND (e.deadline_at IS NULL OR e.deadline_at > sqlc.arg(at_time)::timestamptz)
+  AND (
+    COALESCE(jsonb_path_exists(s.checkpoint,
+        '$.references[*] ? (@.kind == "orchestrator_wake_at" && @.reference_id.double() <= $now)',
+        jsonb_build_object('now', sqlc.arg(now_unix)::bigint), true), false)
+    OR EXISTS (SELECT 1 FROM public.worker_jobs j
+               WHERE j.workspace_id = s.workspace_id AND j.execution_id = s.execution_id AND j.step_id = s.step_key
+                 AND j.state IN ('WAITING_FOR_WORKER', 'LEASED', 'RUNNING')
+                 AND COALESCE(jsonb_path_exists(s.checkpoint,
+                     '$.references[*] ? (@.kind == "orchestrator_wait" && @.reference_id == $ref)',
+                     jsonb_build_object('ref', 'job_owner:' || j.id::text), true), false))
+    OR EXISTS (SELECT 1 FROM public.clickup_drafts d
+               WHERE d.workspace_id = s.workspace_id AND d.execution_id = s.execution_id
+                 AND d.state IN ('posted', 'cancelled', 'expired', 'failed_final')
+                 AND COALESCE(jsonb_path_exists(s.checkpoint,
+                     '$.references[*] ? (@.kind == "orchestrator_wait" && @.reference_id == $ref)',
+                     jsonb_build_object('ref', 'task:draft:' || d.id::text), true), false))
+  )
+  AND NOT EXISTS (SELECT 1 FROM public.jobs q
+                  WHERE q.workspace_id = e.workspace_id AND q.execution_id = e.id AND q.status IN ('pending', 'processing'))
+ORDER BY s.updated_at
+LIMIT sqlc.arg(row_limit);

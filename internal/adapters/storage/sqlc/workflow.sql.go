@@ -925,7 +925,7 @@ const listReconcileWorkflowExecutions = `-- name: ListReconcileWorkflowExecution
 SELECT e.id, e.workspace_id, e.behavior_version_id, e.trigger_key, e.correlation_id, e.state, e.reason_code, e.definition, e.source_kind, e.source_id, e.subject, e.revision, e.operation_key, e.legacy_run_id, e.legacy_job_id, e.parent_execution_id, e.deadline_at, e.cancelled_at, e.started_at, e.finished_at, e.created_at, e.updated_at FROM public.workflow_executions e
 WHERE e.state NOT IN ('COMPLETED','FAILED','CANCELLED')
   AND (e.deadline_at IS NOT NULL AND e.deadline_at <= $1::timestamptz
-       OR e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL')
+       OR e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','WAITING_FOR_WORKER')
           AND NOT EXISTS (SELECT 1 FROM public.jobs j WHERE j.execution_id = e.id AND j.status IN ('pending','processing')))
 ORDER BY e.updated_at, e.id
 FOR UPDATE OF e SKIP LOCKED
@@ -1274,7 +1274,7 @@ WHERE j.status = 'pending' AND j.due_at <= $1::timestamptz
   -- A resume job continues the step's current attempt, so it is claimable
   -- even when that attempt was the last one.
   AND (j.attempts < j.max_attempts OR j.continues_attempt)
-  AND e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','COMPLETED','FAILED','CANCELLED')
+  AND e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','WAITING_FOR_WORKER','COMPLETED','FAILED','CANCELLED')
   AND (e.deadline_at IS NULL OR e.deadline_at > $1::timestamptz)
 ORDER BY CASE WHEN j.status = 'processing' THEN 0 ELSE 1 END, j.due_at, j.id
 FOR UPDATE OF j, e SKIP LOCKED

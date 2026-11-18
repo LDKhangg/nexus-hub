@@ -501,10 +501,13 @@ func TestB2WorkflowToolRunStore_UnknownExecutionFails(t *testing.T) {
 
 // ---- worker wake query scope ----
 
-// B2-S13 (REQ-9): the wake query finds a waiting step whose job is FAILED or
-// NEEDS_INPUT only for orchestrator.run_task steps; SUCCEEDED and CANCELLED
-// wake any waiting step; INTERRUPTED, running executions and steps that are
-// not waiting never wake.
+// B2-S13 (REQ-9; K1 rulings 1, 2 and 4): the wake query finds a waiting step whose job
+// ended in a way that finishes it. SUCCEEDED and CANCELLED wake any waiting step except an
+// orchestrator step that waits for an owner gate or answer (gate:, clarify:). FAILED,
+// NEEDS_INPUT and INTERRUPTED wake only an orchestrator.run_task step that still waits for
+// its worker (wait marker job:<id>); the step that already waits for the owner's Retry or
+// Cancel (job_owner:<id>), another step kind, a running execution and a step that is not
+// waiting never wake. WAITING_FOR_WORKER executions are woken like the other waits.
 func TestB2WakeQuery_FailedAndNeedsInputOnlyForRunTaskSteps(t *testing.T) {
 	e := newB2Env(t)
 	var device string
@@ -512,31 +515,53 @@ func TestB2WakeQuery_FailedAndNeedsInputOnlyForRunTaskSteps(t *testing.T) {
 		t.Fatal(err)
 	}
 	vid := e.enabledVersion(workspaceA, "wake").ID
+	const (
+		none  = ``
+		job   = `{"references":[{"kind":"orchestrator_wait","reference_id":"job:1"}]}`
+		owner = `{"references":[{"kind":"orchestrator_wait","reference_id":"job_owner:1"}]}`
+		gate  = `{"references":[{"kind":"orchestrator_wait","reference_id":"gate:7"}]}`
+		clar  = `{"references":[{"kind":"orchestrator_wait","reference_id":"clarify:3"}]}`
+	)
 	type tc struct {
-		name, job, stepKind, stepState, execState string
-		wake                                      bool
+		name, job, stepKind, stepState, execState, checkpoint string
+		wake                                                  bool
 	}
 	cases := []tc{
-		{"run_task failed", "FAILED", workflow2RunTask, "WAITING", "WAITING_FOR_USER", true},
-		{"run_task needs input", "NEEDS_INPUT", workflow2RunTask, "WAITING", "WAITING_FOR_USER", true},
-		{"run_task failed, execution waits for approval", "FAILED", workflow2RunTask, "WAITING", "WAITING_FOR_APPROVAL", true},
-		{"run_task succeeded", "SUCCEEDED", workflow2RunTask, "WAITING", "WAITING_FOR_USER", true},
-		{"run_task cancelled", "CANCELLED", workflow2RunTask, "WAITING", "WAITING_FOR_USER", true},
-		{"worker.run succeeded", "SUCCEEDED", "worker.run", "WAITING", "WAITING_FOR_USER", true},
-		{"worker.run cancelled", "CANCELLED", "worker.run", "WAITING", "WAITING_FOR_USER", true},
-		{"worker.run failed", "FAILED", "worker.run", "WAITING", "WAITING_FOR_USER", false},
-		{"worker.run needs input", "NEEDS_INPUT", "worker.run", "WAITING", "WAITING_FOR_USER", false},
-		{"model step failed", "FAILED", "model", "WAITING", "WAITING_FOR_USER", false},
-		{"run_task interrupted", "INTERRUPTED", workflow2RunTask, "WAITING", "WAITING_FOR_USER", false},
-		{"run_task still running", "RUNNING", workflow2RunTask, "WAITING", "WAITING_FOR_USER", false},
-		{"run_task failed, execution running", "FAILED", workflow2RunTask, "WAITING", "RUNNING", false},
-		{"run_task failed, step already done", "FAILED", workflow2RunTask, "SUCCEEDED", "WAITING_FOR_USER", false},
+		{"run_task failed, waits for worker", "FAILED", workflow2RunTask, "WAITING", "WAITING_FOR_WORKER", job, true},
+		{"run_task failed, waits for worker, execution WAITING_FOR_USER", "FAILED", workflow2RunTask, "WAITING", "WAITING_FOR_USER", job, true},
+		{"run_task needs input, waits for worker", "NEEDS_INPUT", workflow2RunTask, "WAITING", "WAITING_FOR_WORKER", job, true},
+		{"run_task interrupted, waits for worker", "INTERRUPTED", workflow2RunTask, "WAITING", "WAITING_FOR_WORKER", job, true},
+		{"run_task failed, execution waits for approval", "FAILED", workflow2RunTask, "WAITING", "WAITING_FOR_APPROVAL", job, true},
+		{"run_task failed, already waits for the owner", "FAILED", workflow2RunTask, "WAITING", "WAITING_FOR_USER", owner, false},
+		{"run_task needs input, already waits for the owner", "NEEDS_INPUT", workflow2RunTask, "WAITING", "WAITING_FOR_USER", owner, false},
+		{"run_task interrupted, already waits for the owner", "INTERRUPTED", workflow2RunTask, "WAITING", "WAITING_FOR_USER", owner, false},
+		{"run_task failed, no wait marker", "FAILED", workflow2RunTask, "WAITING", "WAITING_FOR_USER", none, false},
+		{"run_task failed, waits for a gate", "FAILED", workflow2RunTask, "WAITING", "WAITING_FOR_USER", gate, false},
+		{"run_task succeeded, waits for worker", "SUCCEEDED", workflow2RunTask, "WAITING", "WAITING_FOR_WORKER", job, true},
+		{"run_task succeeded, no marker", "SUCCEEDED", workflow2RunTask, "WAITING", "WAITING_FOR_USER", none, true},
+		{"run_task cancelled, waits for the owner", "CANCELLED", workflow2RunTask, "WAITING", "WAITING_FOR_USER", owner, true},
+		{"run_task succeeded, pending gate", "SUCCEEDED", workflow2RunTask, "WAITING", "WAITING_FOR_USER", gate, false},
+		{"run_task cancelled, pending gate", "CANCELLED", workflow2RunTask, "WAITING", "WAITING_FOR_USER", gate, false},
+		{"run_task succeeded, pending clarification", "SUCCEEDED", workflow2RunTask, "WAITING", "WAITING_FOR_USER", clar, false},
+		{"worker.run succeeded", "SUCCEEDED", "worker.run", "WAITING", "WAITING_FOR_USER", none, true},
+		{"worker.run cancelled", "CANCELLED", "worker.run", "WAITING", "WAITING_FOR_USER", none, true},
+		{"worker.run failed", "FAILED", "worker.run", "WAITING", "WAITING_FOR_USER", none, false},
+		{"worker.run failed, job marker", "FAILED", "worker.run", "WAITING", "WAITING_FOR_USER", job, false},
+		{"worker.run needs input", "NEEDS_INPUT", "worker.run", "WAITING", "WAITING_FOR_USER", none, false},
+		{"model step failed", "FAILED", "model", "WAITING", "WAITING_FOR_USER", job, false},
+		{"run_task still running", "RUNNING", workflow2RunTask, "WAITING", "WAITING_FOR_WORKER", job, false},
+		{"run_task failed, execution running", "FAILED", workflow2RunTask, "WAITING", "RUNNING", job, false},
+		{"run_task failed, step already done", "FAILED", workflow2RunTask, "SUCCEEDED", "WAITING_FOR_USER", job, false},
 	}
 	want := map[int64]bool{}
 	names := map[int64]string{}
 	for i, c := range cases {
 		ex := e.start(workspaceA, vid, "wake-"+string(rune('a'+i)), chainDef("a"))
-		mustExec(t, e.ctx, e.pool, `UPDATE execution_steps SET kind=$2, state=$3 WHERE execution_id=$1 AND step_key='a'`, ex.ID, c.stepKind, c.stepState)
+		var cp any
+		if c.checkpoint != "" {
+			cp = c.checkpoint
+		}
+		mustExec(t, e.ctx, e.pool, `UPDATE execution_steps SET kind=$2, state=$3, checkpoint=$4::jsonb WHERE execution_id=$1 AND step_key='a'`, ex.ID, c.stepKind, c.stepState, cp)
 		mustExec(t, e.ctx, e.pool, `UPDATE workflow_executions SET state=$2 WHERE id=$1`, ex.ID, c.execState)
 		var dev any
 		if c.job != "CANCELLED" {
