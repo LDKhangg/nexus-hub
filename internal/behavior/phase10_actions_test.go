@@ -421,3 +421,106 @@ func TestP10Actions_PrepareJobStoresTopicRoute(t *testing.T) {
 		t.Fatalf("negative version: %v %+v", err, store.got)
 	}
 }
+
+// TC-K1f (REQ-10): the draft text of title plus dependency summaries is capped at 4000 runes, on a rune boundary.
+func TestP10Actions_TitleAndDependencyTextIsCapped(t *testing.T) {
+	port := newP10Port()
+	a := &OrchestratorActions{Drafts: port}
+	run := p10Run(orchestrator.CapClickUpWrite)
+	run.Task.Title = strings.Repeat("T", 300)
+	for i := 0; i < 8; i++ {
+		run.Inputs = append(run.Inputs, strings.Repeat("ệ", 1000))
+	}
+	if out, err := a.RunTask(context.Background(), run); err != nil || out.Wait == "" {
+		t.Fatalf("%+v %v", out, err)
+	}
+	text := port.created[0].Text
+	if n := utf8.RuneCountInString(text); n > 4000 || n < 3900 || !utf8.ValidString(text) {
+		t.Fatalf("%d runes", n)
+	}
+	if !strings.HasPrefix(text, strings.Repeat("T", 300)+"\n\n") {
+		t.Fatal("the title must come first")
+	}
+}
+
+// p10JobSpy records which job a Retry or Cancel acted on.
+type p10JobSpy struct {
+	*b3Jobs
+	mu      sync.Mutex
+	retried []string
+	cancels []string
+}
+
+func (s *p10JobSpy) RetryJob(ctx context.Context, ws, id string, attempt int) (WorkerJob, error) {
+	s.mu.Lock()
+	s.retried = append(s.retried, ws+"|"+id)
+	s.mu.Unlock()
+	return s.b3Jobs.RetryJob(ctx, ws, id, attempt)
+}
+
+func (s *p10JobSpy) CancelJob(ctx context.Context, ws, id string) (WorkerJob, error) {
+	s.mu.Lock()
+	s.cancels = append(s.cancels, ws+"|"+id)
+	s.mu.Unlock()
+	return s.b3Jobs.CancelJob(ctx, ws, id)
+}
+
+type p10Wake struct {
+	mu   sync.Mutex
+	woke []int64
+}
+
+func (w *p10Wake) InstructionAdded(_ context.Context, _ string, exec int64) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.woke = append(w.woke, exec)
+	return nil
+}
+
+// TC-K3b (REQ-12): Retry and Cancel act only on the job in their own button, wake only that job's execution,
+// and a press from another chat acts on nothing.
+func TestP10Buttons_RetryAndCancelActOnlyOnTheirJob(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		index int
+	}{{"retry", 0}, {"cancel", 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := b3Buttons(t, WorkerJobFailed)
+			spy := &p10JobSpy{b3Jobs: e.jobs}
+			wake := &p10Wake{}
+			e.w.d.WorkerJobs = spy
+			e.w.d.InstructionWaker = wake
+			// Someone else's chat: nothing happens.
+			if out := e.press(tc.index, b1Chat-5); len(spy.retried)+len(spy.cancels) != 0 || len(wake.woke) != 0 {
+				t.Fatalf("a press from another chat acted: %+v %+v %+v", out, spy.retried, spy.cancels)
+			}
+			if out := e.press(tc.index, b1Chat); out.code != "" {
+				t.Fatalf("press: %+v", out)
+			}
+			got := append(append([]string{}, spy.retried...), spy.cancels...)
+			if len(got) != 1 || got[0] != p4WS+"|job-1" {
+				t.Fatalf("acted on %v, want only job-1", got)
+			}
+			if (tc.index == 0) != (len(spy.retried) == 1) {
+				t.Fatalf("retried %v cancelled %v", spy.retried, spy.cancels)
+			}
+			if len(wake.woke) != 1 || wake.woke[0] != 41 {
+				t.Fatalf("woke %v, want only execution 41", wake.woke)
+			}
+			// The same button again is stale: no second action.
+			e.press(tc.index, b1Chat)
+			if n := len(spy.retried) + len(spy.cancels); n != 1 || len(wake.woke) != 1 {
+				t.Fatalf("second press acted: %d actions, woke %v", n, wake.woke)
+			}
+		})
+	}
+	// The other button of the same message is closed with it.
+	e := b3Buttons(t, WorkerJobFailed)
+	spy := &p10JobSpy{b3Jobs: e.jobs}
+	e.w.d.WorkerJobs = spy
+	e.press(0, b1Chat)
+	e.press(1, b1Chat)
+	if len(spy.retried) != 1 || len(spy.cancels) != 0 {
+		t.Fatalf("retry then cancel on the same message: retried %v cancelled %v", spy.retried, spy.cancels)
+	}
+}

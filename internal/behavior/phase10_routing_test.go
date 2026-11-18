@@ -365,7 +365,7 @@ func p10TaskRes(id string) workflow.ResourceBinding {
 func TestP10TDNT2_ReplyToNoticeUsesOnlyTaskIDAsContext(t *testing.T) {
 	e := p10ReplyEnv(t, p10TaskRes("86abc"))
 	out := e.say(t, 0, 600, "tóm tắt giúp tôi nhé")
-	if out.code != "" {
+	if out.code != "assistant_queued" {
 		t.Fatalf("code %q", out.code)
 	}
 	j, ok := e.job()
@@ -579,5 +579,25 @@ func TestP10TDNT3_PruneOnlyTerminalWorkflowTopics(t *testing.T) {
 	}
 	if _, err := PruneWorkflowTopics(ctx, p6bWS, nil, rm, execs); !errors.Is(err, ErrNotAvailable) {
 		t.Fatalf("no store: %v", err)
+	}
+}
+
+// TC-K2 (REQ-11): /status WF-n names the worker wait.
+func TestP10Status_ShowsWorkerWait(t *testing.T) {
+	e := newB1Env(b1States(0))
+	e.r.details[200] = phase6BDetail(200, p4WS, workflow.StateWaitingForWorker)
+	u := e.update(0, 0)
+	if out := e.w.workflowStatus(context.Background(), u, e.to(0), 200); out.code != "" {
+		t.Fatalf("code %q", out.code)
+	}
+	text := e.m.last(t).Text
+	if !strings.Contains(text, "WF-200") || !strings.Contains(text, "WAITING_FOR_WORKER") {
+		t.Fatalf("status %q", text)
+	}
+	// The other waits keep their name.
+	e.r.details[201] = phase6BDetail(201, p4WS, workflow.StateWaitingForUser)
+	e.w.workflowStatus(context.Background(), u, e.to(0), 201)
+	if text := e.m.last(t).Text; !strings.Contains(text, "WAITING_FOR_USER") || strings.Contains(text, "WAITING_FOR_WORKER") {
+		t.Fatalf("status %q", text)
 	}
 }

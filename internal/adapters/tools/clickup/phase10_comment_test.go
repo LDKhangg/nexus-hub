@@ -60,12 +60,15 @@ func TestP10Comment_OldInputSendsIdenticalRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(*reqs) != 1 {
-		t.Fatalf("%d requests", len(*reqs))
+	snap := func() []p10Req {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]p10Req(nil), (*reqs)...)
 	}
-	r := (*reqs)[0]
+	if len(snap()) != 1 {
+		t.Fatalf("%d requests", len(snap()))
+	}
+	r := snap()[0]
 	if r.method != "POST" || r.path != "/api/v2/task/86abc/comment" || r.auth != "pk_token" {
 		t.Fatalf("request %+v", r)
 	}
@@ -79,7 +82,7 @@ func TestP10Comment_OldInputSendsIdenticalRequest(t *testing.T) {
 	if _, err := p10Run(tl, `{"task_id":"86abc","text":"x","parent_comment_id":null,"mention_user_ids":[]}`); err != nil {
 		t.Fatal(err)
 	}
-	last := (*reqs)[1]
+	last := snap()[1]
 	if last.path != "/api/v2/task/86abc/comment" || last.body["comment_text"] != "x" || last.body["comment"] != nil {
 		t.Fatalf("null/empty new fields changed the request: %s %s", last.path, last.raw)
 	}

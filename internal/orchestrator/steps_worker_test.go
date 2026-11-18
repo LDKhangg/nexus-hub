@@ -62,8 +62,13 @@ func TestWorkerPath_RepoResolutionOrder(t *testing.T) {
 			h.repos.registered, h.repos.last = c.registered, c.last
 			h.routes.route.Repo, h.routes.route.ClickUpTaskID = c.explicit, c.clickup
 			res, err := h.step("run_01")
-			if err != nil || res.WaitState != workflow.StateWaitingForUser {
-				t.Fatalf("%q %v", res.WaitState, err)
+			// A clarification waits for the owner; a created job waits for the worker (K1 ruling 1).
+			wantState := workflow.StateWaitingForWorker
+			if c.wantRepo == "" {
+				wantState = workflow.StateWaitingForUser
+			}
+			if err != nil || res.WaitState != wantState {
+				t.Fatalf("%q %v, want %q", res.WaitState, err, wantState)
 			}
 			if c.wantRepo == "" {
 				if len(h.jobs.created) != 0 {
@@ -101,7 +106,7 @@ func TestWorkerPath_ClarificationOnNoRepo(t *testing.T) {
 
 	h.instr.add("WF-1 org/beta")
 	res, err = h.step("run_01")
-	if err != nil || res.WaitState != workflow.StateWaitingForUser {
+	if err != nil || res.WaitState != workflow.StateWaitingForWorker {
 		t.Fatalf("after answer: %q %v", res.WaitState, err)
 	}
 	p := jobPayload(t, h)

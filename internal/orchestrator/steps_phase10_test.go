@@ -357,3 +357,44 @@ func TestP10Worker_JobRoutePreparedBeforeJob(t *testing.T) {
 		}
 	}
 }
+
+type p10Capture struct {
+	mu   sync.Mutex
+	runs []TaskRun
+}
+
+func (c *p10Capture) RunTask(_ context.Context, run TaskRun) (TaskOutcome, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.runs = append(c.runs, run)
+	return TaskOutcome{Wait: "draft-1"}, nil
+}
+
+func (c *p10Capture) ResumeTask(context.Context, TaskRun, string) (TaskOutcome, error) {
+	return TaskOutcome{Wait: "draft-1"}, nil
+}
+
+// P10-K1g (REQ-10): a clickup.write task gets the bounded results of its succeeded dependencies as data in
+// TaskRun.Inputs, one line each: the dependency title and its summary.
+func TestP10Executor_InputsCarryDependencySummaries(t *testing.T) {
+	h := newSH(t)
+	capture := &p10Capture{}
+	h.s.Executors[ExecutorBehaviorActions] = capture
+	h.routes.route.ClickUpTaskID = "86abc"
+	h.inv.fn = func(TaskRun) (TaskOutcome, error) {
+		return TaskOutcome{Succeeded: true, Summary: "Đã sửa lỗi đăng nhập", Evidence: []EvidenceRef{{Kind: EvidenceArtifact, ID: "https://github.com/o/r"}}}, nil
+	}
+	h.plan("EXECUTE", shRead("a", "Điều tra lỗi"), ptask("w", "Báo kết quả", []string{CapClickUpWrite}, "a"))
+	h.eval("EXECUTE", "next")
+	key, res, err := h.flow()
+	if err != nil || key != "run_02" || res.WaitState != workflow.StateWaitingForApproval {
+		t.Fatalf("flow stopped at %q wait %q err %v", key, res.WaitState, err)
+	}
+	if len(capture.runs) != 1 {
+		t.Fatalf("%d runs", len(capture.runs))
+	}
+	in := capture.runs[0].Inputs
+	if len(in) != 1 || !strings.HasPrefix(in[0], "Điều tra lỗi: ") || !strings.Contains(in[0], "Đã sửa lỗi đăng nhập") {
+		t.Fatalf("inputs %q", in)
+	}
+}

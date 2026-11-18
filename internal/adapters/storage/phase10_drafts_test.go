@@ -360,3 +360,50 @@ func TestP10Migration00032DownUp(t *testing.T) {
 	_, err := e.pool.Exec(e.ctx, `INSERT INTO approvals(workspace_id,kind,action,resource,payload,nonce,expires_at) VALUES($1,'bogus','a','r','{}','nonce-0123456789abcdeh',now()+interval '1 hour')`, workspaceA)
 	requirePGCode(t, err, "23514")
 }
+
+// TC-K1d (REQ-10): the orchestrator draft lookup finds the newest draft of an execution's plan task, and only that.
+func TestP10DraftStore_OrchestratorDraftLookupFindsRealRow(t *testing.T) {
+	e := newB2Env(t)
+	mustExec(t, e.ctx, e.pool, `INSERT INTO integrations(id,workspace_id,platform) VALUES($1,$2,'telegram')`, integrationA, workspaceA)
+	s, err := NewClickUpDraftStore(e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ex1, ex2 := e.startTask(t), e.startTask(t)
+	mk := func(exec int64, source, key string) behavior.ClickUpDraft {
+		d, err := s.CreateDraft(e.ctx, behavior.NewClickUpDraft{
+			Chat:   behavior.ChatRef{WorkspaceID: workspaceA, IntegrationID: integrationA, ChatID: -1001, ThreadID: 7},
+			TaskID: "86abc", Body: "🤖 x", BodySHA256: p10Sha("a"), Source: source, ExecutionID: exec, PlanTaskKey: key,
+			ExpiresAt: time.Now().Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	first := mk(ex1, behavior.DraftSourceOrchestrator, "run_01:w")
+	newest := mk(ex1, behavior.DraftSourceOrchestrator, "run_01:w")
+	mk(ex1, behavior.DraftSourceOrchestrator, "run_02:w")
+	mk(ex2, behavior.DraftSourceOrchestrator, "run_01:w")
+	mk(ex1, behavior.DraftSourceAssistant, "run_01:w")
+	got, ok, err := s.OrchestratorDraft(e.ctx, workspaceA, ex1, "run_01:w")
+	if err != nil || !ok || got.ID != newest.ID || got.ID == first.ID {
+		t.Fatalf("found %+v ok=%v err=%v, want draft %d", got, ok, err, newest.ID)
+	}
+	if got.ExecutionID != ex1 || got.PlanTaskKey != "run_01:w" || got.Source != behavior.DraftSourceOrchestrator || got.Body != "🤖 x" {
+		t.Fatalf("draft %+v", got)
+	}
+	if _, ok, err := s.OrchestratorDraft(e.ctx, workspaceA, ex1, "run_09:w"); err != nil || ok {
+		t.Fatalf("other key: %v %v", ok, err)
+	}
+	if _, ok, err := s.OrchestratorDraft(e.ctx, workspaceB, ex1, "run_01:w"); err != nil || ok {
+		t.Fatalf("other workspace: %v %v", ok, err)
+	}
+	// An ended draft is still found (without its body), so a retried step sees the outcome.
+	if _, err := s.CancelDraft(e.ctx, workspaceA, newest.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, err := s.OrchestratorDraft(e.ctx, workspaceA, ex1, "run_01:w"); err != nil || !ok || got.State != behavior.DraftCancelled || got.Body != "" {
+		t.Fatalf("ended draft %+v %v %v", got, ok, err)
+	}
+}

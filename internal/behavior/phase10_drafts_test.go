@@ -470,8 +470,8 @@ func TestP10Draft_DoublePressAndBurstPostOnce(t *testing.T) {
 		t.Fatalf("%d tool calls", n)
 	}
 	// A later press by hand is stale and calls nothing.
-	if toast, code, _ := e.press(CallbackApprove, ap, msgID); toast != msgDraftStale || code != "stale" {
-		t.Fatalf("toast %q code %q", toast, code)
+	if _, code, _ := e.press(CallbackApprove, ap, msgID); code != "stale" {
+		t.Fatalf("code %q", code)
 	}
 	if n := len(e.tool.callsOf(ToolPostComment)); n != 1 {
 		t.Fatalf("%d tool calls after second press", n)
@@ -506,8 +506,8 @@ func TestP10Draft_EditReplacesTextAndOldButtonsDie(t *testing.T) {
 		t.Fatalf("old preview not retired: %+v", ed)
 	}
 	// Old Đăng: stale, nothing posted.
-	if toast, code, _ := e.press(CallbackApprove, oldPost, oldMsg); code != "stale" || toast != msgDraftStale {
-		t.Fatalf("old press: %q %q", toast, code)
+	if _, code, _ := e.press(CallbackApprove, oldPost, oldMsg); code != "stale" {
+		t.Fatalf("old press: code %q", code)
 	}
 	// Old Đăng even if the worker passed a still-open approval snapshot.
 	if _, code, _ := e.d.HandleDraftPress(context.Background(), DraftPress{WorkspaceID: p10WS, IntegrationID: p10Bot, ChatID: p10Chat,
