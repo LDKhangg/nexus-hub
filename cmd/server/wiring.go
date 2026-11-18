@@ -783,6 +783,7 @@ func registerOrchestratorSteps(ports *orchestratorPorts, reg *workflow.Registry,
 	template.MaxRepair = int(s.OrchestratorMaxRepair)
 	template.MinConfidence = s.OrchestratorMinConfidence
 	owner := behavior.NewOrchestratorOwner(messenger, topics, behaviors)
+	owner.ReportButton = drafts != nil
 	executors := map[string]orchestrator.TaskExecutor{
 		orchestrator.ExecutorInvestigate: &behavior.OrchestratorInvestigate{
 			Policies:      behaviorPolicies{integrations: integrations, known: ag.known},
@@ -814,7 +815,7 @@ func registerOrchestratorSteps(ports *orchestratorPorts, reg *workflow.Registry,
 	if err := steps.Register(reg); err != nil {
 		return err
 	}
-	ports.Tasks, ports.Plans = routes, plans
+	ports.Tasks, ports.Plans, ports.Routes = routes, plans, routes
 	return nil
 }
 
@@ -822,6 +823,7 @@ func registerOrchestratorSteps(ports *orchestratorPorts, reg *workflow.Registry,
 // (/plan, start_task, /status). Both stay nil when the orchestrator is not
 // registered.
 type orchestratorPorts struct {
-	Tasks behavior.OrchestratedTaskStarter
-	Plans behavior.OrchestratorPlanReader
+	Tasks  behavior.OrchestratedTaskStarter
+	Plans  behavior.OrchestratorPlanReader
+	Routes orchestrator.RouteReader
 }

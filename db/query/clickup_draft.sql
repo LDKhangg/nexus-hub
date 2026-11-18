@@ -98,6 +98,16 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(executio
 ORDER BY id DESC
 LIMIT 1;
 
+-- name: GetOpenExecutionReportClickUpDraft :one
+-- The newest draft of an execution's report that can still be posted (Phase
+-- 10 REQ-9), so a second press of "Đăng lên ClickUp" reuses it.
+SELECT * FROM public.clickup_drafts
+WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id)::bigint
+  AND source = 'execution_report' AND state IN ('pending', 'posting', 'failed')
+  AND expires_at > now()
+ORDER BY id DESC
+LIMIT 1;
+
 -- name: CancelEndedExecutionClickUpDrafts :many
 -- Cancels up to limit open orchestrator drafts (pending, or failed with a
 -- retry) whose execution has ended or is past its deadline (review A

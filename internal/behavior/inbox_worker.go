@@ -100,6 +100,14 @@ type InboxDeps struct {
 	// ClickUpDrafts backs the "Đăng" / "Sửa" / "Huỷ" / "Thử lại" buttons
 	// and the edit replies of ClickUp drafts. Nil answers "not available".
 	ClickUpDrafts ClickUpDraftHandler
+	// ExecutionReports and ReportDrafts back "📤 Đăng lên ClickUp" of a final
+	// report (Phase 10 REQ-9). Nil answers "not available".
+	ExecutionReports ExecutionReportSource
+	// ReportDrafts also backs the draft_clickup_comment tool (nil hides it).
+	ReportDrafts ReportDrafts
+	// CommentLinks finds the ClickUp comment a replied-to Telegram message
+	// shows, so a draft is a threaded reply. Optional.
+	CommentLinks CommentLinkReader
 }
 
 // InboxWorker processes stored Telegram updates: built-in commands,
@@ -250,6 +258,9 @@ func (w *InboxWorker) dispatch(ctx context.Context, u InboundUpdate, corr string
 		}
 		if strings.HasPrefix(u.Command, taskTopicCallbackPrefix) {
 			return w.taskTopicCallback(ctx, u, to)
+		}
+		if strings.HasPrefix(u.Command, executionReportCallbackPrefix) {
+			return w.executionReportCallback(ctx, u, to)
 		}
 		return w.callback(ctx, u, to, actor, corr)
 	case UpdateCommand, UpdateText, UpdateOther:

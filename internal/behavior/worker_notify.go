@@ -63,6 +63,9 @@ type WorkerNotifierDeps struct {
 	Telemetry  WorkerTelemetryReader
 	Thresholds WorkerThresholds
 	Waker      LocalTaskWaker
+	// ReportButtons adds "📤 Đăng lên ClickUp" to the final report of a
+	// /task job on a ClickUp task. Nil: no button.
+	ReportButtons ExecutionReportButtons
 }
 
 // WorkerNotifier tells the owner, in the task topic, what happens to a local
@@ -204,7 +207,7 @@ func (n *WorkerNotifier) finished(ctx context.Context, route LocalTaskRoute, job
 	ref := workflow.FormatRef(job.ExecutionID)
 	switch job.State {
 	case WorkerJobSucceeded:
-		n.say(ctx, route, ref+": hoàn tất.\n"+workerResultText(job.Result), nil)
+		n.say(ctx, route, ref+": hoàn tất.\n"+workerResultText(job.Result), n.reportRow(ctx, route, job))
 	case WorkerJobCancelled:
 		n.say(ctx, route, ref+": đã huỷ.", nil)
 	case WorkerJobNeedsInput:
@@ -214,7 +217,7 @@ func (n *WorkerNotifier) finished(ctx context.Context, route LocalTaskRoute, job
 		}
 		n.failed(ctx, route, job, text+"\nGửi thêm yêu cầu trong topic rồi bấm Thử lại, hoặc Huỷ.")
 	case WorkerJobFailed:
-		n.failed(ctx, route, job, workerFailureText(job.Result))
+		n.failedWith(ctx, route, job, workerFailureText(job.Result), n.reportRow(ctx, route, job))
 	}
 	// A job that ended for good finishes its workflow step.
 	if (job.State == WorkerJobSucceeded || job.State == WorkerJobCancelled) && n.d.Waker != nil {
@@ -291,14 +294,33 @@ func workerFailureText(r *WorkerResult) string {
 // failed sends the failure text with Retry and Cancel buttons bound to this
 // chat and attempt, valid for 24 hours.
 func (n *WorkerNotifier) failed(ctx context.Context, route LocalTaskRoute, job WorkerJob, text string) {
+	n.failedWith(ctx, route, job, text, nil)
+}
+
+// reportRow is the row with the report button of a /task job's final
+// report; nil when the task has no ClickUp task or the execution is not a
+// local task (a job of an orchestrated plan is not the execution's report).
+func (n *WorkerNotifier) reportRow(ctx context.Context, route LocalTaskRoute, job WorkerJob) [][]Button {
+	if n.d.ReportButtons == nil || route.ClickUpTaskID == "" {
+		return nil
+	}
+	b, ok := n.d.ReportButtons.LocalTaskReportButton(ctx, job.WorkspaceID, job.ExecutionID)
+	if !ok {
+		return nil
+	}
+	return [][]Button{{b}}
+}
+
+// failedWith is failed with extra button rows below Retry and Cancel.
+func (n *WorkerNotifier) failedWith(ctx context.Context, route LocalTaskRoute, job WorkerJob, text string, extra [][]Button) {
 	text = workflow.FormatRef(job.ExecutionID) + ": " + text
 	if n.d.Approvals == nil {
-		n.say(ctx, route, text, nil)
+		n.say(ctx, route, text, extra)
 		return
 	}
 	nonce, err := NewNonce()
 	if err != nil {
-		n.say(ctx, route, text, nil)
+		n.say(ctx, route, text, extra)
 		return
 	}
 	payload, _ := json.Marshal(workerJobPayload{ChatID: route.ChatID, JobID: job.ID, ExecutionID: job.ExecutionID, Attempt: job.Attempt})
@@ -307,17 +329,17 @@ func (n *WorkerNotifier) failed(ctx context.Context, route LocalTaskRoute, job W
 		Nonce: nonce, ExpiresAt: n.now().Add(workerButtonLifetime),
 	})
 	if err != nil {
-		n.say(ctx, route, text, nil)
+		n.say(ctx, route, text, extra)
 		return
 	}
 	retry, err1 := (CallbackData{Kind: CallbackApprove, Nonce: ap.Nonce, Option: -1}).Encode()
 	cancel, err2 := (CallbackData{Kind: CallbackReject, Nonce: ap.Nonce, Option: -1}).Encode()
 	if err1 != nil || err2 != nil {
 		log.Print("worker notifier: buttons not encoded, sending text only")
-		n.say(ctx, route, text, nil)
+		n.say(ctx, route, text, extra)
 		return
 	}
-	id := n.say(ctx, route, text, [][]Button{{{Text: btnWorkerRetry, Data: retry}, {Text: btnWorkerCancel, Data: cancel}}})
+	id := n.say(ctx, route, text, append([][]Button{{{Text: btnWorkerRetry, Data: retry}, {Text: btnWorkerCancel, Data: cancel}}}, extra...))
 	if id > 0 {
 		if err := n.d.Approvals.SetApprovalMessage(ctx, job.WorkspaceID, ap.ID, id); err != nil {
 			log.Print("worker notifier: button message not saved")

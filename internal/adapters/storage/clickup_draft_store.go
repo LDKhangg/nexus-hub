@@ -121,6 +121,27 @@ func (s *ClickUpDraftStore) OrchestratorDraft(ctx context.Context, workspaceID s
 	return mapClickUpDraft(row), true, nil
 }
 
+// OpenExecutionReportDraft returns the newest draft of an execution's
+// report that can still be posted; ok=false when there is none (Phase 10
+// REQ-9).
+func (s *ClickUpDraftStore) OpenExecutionReportDraft(ctx context.Context, workspaceID string, executionID int64) (behavior.ClickUpDraft, bool, error) {
+	ws, err := parseDBID(workspaceID)
+	if err != nil {
+		return behavior.ClickUpDraft{}, false, invalid("workspace_id")
+	}
+	if executionID <= 0 {
+		return behavior.ClickUpDraft{}, false, invalid("execution_id")
+	}
+	row, err := s.q.GetOpenExecutionReportClickUpDraft(ctx, sqlc.GetOpenExecutionReportClickUpDraftParams{WorkspaceID: ws, ExecutionID: executionID})
+	if isNoRows(err) {
+		return behavior.ClickUpDraft{}, false, nil
+	}
+	if err != nil {
+		return behavior.ClickUpDraft{}, false, err
+	}
+	return mapClickUpDraft(row), true, nil
+}
+
 func (s *ClickUpDraftStore) SetDraftPreview(ctx context.Context, workspaceID string, id, messageID int64) error {
 	ws, err := parseDBID(workspaceID)
 	if err != nil {

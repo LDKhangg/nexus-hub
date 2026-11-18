@@ -152,6 +152,9 @@ func (w *InboxWorker) assistantToolDefsFor(u InboundUpdate) []domain.ToolDef {
 	if w.startTaskAvailable() {
 		out = append(out, startTaskTool)
 	}
+	if w.draftToolAvailable() {
+		out = append(out, draftClickUpCommentTool)
+	}
 	return out
 }
 
@@ -334,6 +337,8 @@ func (w *InboxWorker) runAssistantTool(ctx context.Context, tt *assistantToolTur
 		text, isErr = w.toolOpenTaskTopic(hctx, tt, args)
 	case toolStartTaskName:
 		text, isErr = w.toolStartTask(hctx, tt, args)
+	case toolDraftClickUpComment:
+		text, isErr = w.toolDraftComment(hctx, tt, args)
 	case toolContactAlias, toolReportStyle, toolWorkflowCancel, toolWorkflowResume, toolWorkflowRetry:
 		// The confirmation is sent with the turn's context, not the
 		// handler timeout, like a reply.

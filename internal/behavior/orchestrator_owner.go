@@ -51,6 +51,9 @@ type OrchestratorOwner struct {
 	Topics    orchestratorTopics // nil: messages go to the route chat
 	Gates     OrchestratorGateStore
 	Now       func() time.Time
+	// ReportButton adds "📤 Đăng lên ClickUp" to the final report of an
+	// execution on a ClickUp task (Phase 10 REQ-9).
+	ReportButton bool
 }
 
 var _ orchestrator.Owner = (*OrchestratorOwner)(nil)
@@ -119,6 +122,21 @@ func (o *OrchestratorOwner) Say(ctx context.Context, route orchestrator.Route, t
 	_, err := o.send(ctx, route, OutMessage{Text: capRunes(text, maxTelegramRunes)})
 	return err
 }
+
+// SayFinal sends the final report; with ReportButton on and a ClickUp task
+// it carries "📤 Đăng lên ClickUp".
+func (o *OrchestratorOwner) SayFinal(ctx context.Context, route orchestrator.Route, text string) error {
+	m := OutMessage{Text: capRunes(text, maxTelegramRunes)}
+	if o.ReportButton && route.ClickUpTaskID != "" {
+		if b, ok := ExecutionReportButton(route.ExecutionID); ok {
+			m.Buttons = [][]Button{{b}}
+		}
+	}
+	_, err := o.send(ctx, route, m)
+	return err
+}
+
+var _ orchestrator.FinalSayer = (*OrchestratorOwner)(nil)
 
 func runFence(f orchestrator.Fence) RunFence {
 	return RunFence{JobID: f.JobID, WorkspaceID: f.WorkspaceID, ExecutionID: f.ExecutionID, StepKey: f.StepKey,

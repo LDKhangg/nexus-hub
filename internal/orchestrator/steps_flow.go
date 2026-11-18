@@ -1511,7 +1511,11 @@ func (r *stepRun) reportStep() (workflow.StepResult, error) {
 	if err := r.setPlanStatus(status); err != nil {
 		return r.failStep(ReasonStorageUnavailable, true)
 	}
-	if err := r.s.Owner.Say(r.ctx, r.route, r.reportText(term)); err != nil {
+	say := r.s.Owner.Say
+	if fs, ok := r.s.Owner.(FinalSayer); ok {
+		say = fs.SayFinal
+	}
+	if err := say(r.ctx, r.route, r.reportText(term)); err != nil {
 		log.Printf("orchestrator execution %d: report not sent", r.id)
 	}
 	if term.Decision != DecisionFail {

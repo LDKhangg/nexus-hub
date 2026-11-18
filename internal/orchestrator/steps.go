@@ -307,6 +307,13 @@ type Owner interface {
 	ConsumeGate(ctx context.Context, f Fence, signalID int64) error
 }
 
+// FinalSayer is the optional part of an Owner that sends the final report
+// of an execution (it may add buttons to it). Without it the report is sent
+// with Say.
+type FinalSayer interface {
+	SayFinal(ctx context.Context, route Route, text string) error
+}
+
 // TaskRun is one task handed to an in-process executor.
 type TaskRun struct {
 	WorkspaceID string
