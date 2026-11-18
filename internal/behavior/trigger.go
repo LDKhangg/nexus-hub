@@ -374,7 +374,16 @@ type TaskRef struct {
 }
 
 // customTaskIDRe matches ClickUp custom task IDs such as "FC-6583".
-var customTaskIDRe = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[0-9]+$`)
+var customTaskIDRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*-[0-9]+$`)
+
+// normalizeTaskID upper-cases a custom task ID (fc-6583 is FC-6583);
+// canonical IDs are returned unchanged.
+func normalizeTaskID(id string) string {
+	if customTaskIDRe.MatchString(id) {
+		return strings.ToUpper(id)
+	}
+	return id
+}
 
 // Custom reports whether the ID is a custom task ID, which must be resolved
 // to the canonical ID before use.
@@ -391,7 +400,7 @@ func ParseTaskRef(s string) (string, bool) {
 func ParseTaskRefTeam(s string) (TaskRef, bool) {
 	s = strings.TrimSpace(s)
 	if taskIDRe.MatchString(s) {
-		return TaskRef{ID: s}, true
+		return TaskRef{ID: normalizeTaskID(s)}, true
 	}
 	u, err := url.Parse(s)
 	if err != nil || u.Scheme != "https" || !strings.EqualFold(u.Hostname(), "app.clickup.com") || u.Port() != "" || u.User != nil {
@@ -400,12 +409,12 @@ func ParseTaskRefTeam(s string) (TaskRef, bool) {
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	switch {
 	case len(parts) == 2 && parts[0] == "t":
-		return TaskRef{ID: parts[1]}, taskIDRe.MatchString(parts[1])
+		return TaskRef{ID: normalizeTaskID(parts[1])}, taskIDRe.MatchString(parts[1])
 	case len(parts) == 3 && parts[0] == "t":
 		if _, err := strconv.ParseUint(parts[1], 10, 64); err != nil {
 			return TaskRef{}, false
 		}
-		return TaskRef{ID: parts[2], TeamID: parts[1]}, taskIDRe.MatchString(parts[2])
+		return TaskRef{ID: normalizeTaskID(parts[2]), TeamID: parts[1]}, taskIDRe.MatchString(parts[2])
 	}
 	return TaskRef{}, false
 }

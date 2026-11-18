@@ -53,12 +53,15 @@ RETURNING *;
 
 -- name: ListWorkerJobsToWake :many
 -- Jobs that ended in a way that finishes their workflow step (succeeded or
--- cancelled) while the step still waits: the wake-up was missed.
+-- cancelled; for an orchestrated task step also failed or needs input)
+-- while the step still waits: the wake-up was missed.
 SELECT j.workspace_id, j.execution_id, j.step_id
 FROM public.worker_jobs j
 JOIN public.workflow_executions e ON e.workspace_id = j.workspace_id AND e.id = j.execution_id
 JOIN public.execution_steps s ON s.workspace_id = j.workspace_id AND s.execution_id = j.execution_id AND s.step_key = j.step_id
-WHERE j.state IN ('SUCCEEDED', 'CANCELLED') AND s.state = 'WAITING'
+WHERE (j.state IN ('SUCCEEDED', 'CANCELLED')
+       OR (j.state IN ('FAILED', 'NEEDS_INPUT') AND s.kind = 'orchestrator.run_task'))
+  AND s.state = 'WAITING'
   AND e.state IN ('WAITING_FOR_USER', 'WAITING_FOR_APPROVAL')
 ORDER BY j.updated_at
 LIMIT sqlc.arg(row_limit);

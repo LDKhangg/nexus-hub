@@ -30,14 +30,19 @@ const (
 )
 
 // TokenBudget is the per-job token budget; Used carries spend from earlier
-// attempts of the same job.
+// attempts of the same job. MaxInput and MaxOutput cap each side alone;
+// MaxTotal (<= 0: unlimited) caps input, output and cache tokens together.
 type TokenBudget struct {
 	MaxInput, MaxOutput int64
+	MaxTotal            int64
 	Used                domain.Usage
 }
 
 func (b TokenBudget) exhausted() bool {
 	in := b.Used.Input + b.Used.CacheRead + b.Used.CacheWrite
+	if b.MaxTotal > 0 && in+b.Used.Output >= b.MaxTotal {
+		return true
+	}
 	return (b.MaxInput > 0 && in >= b.MaxInput) || (b.MaxOutput > 0 && b.Used.Output >= b.MaxOutput)
 }
 

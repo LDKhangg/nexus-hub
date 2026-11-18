@@ -12,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/LDKhangg/nexus-hub/internal/orchestrator"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
 )
 
@@ -445,6 +446,7 @@ func (w *InboxWorker) appendWorkflowInstruction(ctx context.Context, u InboundUp
 		return w.reply(ctx, to, msgFailed, "storage")
 	}
 	_ = w.d.Conversations.BindWorkflow(ctx, u.WorkspaceID, state.id, id, "instruction")
+	w.noteInstructionAdded(ctx, u.WorkspaceID, id)
 	if u.MessageID > 0 {
 		_ = w.d.Conversations.BindResource(ctx, workflow.ResourceBinding{WorkspaceID: u.WorkspaceID, ExecutionID: id,
 			Kind: "telegram.message", ExternalID: workflow.TelegramMessageRef(u.IntegrationID, u.ChatID, u.MessageID)})
@@ -507,6 +509,13 @@ func (w *InboxWorker) workflowStatus(ctx context.Context, u InboundUpdate, to Ch
 	}
 	if d.LiveJob != nil {
 		lines = append(lines, "Bước hiện tại: "+d.LiveJob.StepKey)
+	}
+	if w.d.OrchestratorPlans != nil && d.References.SourceKind == orchestrator.WorkflowSourceOrchestratedTask {
+		steps, err := r.ListSteps(ctx, u.WorkspaceID, id)
+		if err != nil {
+			steps = nil
+		}
+		lines = append(lines, w.orchestratedStatusLines(ctx, u.WorkspaceID, d, steps)...)
 	}
 	if len(d.Waits) > 0 {
 		waits := make([]string, 0, len(d.Waits))
@@ -652,6 +661,7 @@ func (w *InboxWorker) toolWorkflowNote(ctx context.Context, tt *assistantToolTur
 		return toolErr(err)
 	}
 	_ = w.d.Conversations.BindWorkflow(ctx, tt.u.WorkspaceID, conversation.ID, id, "assistant_instruction")
+	w.noteInstructionAdded(ctx, tt.u.WorkspaceID, id)
 	tt.proposed[toolWorkflowNote] = true
 	return fmt.Sprintf("%s: instruction accepted (v%d).", workflow.FormatRef(id), ins.Version), false
 }

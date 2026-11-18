@@ -1,5 +1,6 @@
 # CI: format, vet and build on every push and PR; the full race-enabled
-# test suite against a throwaway PostgreSQL; on develop, a container image.
+# test suite against a throwaway PostgreSQL (reused on a develop merge whose
+# tree equals an already green branch head); on develop, a container image.
 # Tests use fakes only; no repository secret is needed or exposed here.
 name: ci
 
@@ -59,20 +60,48 @@ jobs:
     env:
       TEST_DATABASE_URL: postgres://postgres:ci-only-throwaway@127.0.0.1:5434/nexus_storage_test?sslmode=disable
       GOTESTSUM_VERSION: v1.12.3
+    permissions:
+      contents: read
+      checks: read
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      # A merge into develop whose tree equals the merged branch head, when
+      # that head already passed this job, is not tested again: same code.
+      # If develop moved meanwhile, the trees differ and the suite runs.
+      - name: reuse branch result
+        id: reuse
+        if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head=$(git rev-parse -q --verify HEAD^2 || true)
+          [ -n "$head" ] || exit 0
+          [ "$(git rev-parse HEAD^{tree})" = "$(git rev-parse "$head^{tree}")" ] || exit 0
+          ok=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${head}/check-runs" \
+            -f check_name='test (race, postgres)' -X GET \
+            --jq '[.check_runs[]|select(.conclusion=="success")]|length' || echo 0)
+          if [ "${ok:-0}" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "### Tests reused: tree equals branch head \`${head::7}\`, which passed" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/setup-go@v7
+        if: steps.reuse.outputs.skip != 'true'
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Install gotestsum
+        if: steps.reuse.outputs.skip != 'true'
         run: go install gotest.tools/gotestsum@${GOTESTSUM_VERSION}
       - name: git identity for repository tests
+        if: steps.reuse.outputs.skip != 'true'
         run: |
           git config --global user.name "nexus-ci"
           git config --global user.email "ci@nexus.invalid"
           git config --global init.defaultBranch main
       - name: go test -race
+        if: steps.reuse.outputs.skip != 'true'
         run: |
           set -o pipefail
           gotestsum --format testname --jsonfile test.json --junitfile junit.xml \

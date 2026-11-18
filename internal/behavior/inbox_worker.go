@@ -84,6 +84,16 @@ type InboxDeps struct {
 	WorkerJobs WorkerJobControl
 	// WorkerNotifier is told when a retried job waits again. Optional.
 	WorkerNotifier WorkerJobQueued
+	// InstructionWaker is told after an owner instruction was added to an
+	// execution, so a step waiting for a clarification answer re-checks.
+	// Optional.
+	InstructionWaker InstructionWaker
+	// OrchestratedTasks backs /plan and the start_task tool. Nil answers
+	// "not enabled" and hides the tool.
+	OrchestratedTasks OrchestratedTaskStarter
+	// OrchestratorPlans adds the plan, task, decision and budget lines to
+	// /status of an orchestrated execution. Optional.
+	OrchestratorPlans OrchestratorPlanReader
 }
 
 // InboxWorker processes stored Telegram updates: built-in commands,
@@ -386,6 +396,8 @@ func (w *InboxWorker) command(ctx context.Context, u InboundUpdate, to ChatRef, 
 		reply, err = w.workerCommand(hctx, u.WorkspaceID, args, actor)
 	case "/task":
 		return w.taskCommand(ctx, u, to, args)
+	case "/plan":
+		return w.planCommand(ctx, u, to, args)
 	case "/retry":
 		reply, err = w.retryCommand(hctx, u, args)
 	case "/status", "/list", "/cancel", "/resume", "/note":
@@ -415,6 +427,7 @@ func (w *InboxWorker) helpText(ctx context.Context, workspaceID string) string {
 	b.WriteString("\n/status [WF-id]: trạng thái workflow\n/list: workflow đang hoạt động")
 	b.WriteString("\n/worker [enroll|list|revoke <tên>]: máy local làm việc")
 	b.WriteString("\n/task [TASK-ID] <yêu cầu>: giao việc cho máy local\n/retry [WF-id]: thử lại việc của máy local")
+	b.WriteString("\n/plan [TASK-ID] <yêu cầu>: AI lập kế hoạch rồi làm từng bước")
 	b.WriteString("\n/note [WF-id] <nội dung>: bổ sung yêu cầu\n/cancel [WF-id]: đề nghị huỷ\n/resume [WF-id]: đề nghị tiếp tục")
 	if w.d.Defs == nil {
 		return b.String()
@@ -525,6 +538,12 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 			return msgStale, "stale", true
 		}
 		return w.workerJobCallback(ctx, u, data, a, actor)
+	}
+	if a.Kind == ApprovalOrchestratorGate {
+		if a.Decision != "" || !w.now().Before(a.ExpiresAt) {
+			return msgStale, "stale", true
+		}
+		return w.orchestratorGateCallback(ctx, u, data, a, actor)
 	}
 	if data.Kind.Decides() && (a.Decision != "" || !w.now().Before(a.ExpiresAt)) {
 		return msgStale, "stale", true

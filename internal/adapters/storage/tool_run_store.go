@@ -14,11 +14,13 @@ import (
 
 // ToolRunStore is the tool_runs audit trail with write idempotency. Rows
 // belong to an agent job, or, for a store built by
-// NewBehaviorToolRunStore, to a behavior run: RunStart.JobID then holds the
-// behavior run ID.
+// NewBehaviorToolRunStore, to a behavior run, or, for a store built by
+// NewWorkflowToolRunStore, to a workflow execution: RunStart.JobID then
+// holds the behavior run or execution ID.
 type ToolRunStore struct {
 	pool     *pgxpool.Pool
 	behavior bool
+	workflow bool
 }
 
 func NewToolRunStore(pool *pgxpool.Pool) (*ToolRunStore, error) {
@@ -39,6 +41,17 @@ func NewBehaviorToolRunStore(pool *pgxpool.Pool) (*ToolRunStore, error) {
 	return &ToolRunStore{pool: pool, behavior: true}, nil
 }
 
+// NewWorkflowToolRunStore returns the audit trail of workflow executions
+// (orchestrator investigate tasks): each row references
+// workflow_executions through workflow_execution_id. Callers give the
+// executor a distinct key scope.
+func NewWorkflowToolRunStore(pool *pgxpool.Pool) (*ToolRunStore, error) {
+	if pool == nil {
+		return nil, errors.New("tool run store requires pool")
+	}
+	return &ToolRunStore{pool: pool, workflow: true}, nil
+}
+
 var (
 	_ tools.ToolRunStore     = (*ToolRunStore)(nil)
 	_ tools.JobBudgetCounter = (*ToolRunStore)(nil)
@@ -56,14 +69,17 @@ func (s *ToolRunStore) insert(ctx context.Context, q *sqlc.Queries, r tools.RunS
 		input = r.InputRedacted
 	}
 	owner := pgtype.Int8{Int64: r.JobID, Valid: true}
-	var job, run pgtype.Int8
-	if s.behavior {
+	var job, run, wf pgtype.Int8
+	switch {
+	case s.behavior:
 		run = owner
-	} else {
+	case s.workflow:
+		wf = owner
+	default:
 		job = owner
 	}
 	return q.InsertToolRun(ctx, sqlc.InsertToolRunParams{
-		WorkspaceID: ws, AgentJobID: job, BehaviorRunID: run, Step: int32(r.Step), Tool: r.Tool, Tier: string(r.Tier),
+		WorkspaceID: ws, AgentJobID: job, BehaviorRunID: run, WorkflowExecutionID: wf, Step: int32(r.Step), Tool: r.Tool, Tier: string(r.Tier),
 		Repo: optText(r.Repo), Account: optText(r.Account), IdempotencyKey: r.Key, InputRedacted: input, Status: status, ErrorCode: optText(code),
 	})
 }
@@ -138,6 +154,13 @@ func (s *ToolRunStore) Deny(ctx context.Context, r tools.RunStart, code string) 
 // JobCounts returns the write and dangerous budget a job has used across
 // all of its attempts.
 func (s *ToolRunStore) JobCounts(ctx context.Context, jobID int64) (writes, dangerous int, err error) {
+	if s.workflow {
+		row, err := sqlc.New(s.pool).CountWorkflowExecutionBudgetRuns(ctx, jobID)
+		if err != nil {
+			return 0, 0, err
+		}
+		return int(row.Writes), int(row.Dangerous), nil
+	}
 	if s.behavior {
 		row, err := sqlc.New(s.pool).CountBehaviorRunBudgetRuns(ctx, jobID)
 		if err != nil {

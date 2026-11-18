@@ -61,6 +61,13 @@ type Settings struct {
 	WorkerMinClaudeLeft                   int64         // % of a Claude limit a worker needs left to take a job
 	WorkerMinDiskFree                     int64         // bytes free under a worker's repos_dir to take a job
 	WorkerMaxRAMUsed                      int64         // % RAM in use above which a worker takes no job
+	OrchestratorMinConfidence             float64       // Classify confidence below which the orchestrator asks
+	OrchestratorMaxRepair                 int64         // repair attempts per orchestrator model call
+	OrchestratorMaxPlanIterations         int64         // plan calls per orchestrated execution
+	OrchestratorMaxReplans                int64         // replans per orchestrated execution
+	OrchestratorMaxRepairAttempts         int64         // repair attempts per orchestrated execution
+	OrchestratorMaxTokens                 int64         // model tokens per orchestrated execution
+	OrchestratorMaxWallMinutes            int64         // wall minutes per orchestrated execution
 }
 
 // Store reads every stored setting.
@@ -86,6 +93,7 @@ const (
 	kExecPath
 	kClaudeModel
 	kStatusList
+	kFloat
 )
 
 type spec struct {
@@ -114,52 +122,59 @@ var (
 const maxChatID = 1 << 52
 
 var specs = map[string]spec{
-	"triage_model":               {kind: kModel, def: "claude-haiku-5-5", set: func(s *Settings, v any) { s.TriageModel = v.(string) }},
-	"actor_model":                {kind: kModel, def: "claude-sonnet-5-5", set: func(s *Settings, v any) { s.ActorModel = v.(string) }},
-	"summary_model":              {kind: kModel, def: "claude-haiku-5-5", set: func(s *Settings, v any) { s.SummaryModel = v.(string) }},
-	"agent_poll_interval":        {kind: kDuration, def: time.Second, min: 0.1, max: 60, set: func(s *Settings, v any) { s.AgentPollInterval = v.(time.Duration) }},
-	"tool_timeout":               {kind: kDuration, def: 30 * time.Second, min: 1, max: 600, set: func(s *Settings, v any) { s.ToolTimeout = v.(time.Duration) }},
-	"git_network_timeout":        {kind: kDuration, def: 120 * time.Second, min: 1, max: 1800, set: func(s *Settings, v any) { s.GitNetworkTimeout = v.(time.Duration) }},
-	"max_input_tokens":           {kind: kInt, def: int64(60000), min: 1000, max: 2_000_000, set: func(s *Settings, v any) { s.MaxInputTokens = v.(int64) }},
-	"max_output_tokens":          {kind: kInt, def: int64(6000), min: 100, max: 200_000, set: func(s *Settings, v any) { s.MaxOutputTokens = v.(int64) }},
-	"allow_dangerous":            {kind: kBool, def: false, set: func(s *Settings, v any) { s.AllowDangerous = v.(bool) }},
-	"git_path":                   {kind: kGitPath, def: "", set: func(s *Settings, v any) { s.GitPath = v.(string) }},
-	"repos_dir":                  {kind: kAbsPath, def: "/var/lib/nexus-hub/repos", set: func(s *Settings, v any) { s.ReposDir = v.(string) }},
-	"tmp_dir":                    {kind: kAbsPath, def: "/var/lib/nexus-hub/tmp", set: func(s *Settings, v any) { s.TmpDir = v.(string) }},
-	"max_clone_bytes":            {kind: kInt, def: int64(2 << 30), min: 1 << 20, max: 100 << 30, set: func(s *Settings, v any) { s.MaxCloneBytes = v.(int64) }},
-	"debounce_window":            {kind: kDuration, def: 8 * time.Second, min: 1, max: 300, set: func(s *Settings, v any) { s.DebounceWindow = v.(time.Duration) }},
-	"debounce_max_wait":          {kind: kDuration, def: 30 * time.Second, min: 1, max: 1800, set: func(s *Settings, v any) { s.DebounceMaxWait = v.(time.Duration) }},
-	"notice_poll_interval":       {kind: kDuration, def: time.Second, min: 0.1, max: 30, set: func(s *Settings, v any) { s.NoticePollInterval = v.(time.Duration) }},
-	"notice_request_timeout":     {kind: kDuration, def: 10 * time.Second, min: 1, max: 30, set: func(s *Settings, v any) { s.NoticeRequestTimeout = v.(time.Duration) }},
-	"anthropic_credential":       {kind: kCredRef, def: "anthropic", set: func(s *Settings, v any) { s.AnthropicCredential = v.(string) }},
-	"listen_addr":                {kind: kAddr, def: ":8080", set: func(s *Settings, v any) { s.ListenAddr = v.(string) }},
-	"owner_telegram_chat_id":     {kind: kInt, def: int64(0), min: -maxChatID, max: maxChatID, set: func(s *Settings, v any) { s.OwnerTelegramChatID = v.(int64) }},
-	"owner_telegram_user_id":     {kind: kInt, def: int64(0), min: 0, max: maxChatID, set: func(s *Settings, v any) { s.OwnerTelegramUserID = v.(int64) }},
-	"owner_clickup_user_id":      {kind: kDigits, def: "", set: func(s *Settings, v any) { s.OwnerClickUpUserID = v.(string) }},
-	"behavior_workers":           {kind: kInt, def: int64(2), min: 1, max: 8, set: func(s *Settings, v any) { s.BehaviorWorkers = v.(int64) }},
-	"behavior_poll_interval":     {kind: kDuration, def: time.Second, min: 0.1, max: 60, set: func(s *Settings, v any) { s.BehaviorPollInterval = v.(time.Duration) }},
-	"behavior_max_tokens":        {kind: kInt, def: int64(100000), min: 1000, max: 1_000_000, set: func(s *Settings, v any) { s.BehaviorMaxTokens = v.(int64) }},
-	"clickup_chat_poll_interval": {kind: kDuration, def: 30 * time.Second, min: 10, max: 600, set: func(s *Settings, v any) { s.ClickUpChatPollInterval = v.(time.Duration) }},
-	"public_base_url":            {kind: kPublicURL, def: "", set: func(s *Settings, v any) { s.PublicBaseURL = v.(string) }},
-	"llm_provider":               {kind: kEnum, def: LLMProviderAnthropic, enum: []string{LLMProviderAnthropic, LLMProviderClaudeCLI, LLMProviderOpencodeCLI}, set: func(s *Settings, v any) { s.LLMProvider = v.(string) }},
-	"claude_cli_path":            {kind: kExecPath, def: "", set: func(s *Settings, v any) { s.ClaudeCLIPath = v.(string) }},
-	"claude_cli_timeout":         {kind: kDuration, def: 120 * time.Second, min: 5, max: 1800, set: func(s *Settings, v any) { s.ClaudeCLITimeout = v.(time.Duration) }},
-	"claude_cli_concurrency":     {kind: kInt, def: int64(1), min: 1, max: 4, set: func(s *Settings, v any) { s.ClaudeCLIConcurrency = v.(int64) }},
-	"opencode_cli_path":          {kind: kExecPath, def: "", set: func(s *Settings, v any) { s.OpencodeCLIPath = v.(string) }},
-	"opencode_cli_timeout":       {kind: kDuration, def: 120 * time.Second, min: 5, max: 1800, set: func(s *Settings, v any) { s.OpencodeCLITimeout = v.(time.Duration) }},
-	"opencode_cli_concurrency":   {kind: kInt, def: int64(1), min: 1, max: 4, set: func(s *Settings, v any) { s.OpencodeCLIConcurrency = v.(int64) }},
-	"telegram_assistant":         {kind: kBool, def: true, set: func(s *Settings, v any) { s.TelegramAssistant = v.(bool) }},
-	"assistant_model":            {kind: kClaudeModel, def: "claude-sonnet-5-5", set: func(s *Settings, v any) { s.AssistantModel = v.(string) }},
-	"assistant_fast_model":       {kind: kClaudeModel, def: "claude-haiku-5-5", set: func(s *Settings, v any) { s.AssistantFastModel = v.(string) }},
-	"assistant_deep_model":       {kind: kClaudeModel, def: "claude-opus-5-5", set: func(s *Settings, v any) { s.AssistantDeepModel = v.(string) }},
-	"assistant_history_turns":    {kind: kInt, def: int64(6), min: 1, max: 20, set: func(s *Settings, v any) { s.AssistantHistoryTurns = v.(int64) }},
-	"assistant_timeout":          {kind: kDuration, def: 180 * time.Second, min: 10, max: 900, set: func(s *Settings, v any) { s.AssistantTimeout = v.(time.Duration) }},
-	"assistant_rate_per_minute":  {kind: kInt, def: int64(30), min: 1, max: 120, set: func(s *Settings, v any) { s.AssistantRatePerMinute = v.(int64) }},
-	"topic_close_statuses":       {kind: kStatusList, def: "complete,closed,done", set: func(s *Settings, v any) { s.TopicCloseStatuses = v.(string) }},
-	"worker_min_claude_left":     {kind: kInt, def: int64(10), min: 0, max: 100, set: func(s *Settings, v any) { s.WorkerMinClaudeLeft = v.(int64) }},
-	"worker_min_disk_free":       {kind: kInt, def: int64(5 << 30), min: 0, max: 1 << 44, set: func(s *Settings, v any) { s.WorkerMinDiskFree = v.(int64) }},
-	"worker_max_ram_used":        {kind: kInt, def: int64(90), min: 1, max: 100, set: func(s *Settings, v any) { s.WorkerMaxRAMUsed = v.(int64) }},
-	"telegram_mode":              {kind: kEnum, def: TelegramModeAuto, enum: []string{TelegramModeAuto, TelegramModeWebhook, TelegramModePoll}, set: func(s *Settings, v any) { s.TelegramMode = v.(string) }},
+	"triage_model":                     {kind: kModel, def: "claude-haiku-5-5", set: func(s *Settings, v any) { s.TriageModel = v.(string) }},
+	"actor_model":                      {kind: kModel, def: "claude-sonnet-5-5", set: func(s *Settings, v any) { s.ActorModel = v.(string) }},
+	"summary_model":                    {kind: kModel, def: "claude-haiku-5-5", set: func(s *Settings, v any) { s.SummaryModel = v.(string) }},
+	"agent_poll_interval":              {kind: kDuration, def: time.Second, min: 0.1, max: 60, set: func(s *Settings, v any) { s.AgentPollInterval = v.(time.Duration) }},
+	"tool_timeout":                     {kind: kDuration, def: 30 * time.Second, min: 1, max: 600, set: func(s *Settings, v any) { s.ToolTimeout = v.(time.Duration) }},
+	"git_network_timeout":              {kind: kDuration, def: 120 * time.Second, min: 1, max: 1800, set: func(s *Settings, v any) { s.GitNetworkTimeout = v.(time.Duration) }},
+	"max_input_tokens":                 {kind: kInt, def: int64(60000), min: 1000, max: 2_000_000, set: func(s *Settings, v any) { s.MaxInputTokens = v.(int64) }},
+	"max_output_tokens":                {kind: kInt, def: int64(6000), min: 100, max: 200_000, set: func(s *Settings, v any) { s.MaxOutputTokens = v.(int64) }},
+	"allow_dangerous":                  {kind: kBool, def: false, set: func(s *Settings, v any) { s.AllowDangerous = v.(bool) }},
+	"git_path":                         {kind: kGitPath, def: "", set: func(s *Settings, v any) { s.GitPath = v.(string) }},
+	"repos_dir":                        {kind: kAbsPath, def: "/var/lib/nexus-hub/repos", set: func(s *Settings, v any) { s.ReposDir = v.(string) }},
+	"tmp_dir":                          {kind: kAbsPath, def: "/var/lib/nexus-hub/tmp", set: func(s *Settings, v any) { s.TmpDir = v.(string) }},
+	"max_clone_bytes":                  {kind: kInt, def: int64(2 << 30), min: 1 << 20, max: 100 << 30, set: func(s *Settings, v any) { s.MaxCloneBytes = v.(int64) }},
+	"debounce_window":                  {kind: kDuration, def: 8 * time.Second, min: 1, max: 300, set: func(s *Settings, v any) { s.DebounceWindow = v.(time.Duration) }},
+	"debounce_max_wait":                {kind: kDuration, def: 30 * time.Second, min: 1, max: 1800, set: func(s *Settings, v any) { s.DebounceMaxWait = v.(time.Duration) }},
+	"notice_poll_interval":             {kind: kDuration, def: time.Second, min: 0.1, max: 30, set: func(s *Settings, v any) { s.NoticePollInterval = v.(time.Duration) }},
+	"notice_request_timeout":           {kind: kDuration, def: 10 * time.Second, min: 1, max: 30, set: func(s *Settings, v any) { s.NoticeRequestTimeout = v.(time.Duration) }},
+	"anthropic_credential":             {kind: kCredRef, def: "anthropic", set: func(s *Settings, v any) { s.AnthropicCredential = v.(string) }},
+	"listen_addr":                      {kind: kAddr, def: ":8080", set: func(s *Settings, v any) { s.ListenAddr = v.(string) }},
+	"owner_telegram_chat_id":           {kind: kInt, def: int64(0), min: -maxChatID, max: maxChatID, set: func(s *Settings, v any) { s.OwnerTelegramChatID = v.(int64) }},
+	"owner_telegram_user_id":           {kind: kInt, def: int64(0), min: 0, max: maxChatID, set: func(s *Settings, v any) { s.OwnerTelegramUserID = v.(int64) }},
+	"owner_clickup_user_id":            {kind: kDigits, def: "", set: func(s *Settings, v any) { s.OwnerClickUpUserID = v.(string) }},
+	"behavior_workers":                 {kind: kInt, def: int64(2), min: 1, max: 8, set: func(s *Settings, v any) { s.BehaviorWorkers = v.(int64) }},
+	"behavior_poll_interval":           {kind: kDuration, def: time.Second, min: 0.1, max: 60, set: func(s *Settings, v any) { s.BehaviorPollInterval = v.(time.Duration) }},
+	"behavior_max_tokens":              {kind: kInt, def: int64(100000), min: 1000, max: 1_000_000, set: func(s *Settings, v any) { s.BehaviorMaxTokens = v.(int64) }},
+	"clickup_chat_poll_interval":       {kind: kDuration, def: 30 * time.Second, min: 10, max: 600, set: func(s *Settings, v any) { s.ClickUpChatPollInterval = v.(time.Duration) }},
+	"public_base_url":                  {kind: kPublicURL, def: "", set: func(s *Settings, v any) { s.PublicBaseURL = v.(string) }},
+	"llm_provider":                     {kind: kEnum, def: LLMProviderAnthropic, enum: []string{LLMProviderAnthropic, LLMProviderClaudeCLI, LLMProviderOpencodeCLI}, set: func(s *Settings, v any) { s.LLMProvider = v.(string) }},
+	"claude_cli_path":                  {kind: kExecPath, def: "", set: func(s *Settings, v any) { s.ClaudeCLIPath = v.(string) }},
+	"claude_cli_timeout":               {kind: kDuration, def: 120 * time.Second, min: 5, max: 1800, set: func(s *Settings, v any) { s.ClaudeCLITimeout = v.(time.Duration) }},
+	"claude_cli_concurrency":           {kind: kInt, def: int64(1), min: 1, max: 4, set: func(s *Settings, v any) { s.ClaudeCLIConcurrency = v.(int64) }},
+	"opencode_cli_path":                {kind: kExecPath, def: "", set: func(s *Settings, v any) { s.OpencodeCLIPath = v.(string) }},
+	"opencode_cli_timeout":             {kind: kDuration, def: 120 * time.Second, min: 5, max: 1800, set: func(s *Settings, v any) { s.OpencodeCLITimeout = v.(time.Duration) }},
+	"opencode_cli_concurrency":         {kind: kInt, def: int64(1), min: 1, max: 4, set: func(s *Settings, v any) { s.OpencodeCLIConcurrency = v.(int64) }},
+	"telegram_assistant":               {kind: kBool, def: true, set: func(s *Settings, v any) { s.TelegramAssistant = v.(bool) }},
+	"assistant_model":                  {kind: kClaudeModel, def: "claude-sonnet-5-5", set: func(s *Settings, v any) { s.AssistantModel = v.(string) }},
+	"assistant_fast_model":             {kind: kClaudeModel, def: "claude-haiku-5-5", set: func(s *Settings, v any) { s.AssistantFastModel = v.(string) }},
+	"assistant_deep_model":             {kind: kClaudeModel, def: "claude-opus-5-5", set: func(s *Settings, v any) { s.AssistantDeepModel = v.(string) }},
+	"assistant_history_turns":          {kind: kInt, def: int64(6), min: 1, max: 20, set: func(s *Settings, v any) { s.AssistantHistoryTurns = v.(int64) }},
+	"assistant_timeout":                {kind: kDuration, def: 180 * time.Second, min: 10, max: 900, set: func(s *Settings, v any) { s.AssistantTimeout = v.(time.Duration) }},
+	"assistant_rate_per_minute":        {kind: kInt, def: int64(30), min: 1, max: 120, set: func(s *Settings, v any) { s.AssistantRatePerMinute = v.(int64) }},
+	"topic_close_statuses":             {kind: kStatusList, def: "complete,closed,done", set: func(s *Settings, v any) { s.TopicCloseStatuses = v.(string) }},
+	"worker_min_claude_left":           {kind: kInt, def: int64(10), min: 0, max: 100, set: func(s *Settings, v any) { s.WorkerMinClaudeLeft = v.(int64) }},
+	"worker_min_disk_free":             {kind: kInt, def: int64(5 << 30), min: 0, max: 1 << 44, set: func(s *Settings, v any) { s.WorkerMinDiskFree = v.(int64) }},
+	"worker_max_ram_used":              {kind: kInt, def: int64(90), min: 1, max: 100, set: func(s *Settings, v any) { s.WorkerMaxRAMUsed = v.(int64) }},
+	"orchestrator_min_confidence":      {kind: kFloat, def: 0.6, min: 0.01, max: 1, set: func(s *Settings, v any) { s.OrchestratorMinConfidence = v.(float64) }},
+	"orchestrator_max_repair":          {kind: kInt, def: int64(2), min: 0, max: 5, set: func(s *Settings, v any) { s.OrchestratorMaxRepair = v.(int64) }},
+	"orchestrator_max_plan_iterations": {kind: kInt, def: int64(3), min: 1, max: 10, set: func(s *Settings, v any) { s.OrchestratorMaxPlanIterations = v.(int64) }},
+	"orchestrator_max_replans":         {kind: kInt, def: int64(2), min: 0, max: 10, set: func(s *Settings, v any) { s.OrchestratorMaxReplans = v.(int64) }},
+	"orchestrator_max_repair_attempts": {kind: kInt, def: int64(2), min: 0, max: 20, set: func(s *Settings, v any) { s.OrchestratorMaxRepairAttempts = v.(int64) }},
+	"orchestrator_max_tokens":          {kind: kInt, def: int64(80000), min: 1000, max: 2_000_000, set: func(s *Settings, v any) { s.OrchestratorMaxTokens = v.(int64) }},
+	"orchestrator_max_wall_minutes":    {kind: kInt, def: int64(90), min: 1, max: 1440, set: func(s *Settings, v any) { s.OrchestratorMaxWallMinutes = v.(int64) }},
+	"telegram_mode":                    {kind: kEnum, def: TelegramModeAuto, enum: []string{TelegramModeAuto, TelegramModeWebhook, TelegramModePoll}, set: func(s *Settings, v any) { s.TelegramMode = v.(string) }},
 }
 
 // modelKeys are the settings that hold a model id, in report order.
@@ -323,6 +338,12 @@ func parse(key string, raw json.RawMessage) (any, error) {
 			return nil, bad
 		}
 		return int64(f), nil
+	case kFloat:
+		var f float64
+		if json.Unmarshal(raw, &f) != nil || math.IsNaN(f) || f < sp.min || f > sp.max {
+			return nil, bad
+		}
+		return f, nil
 	case kDuration:
 		var str string
 		if json.Unmarshal(raw, &str) != nil {
@@ -447,6 +468,12 @@ func ParseCLIValue(key, text string) (json.RawMessage, error) {
 			return nil, fmt.Errorf("settings: invalid value for %s", key)
 		}
 		raw, _ = json.Marshal(n)
+	case kFloat:
+		f, err := strconv.ParseFloat(text, 64)
+		if err != nil {
+			return nil, fmt.Errorf("settings: invalid value for %s", key)
+		}
+		raw, _ = json.Marshal(f)
 	default:
 		raw, _ = json.Marshal(text)
 	}

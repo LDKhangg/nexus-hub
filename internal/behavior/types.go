@@ -110,6 +110,10 @@ const (
 	// ApprovalWorkerJob holds the Retry and Cancel buttons of a failed or
 	// interrupted local worker job.
 	ApprovalWorkerJob ApprovalKind = "worker_job"
+	// ApprovalOrchestratorGate is an owner decision of an orchestrated task
+	// bound to its waiting step: "Thêm 1 vòng" / "Huỷ" when a budget is
+	// spent, "Làm" / "Huỷ" when the plan asks for approval.
+	ApprovalOrchestratorGate ApprovalKind = "orchestrator_gate"
 )
 
 // Decision is an approval's outcome.

@@ -293,14 +293,16 @@ orchestrator follows and can `DELEGATE` to that worker.
 
 - **Goal:** structured plans and evaluations replace one-shot triage.
 - **Plan:** `docs/plans/2026-11-16-phase7b-ai-orchestrator.md` (the former
-  Phase 7 plan; DRAFT, owner decisions O1–O5 open). Starts after 7a is
-  merged; migration `00027`.
+  Phase 7 plan; APPROVED 2026-11-17, O1–O5 all a). Baseline develop
+  `45c74f3`; migration `00028`. Entry: `/plan <request>` and the assistant
+  tool `start_task`; `/task` stays the 7a direct local-task path.
 - **PCC:** FR-043–FR-056, ARCH-002, ARCH-004.
 - **Deliverables:**
   - an `Orchestrator` with `Plan` and `Evaluate`;
   - the seven decisions (`EXECUTE`, `DELEGATE`, `REQUEST_CLARIFICATION`,
     `REQUEST_APPROVAL`, `REPLAN`, `COMPLETE`, `FAIL`);
-  - `DELEGATE` targets the Phase 7a local worker;
+  - `DELEGATE` of code changes (`repo.write`) targets the Phase 7a local
+    worker; laptop offline → `WAITING_FOR_WORKER`, no VPS fallback;
   - JSON-schema validated outputs with bounded repair;
   - decomposition with dependencies, capability requirements,
     priority/complexity, and iteration and token budgets;

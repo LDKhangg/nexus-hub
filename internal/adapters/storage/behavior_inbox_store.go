@@ -58,7 +58,8 @@ func createApprovalParams(ws pgtype.UUID, a behavior.NewApproval) (sqlc.CreateAp
 	switch a.Kind {
 	case behavior.ApprovalItemAnswer, behavior.ApprovalPostDraft, behavior.ApprovalConfirmAction,
 		behavior.ApprovalFeedback, behavior.ApprovalFeedbackReason, behavior.ApprovalContactAlias,
-		behavior.ApprovalAssistantAction, behavior.ApprovalWorkflowTarget, behavior.ApprovalWorkerJob:
+		behavior.ApprovalAssistantAction, behavior.ApprovalWorkflowTarget, behavior.ApprovalWorkerJob,
+		behavior.ApprovalOrchestratorGate:
 	default:
 		return sqlc.CreateApprovalParams{}, invalid("kind")
 	}

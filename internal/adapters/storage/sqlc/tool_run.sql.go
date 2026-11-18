@@ -54,6 +54,27 @@ func (q *Queries) CountJobBudgetRuns(ctx context.Context, agentJobID int64) (Cou
 	return i, err
 }
 
+const countWorkflowExecutionBudgetRuns = `-- name: CountWorkflowExecutionBudgetRuns :one
+SELECT COUNT(*)::int AS writes,
+       COUNT(*) FILTER (WHERE tier = 'dangerous')::int AS dangerous
+FROM public.tool_runs
+WHERE workflow_execution_id = $1::bigint AND tier <> 'read'
+  AND status IN ('started','ok','timeout','unknown_outcome','dry_run')
+`
+
+type CountWorkflowExecutionBudgetRunsRow struct {
+	Writes    int32
+	Dangerous int32
+}
+
+// The same count as CountJobBudgetRuns for the tool runs of a workflow execution.
+func (q *Queries) CountWorkflowExecutionBudgetRuns(ctx context.Context, workflowExecutionID int64) (CountWorkflowExecutionBudgetRunsRow, error) {
+	row := q.db.QueryRow(ctx, countWorkflowExecutionBudgetRuns, workflowExecutionID)
+	var i CountWorkflowExecutionBudgetRunsRow
+	err := row.Scan(&i.Writes, &i.Dangerous)
+	return i, err
+}
+
 const findPriorToolRun = `-- name: FindPriorToolRun :one
 SELECT status, COALESCE(result_summary, '')::text AS result_summary
 FROM public.tool_runs
@@ -108,35 +129,40 @@ func (q *Queries) FinishToolRun(ctx context.Context, arg FinishToolRunParams) (i
 }
 
 const insertToolRun = `-- name: InsertToolRun :one
-INSERT INTO public.tool_runs(workspace_id, agent_job_id, behavior_run_id, step, tool, tier, repo, account, idempotency_key, input_redacted, status, error_code, correlation_id)
-VALUES ($1, $2, $3, $4, $5, $6,
-        $7, $8, $9, $10, $11, $12,
-        (SELECT r.correlation_id FROM public.behavior_runs r
-         WHERE r.id = $3 AND r.workspace_id = $1))
+INSERT INTO public.tool_runs(workspace_id, agent_job_id, behavior_run_id, workflow_execution_id, step, tool, tier, repo, account, idempotency_key, input_redacted, status, error_code, correlation_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7,
+        $8, $9, $10, $11, $12, $13,
+        COALESCE(
+            (SELECT r.correlation_id FROM public.behavior_runs r
+             WHERE r.id = $3 AND r.workspace_id = $1),
+            (SELECT x.correlation_id FROM public.workflow_executions x
+             WHERE x.id = $4 AND x.workspace_id = $1)))
 RETURNING id
 `
 
 type InsertToolRunParams struct {
-	WorkspaceID    pgtype.UUID
-	AgentJobID     pgtype.Int8
-	BehaviorRunID  pgtype.Int8
-	Step           int32
-	Tool           string
-	Tier           string
-	Repo           pgtype.Text
-	Account        pgtype.Text
-	IdempotencyKey string
-	InputRedacted  []byte
-	Status         string
-	ErrorCode      pgtype.Text
+	WorkspaceID         pgtype.UUID
+	AgentJobID          pgtype.Int8
+	BehaviorRunID       pgtype.Int8
+	WorkflowExecutionID pgtype.Int8
+	Step                int32
+	Tool                string
+	Tier                string
+	Repo                pgtype.Text
+	Account             pgtype.Text
+	IdempotencyKey      string
+	InputRedacted       []byte
+	Status              string
+	ErrorCode           pgtype.Text
 }
 
-// A behavior run's row takes the run's correlation ID.
+// A behavior run's or workflow execution's row takes its correlation ID.
 func (q *Queries) InsertToolRun(ctx context.Context, arg InsertToolRunParams) (int64, error) {
 	row := q.db.QueryRow(ctx, insertToolRun,
 		arg.WorkspaceID,
 		arg.AgentJobID,
 		arg.BehaviorRunID,
+		arg.WorkflowExecutionID,
 		arg.Step,
 		arg.Tool,
 		arg.Tier,

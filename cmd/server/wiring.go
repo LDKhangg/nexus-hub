@@ -27,6 +27,7 @@ import (
 	httpdelivery "github.com/LDKhangg/nexus-hub/internal/delivery/http"
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/memory"
+	"github.com/LDKhangg/nexus-hub/internal/orchestrator"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/secrets"
@@ -48,6 +49,9 @@ type agentServices struct {
 	conversations workflow.ConversationStore
 	// provider returns the workspace's default LLM provider.
 	provider func(ctx context.Context, ws string) (domain.LLMProvider, error)
+	// investigators returns the workspace's Tier-2 investigator (nil when
+	// the provider has no tool calling).
+	investigators func(ctx context.Context, ws string) (agent.Investigator, error)
 }
 
 // ensurePrivateDirs creates the managed-clone and git tmp directories 0700.
@@ -161,7 +165,17 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		if tc := c.ToolCalling(); tc != nil {
 			inv = agent.NewTier2Actor(tc, s.ActorModel)
 		}
-		return agent.NewTier1Router(c.Default(), s.TriageModel), inv, nil
+		// Tier-1 triage goes through orchestrator Classify (REQ-12); a
+		// provider without structured output keeps the plain text prompt.
+		var tr agent.Triager = agent.NewTier1Router(c.Default(), s.TriageModel)
+		if rt, err := llm.RuntimeFor(c.Default()); err == nil {
+			tr = agent.NewClassifyTier1Router(rt, s.TriageModel)
+		}
+		return tr, inv, nil
+	}
+	investigators := func(ctx context.Context, ws string) (agent.Investigator, error) {
+		_, inv, err := models(ctx, ws)
+		return inv, err
 	}
 	provider := func(ctx context.Context, ws string) (domain.LLMProvider, error) {
 		c, err := client(ctx, ws)
@@ -178,7 +192,7 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
 	})
 	worker := relay.NewActionWorker(actions, sender, relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout}, conversations)
-	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, people: directory, store: store, conversations: conversations}, nil
+	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, investigators: investigators, people: directory, store: store, conversations: conversations}, nil
 }
 
 // buildBehaviorEngine wires the behavior run executor and the action
@@ -675,4 +689,90 @@ func (r *workflowRuntime) startCutOver(ctx context.Context) {
 			log.Printf("workflow starter: workspace %s orphan agent batches not released", ws)
 		}
 	}
+}
+
+// --- orchestrated tasks (Phase 7b) ---
+
+// orchestratorTopics is the topic router as the orchestrator owner adapter
+// uses it.
+type orchestratorTopics interface {
+	Destination(ctx context.Context, base behavior.ChatRef, in behavior.TopicIntent) behavior.ChatRef
+	Recover(ctx context.Context, chat behavior.ChatRef, err error) (behavior.ChatRef, bool)
+	NoteSent(c behavior.ChatRef)
+}
+
+// orchestratorStepSettings maps the orchestrator_* settings.
+func orchestratorStepSettings(s settings.Settings) orchestrator.StepSettings {
+	st := orchestrator.DefaultStepSettings()
+	st.Caps = orchestrator.BudgetCaps{
+		PlanIterations: int(s.OrchestratorMaxPlanIterations), Replans: int(s.OrchestratorMaxReplans),
+		RepairAttempts: int(s.OrchestratorMaxRepairAttempts), Tokens: s.OrchestratorMaxTokens,
+		Wall: time.Duration(s.OrchestratorMaxWallMinutes) * time.Minute,
+	}
+	st.MaxRepair = int(s.OrchestratorMaxRepair)
+	return st
+}
+
+// registerOrchestratorSteps registers the orchestrated task step kinds:
+// plan and evaluate use actor_model, classify uses triage_model; worker
+// jobs go through the 7a job store, owner decisions through bound
+// approvals. Read-only tasks run in process on the investigate executor
+// (the Tier-2 read loop under the ClickUp source's tool policy, read tools
+// only). The behavior-actions executor is not wired (Phase 8), so Plan is
+// never offered clickup.write or telegram.notify.
+func registerOrchestratorSteps(ports *orchestratorPorts, reg *workflow.Registry, pool *pgxpool.Pool, store *storage.WorkflowStore, s settings.Settings, ag agentServices,
+	behaviors *storage.BehaviorStore, messenger behavior.Messenger, topics orchestratorTopics, jobs behavior.LocalTaskJobs, tasks *storage.WorkerTaskStore,
+	integrations *storage.IntegrationRepository, redactor *agent.Redactor) error {
+	plans, err := storage.NewOrchestratorStore(pool)
+	if err != nil {
+		return err
+	}
+	routes, err := storage.NewOrchestratedTaskStore(pool, store)
+	if err != nil {
+		return err
+	}
+	investigateAudit, err := storage.NewWorkflowToolRunStore(pool)
+	if err != nil {
+		return err
+	}
+	template := orchestrator.NewOrchestrator(nil, s.ActorModel)
+	template.ClassifyModel = s.TriageModel
+	template.MaxRepair = int(s.OrchestratorMaxRepair)
+	template.MinConfidence = s.OrchestratorMinConfidence
+	steps := &orchestrator.Steps{
+		Runtime: func(ctx context.Context, ws string) (orchestrator.AIRuntime, error) {
+			p, err := ag.provider(ctx, ws)
+			if err != nil {
+				return nil, err
+			}
+			return llm.RuntimeFor(p)
+		},
+		Template: *template, Registry: orchestrator.NewCapabilityRegistry(), Plans: plans, Steps: store,
+		Instructions: ag.conversations, Routes: routes,
+		Repos: behavior.OrchestratorRepos{Starter: tasks, Memory: tasks},
+		Jobs:  behavior.OrchestratorJobs{Jobs: jobs},
+		Owner: behavior.NewOrchestratorOwner(messenger, topics, behaviors),
+		Executors: map[string]orchestrator.TaskExecutor{
+			orchestrator.ExecutorInvestigate: &behavior.OrchestratorInvestigate{
+				Policies:      behaviorPolicies{integrations: integrations, known: ag.known},
+				Investigators: ag.investigators,
+				Registry:      ag.reg, Sanitizer: redactor, Limits: ag.limits, Audit: investigateAudit,
+				MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
+			},
+		},
+		Settings: orchestratorStepSettings(s),
+	}
+	if err := steps.Register(reg); err != nil {
+		return err
+	}
+	ports.Tasks, ports.Plans = routes, plans
+	return nil
+}
+
+// orchestratorPorts are the orchestrator stores the Telegram inbox uses
+// (/plan, start_task, /status). Both stay nil when the orchestrator is not
+// registered.
+type orchestratorPorts struct {
+	Tasks behavior.OrchestratedTaskStarter
+	Plans behavior.OrchestratorPlanReader
 }

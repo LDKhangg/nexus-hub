@@ -109,6 +109,7 @@ type jobRun struct {
 
 	mu       sync.Mutex
 	instrs   []behavior.WorkerInstruction // received, not yet given to the executor
+	taken    map[string]bool              // ids taken by appendFollowUps, not yet journaled; never queued again
 	interval time.Duration
 	execDone bool
 	late     int // instructions that arrived after the executor finished
@@ -290,7 +291,7 @@ func (r *jobRun) takeInstructions(list []behavior.WorkerInstruction) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, in := range list {
-		if in.ID == "" || strings.TrimSpace(in.Text) == "" || r.j.State().Instrs[in.ID] || len(in.ID) > 128 {
+		if in.ID == "" || strings.TrimSpace(in.Text) == "" || r.j.State().Instrs[in.ID] || r.taken[in.ID] || len(in.ID) > 128 {
 			continue
 		}
 		dup := false
@@ -537,23 +538,50 @@ func (r *jobRun) appendFollowUps() (bool, error) {
 	r.mu.Lock()
 	list := r.instrs
 	r.instrs = nil
+	if r.taken == nil {
+		r.taken = map[string]bool{}
+	}
+	for _, in := range list {
+		r.taken[in.ID] = true
+	}
 	r.mu.Unlock()
 	if len(list) == 0 {
 		return false, nil
 	}
+	// requeue puts the items that were not journaled back for the next
+	// round and lets them be received again.
+	requeue := func(rest []behavior.WorkerInstruction) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		for _, in := range rest {
+			delete(r.taken, in.ID)
+		}
+		r.instrs = append(append([]behavior.WorkerInstruction(nil), rest...), r.instrs...)
+	}
 	f, err := os.OpenFile(r.privatePath(instructionFileName), os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
+		requeue(list)
 		return false, err
 	}
 	defer f.Close()
 	if _, err := f.WriteString("\n# Follow-up\n\n"); err != nil {
+		requeue(list)
 		return false, err
 	}
-	for _, in := range list {
+	for i, in := range list {
 		if _, err := f.WriteString("- " + strings.ReplaceAll(strings.TrimSpace(in.Text), "\n", "\n  ") + "\n"); err != nil {
-			return false, err
+			requeue(list[i:])
+			return i > 0, err
 		}
-		_, _ = r.j.MarkInstruction(in.ID)
+		// Once journaled, the journal skips the id; if journaling fails,
+		// the id stays out of the ack list (acks come from the journal) and
+		// may be received again.
+		if _, err := r.j.MarkInstruction(in.ID); err != nil {
+			log.Print("worker: an instruction was not journaled; it may be received again")
+		}
+		r.mu.Lock()
+		delete(r.taken, in.ID)
+		r.mu.Unlock()
 	}
 	return true, nil
 }

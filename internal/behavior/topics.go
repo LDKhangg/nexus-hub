@@ -404,6 +404,7 @@ func (r *TopicRouter) Recover(ctx context.Context, chat ChatRef, err error) (Cha
 		if r.d.Client != nil && r.d.Client.ReopenTopic(ctx, chat, chat.ThreadID) == nil {
 			if topic, gerr := r.d.Store.TopicByThread(ctx, chat.WorkspaceID, chat.IntegrationID, chat.ChatID, chat.ThreadID); gerr == nil {
 				_, _ = r.d.Store.SetTopicState(ctx, chat.WorkspaceID, topic.ID, TopicOpen)
+				r.taskTopicOpened(chat.WorkspaceID, topic.SubjectKind, topic.SubjectKey)
 			}
 			chat.topic = nil
 			return chat, true

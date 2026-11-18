@@ -18,6 +18,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/config"
 	httpdelivery "github.com/LDKhangg/nexus-hub/internal/delivery/http"
+	"github.com/LDKhangg/nexus-hub/internal/orchestrator"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/secrets"
@@ -118,6 +119,7 @@ func run() error {
 		return err
 	}
 	engine.SetTopics(topics)
+	commands.SetTaskResolver(topics)
 	ag.actions.SetThreadRouter(topics)
 	workspaces, err := storage.NewWorkspaceRepository(pool)
 	if err != nil {
@@ -142,6 +144,7 @@ func run() error {
 	var (
 		taskStore      *storage.WorkerTaskStore
 		workerNotifier *behavior.WorkerNotifier
+		orchPorts      orchestratorPorts
 	)
 	workflows, err := buildWorkflowRuntime(pool, s, ag, behaviors, runs, engine, func(reg *workflow.Registry, store *storage.WorkflowStore) error {
 		var err error
@@ -153,7 +156,10 @@ func run() error {
 			Devices: workerStore, Telemetry: workerStore, Thresholds: thresholds, Waker: taskStore,
 		})
 		step := &behavior.WorkerRunStep{Jobs: workerStore, Routes: taskStore, Instructions: ag.conversations, Queued: workerNotifier}
-		return step.Register(reg)
+		if err := step.Register(reg); err != nil {
+			return err
+		}
+		return registerOrchestratorSteps(&orchPorts, reg, pool, store, s, ag, behaviors, messenger, topics, workerStore, taskStore, integrations, redactor)
 	})
 	if err != nil {
 		return err
@@ -181,15 +187,17 @@ func run() error {
 		Workers: workerStore, WorkerTelemetry: workerStore, LocalTasks: taskStore, WorkerJobs: workerStore, WorkerNotifier: workerNotifier,
 		Inbox: behaviors, Approvals: behaviors, Defs: behaviors, Messenger: messenger,
 		Commands: commands, Undoer: engine, Callbacks: engine,
-		Tracer:           &behavior.TraceService{Store: behaviors, Profiles: behaviors, People: ag.people},
-		People:           ag.people,
-		Reports:          reportSettings,
-		Assistant:        assistant,
-		Conversations:    ag.conversations,
-		Workflows:        workflows.store,
-		WorkflowCommands: workflows.commands,
-		Topics:           topics,
-		Links:            topics,
+		Tracer:            &behavior.TraceService{Store: behaviors, Profiles: behaviors, People: ag.people},
+		People:            ag.people,
+		Reports:           reportSettings,
+		Assistant:         assistant,
+		Conversations:     ag.conversations,
+		Workflows:         workflows.store,
+		WorkflowCommands:  workflows.commands,
+		Topics:            topics,
+		Links:             topics,
+		InstructionWaker:  &orchestrator.InstructionWaker{Steps: workflows.store, Waker: taskStore},
+		OrchestratedTasks: orchPorts.Tasks, OrchestratorPlans: orchPorts.Plans,
 	}, behavior.InboxSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout})
 	// A done/closed ClickUp task closes its topic once no execution of it is
 	// active (status events and a periodic sweep).
