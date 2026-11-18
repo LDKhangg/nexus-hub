@@ -4,6 +4,8 @@ Status of every PCC-001 requirement. Statuses follow PCC §10.1.2: `PENDING`, `I
 
 Snapshot: 2026-11-12. Phase 1 merged; Phase 2 under test and review. Nothing is `VERIFIED` against the PCC yet: Phase 1/2 work covers parts of the IDs marked `IN_PROGRESS`.
 
+Update 2026-11-18: owner decision D7 re-orders the roadmap after 7b: Phase 10 next (ends MVP 1), then 9, 12, 13; Phase 8 (multi-slot, scheduler) deferred. IDs with phase `8` only (FR-101, FR-102, FR-104, FR-105, NFR-009, E2E-002) stay `PENDING` while deferred. No status changed.
+
 Update 2026-11-16: roadmap Phase 7 split into 7a (local worker bridge, plan approved) and 7b (AI orchestrator, the former Phase 7 plan). Phase column: orchestrator IDs `7` → `7b`; IDs covered by the 7a plan gained `7a`. No status changed.
 
 Update 2026-11-15: Phase 5 (durable workflow engine + open Telegram assistant) merged into develop 65be4ac (CI 43631958237 green) after Test PASS and Review APPROVE on 2ac779b; its scoped IDs are VERIFIED. E2E-005 live part stays open (Phase 12/13).
