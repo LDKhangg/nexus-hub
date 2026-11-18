@@ -18,8 +18,12 @@ type GateRequest struct {
 	// RequestedUserID is the workspace member the gate is asked for
 	// (users.id), or "".
 	RequestedUserID string
-	// ExpiresAt is now plus the rule set's approval TTL.
+	// ExpiresAt is now plus the rule set's approval TTL; the store caps
+	// it at the execution's hard deadline.
 	ExpiresAt time.Time
+	// Now is the time an existing open gate's expiry is compared with;
+	// zero means the current time.
+	Now time.Time
 }
 
 // Gate is a stored policy_gate approval.
@@ -31,6 +35,10 @@ type Gate struct {
 	// Created is false when an open gate for the same workspace, action,
 	// resource key and input hash already existed and is returned instead.
 	Created bool
+	// ClosedID is the open gate for the same action that this call expired
+	// first because it was past its expiry or its execution had ended (0
+	// for none); its message still shows the buttons.
+	ClosedID int64
 }
 
 // GateStore creates policy_gate approvals. Granting is verified and

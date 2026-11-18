@@ -152,7 +152,8 @@ func run() error {
 	}
 	workerStore.SetAssignmentThresholds(thresholds)
 	// Policy gates (Phase 9): the owner's "Duyệt" / "Từ chối" of an action
-	// the policy engine holds for approval.
+	// the policy engine holds for approval. Its sweep closes the gates of
+	// ended executions (review B R-B-1).
 	policyGates := &behavior.PolicyGates{
 		Store: ag.policyStore, Messenger: messenger,
 		OwnerTelegramUserID: s.OwnerTelegramUserID, RequestTimeout: s.NoticeRequestTimeout,
@@ -233,7 +234,7 @@ func run() error {
 	}
 	notices.SetStatusObserver(lifecycle.StatusChanged)
 	topics.OnTaskTopicOpen(lifecycle.TopicReopened)
-	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows, lifecycle, &behavior.WorkerSweeper{Store: workerStore}, workerNotifier, &behavior.WorkerTaskSweeper{Store: taskStore}, clickUpDrafts}
+	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows, lifecycle, &behavior.WorkerSweeper{Store: workerStore}, workerNotifier, &behavior.WorkerTaskSweeper{Store: taskStore}, clickUpDrafts, policyGates}
 	// Telegram updates arrive by webhook, or by long polling when the hub
 	// has no public URL (telegram_mode, see settings.TelegramPolling). Both
 	// paths end in the same handler.

@@ -334,6 +334,12 @@ type TaskRun struct {
 	// (summary, PR URL, branch; untrusted text), one line each, in
 	// dependency order. Executors pass them only as data.
 	Inputs []string
+	// Proofs are the evidence of the execution's other succeeded tasks, one
+	// entry per task: its evidence refs and stored result fields (job id,
+	// branch, PR URL, summary) joined by newlines. A github.merge task run
+	// under policy effect allow merges only a target named here (review B
+	// R-B-3).
+	Proofs []string
 }
 
 // TaskOutcome is an in-process executor's structured result. Evidence must

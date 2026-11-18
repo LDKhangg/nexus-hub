@@ -27,6 +27,8 @@ const ApprovalPolicyGate ApprovalKind = "policy_gate"
 
 // PolicyGateRecord is a stored policy gate as the behavior side reads it.
 type PolicyGateRecord struct {
+	// WorkspaceID is set by ExpireEndedExecutionGates only.
+	WorkspaceID string
 	ID          int64
 	Nonce       string
 	Decision    Decision // "" while open
@@ -55,6 +57,15 @@ type PolicyGateStore interface {
 	// WorkspaceOwner returns the users.id of the workspace member with role
 	// owner; ErrNotFound when there is none.
 	WorkspaceOwner(ctx context.Context, workspaceID string) (string, error)
+}
+
+// PolicyGateEndStore closes the policy gates of ended executions (review B
+// R-B-1); a PolicyGateStore without it leaves them to expire on their own.
+type PolicyGateEndStore interface {
+	// ExpireEndedExecutionGates expires up to limit open policy gates whose
+	// execution completed, failed, was cancelled or is past its deadline,
+	// and returns them.
+	ExpireEndedExecutionGates(ctx context.Context, now time.Time, limit int) ([]PolicyGateRecord, error)
 }
 
 // policyGatePayload is where a gate's message went and what it shows
@@ -86,7 +97,10 @@ type PolicyGates struct {
 	// is a private chat, whose id is the owner's user id.
 	OwnerTelegramUserID int64
 	RequestTimeout      time.Duration
-	Now                 func() time.Time
+	// SweepInterval is how often Run closes the gates of ended executions;
+	// 0 means one minute.
+	SweepInterval time.Duration
+	Now           func() time.Time
 }
 
 func (g *PolicyGates) now() time.Time {
@@ -230,7 +244,11 @@ func (g *PolicyGates) HandlePress(ctx context.Context, u InboundUpdate, msgID in
 	}
 	decided, err := g.Store.DecidePolicyGate(ctx, u.WorkspaceID, a.Nonce, decision, "telegram:"+strconv.FormatInt(tgID, 10), owner, g.now())
 	switch {
-	case errors.Is(err, ErrDecided), errors.Is(err, ErrExpired), errors.Is(err, ErrNotFound):
+	case errors.Is(err, ErrExpired):
+		// Past its expiry, or its execution has ended: the press is stale
+		// and the message is closed (⌛, no buttons); the sweep records it.
+		return msgStale, "stale", !g.finalEdit(ctx, u.WorkspaceID, rec, DecisionExpired)
+	case errors.Is(err, ErrDecided), errors.Is(err, ErrNotFound):
 		return msgStale, "stale", true
 	case err != nil:
 		return "", "retry", false
@@ -243,6 +261,71 @@ func (g *PolicyGates) HandlePress(ctx context.Context, u InboundUpdate, msgID in
 		}
 	}
 	return toast, "", !removed
+}
+
+// closeExpired edits the message of a gate expired by the store (⌛, no
+// buttons). Best effort.
+func (g *PolicyGates) closeExpired(ctx context.Context, workspaceID string, id int64) {
+	if g == nil || g.Store == nil || id <= 0 {
+		return
+	}
+	rec, err := g.Store.PolicyGate(ctx, workspaceID, id)
+	if err != nil {
+		return
+	}
+	g.finalEdit(ctx, workspaceID, rec, DecisionExpired)
+}
+
+// Run closes the gates of ended executions every SweepInterval until ctx
+// ends.
+func (g *PolicyGates) Run(ctx context.Context) error {
+	interval := time.Minute
+	if g != nil && g.SweepInterval > 0 {
+		interval = g.SweepInterval
+	}
+	for ctx.Err() == nil {
+		if _, err := g.Sweep(ctx); err != nil && ctx.Err() == nil {
+			log.Print("policy gates: sweep failed; retried next period")
+		}
+		t := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return nil
+		case <-t.C:
+		}
+	}
+	return nil
+}
+
+// Sweep expires the open gates of executions that completed, failed, were
+// cancelled or are past their deadline, and closes their messages (⌛
+// Hết hạn, buttons removed; review B R-B-1). Their waiting step never runs
+// again, so nothing else would close them. It returns how many expired.
+func (g *PolicyGates) Sweep(ctx context.Context) (int, error) {
+	if g == nil || g.Store == nil {
+		return 0, nil
+	}
+	es, ok := g.Store.(PolicyGateEndStore)
+	if !ok {
+		return 0, nil
+	}
+	const batch = 50
+	total := 0
+	for {
+		list, err := es.ExpireEndedExecutionGates(ctx, g.now(), batch)
+		if err != nil {
+			return total, err
+		}
+		for _, rec := range list {
+			log.Printf("policy gate %d: expired, %s ended", rec.ID, workflow.FormatRef(rec.ExecutionID))
+			g.finalEdit(ctx, rec.WorkspaceID, rec, DecisionExpired)
+		}
+		total += len(list)
+		if len(list) < batch {
+			return total, nil
+		}
+	}
 }
 
 // gateWaitRef is the executor's wait reference of a policy gate.

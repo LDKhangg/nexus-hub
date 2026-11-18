@@ -36,8 +36,11 @@ const createPolicyGateApproval = `-- name: CreatePolicyGateApproval :one
 
 INSERT INTO public.approvals(workspace_id, kind, action, resource, nonce, expires_at,
     policy_action, resource_key, input_sha256, execution_id, requested_user_id)
-VALUES ($1, 'policy_gate', $2::text, $3::text, $4, $5,
-    $2::text, $3::text, $6::text, $7, $8)
+VALUES ($1, 'policy_gate', $2::text, $3::text, $4,
+    LEAST($5::timestamptz,
+          (SELECT e.deadline_at FROM public.workflow_executions e
+           WHERE e.workspace_id = $1 AND e.id = $6)),
+    $2::text, $3::text, $7::text, $6, $8)
 ON CONFLICT (workspace_id, policy_action, resource_key, input_sha256) WHERE kind = 'policy_gate' AND decision IS NULL
 DO NOTHING
 RETURNING id, nonce, expires_at, COALESCE(execution_id, 0)::bigint AS execution_id
@@ -49,8 +52,8 @@ type CreatePolicyGateApprovalParams struct {
 	ResourceKey     string
 	Nonce           string
 	ExpiresAt       pgtype.Timestamptz
-	InputSha256     string
 	ExecutionID     pgtype.Int8
+	InputSha256     string
 	RequestedUserID pgtype.UUID
 }
 
@@ -64,7 +67,9 @@ type CreatePolicyGateApprovalRow struct {
 // Phase 9 policy_gate approvals: one exact action, approved once by the
 // owner, consumed once by the tool run it authorizes.
 // Creates the open gate; no row when an open gate for the same
-// (workspace, action, resource, input hash) already exists.
+// (workspace, action, resource, input hash) already exists. The expiry is
+// capped at the execution's hard deadline: a gate never outlives its
+// execution (review B R-B-1).
 func (q *Queries) CreatePolicyGateApproval(ctx context.Context, arg CreatePolicyGateApprovalParams) (CreatePolicyGateApprovalRow, error) {
 	row := q.db.QueryRow(ctx, createPolicyGateApproval,
 		arg.WorkspaceID,
@@ -72,8 +77,8 @@ func (q *Queries) CreatePolicyGateApproval(ctx context.Context, arg CreatePolicy
 		arg.ResourceKey,
 		arg.Nonce,
 		arg.ExpiresAt,
-		arg.InputSha256,
 		arg.ExecutionID,
+		arg.InputSha256,
 		arg.RequestedUserID,
 	)
 	var i CreatePolicyGateApprovalRow
@@ -87,11 +92,15 @@ func (q *Queries) CreatePolicyGateApproval(ctx context.Context, arg CreatePolicy
 }
 
 const decidePolicyGateApproval = `-- name: DecidePolicyGateApproval :one
-UPDATE public.approvals SET decision = $1::text, decided_by = $2::text,
+UPDATE public.approvals a SET decision = $1::text, decided_by = $2::text,
     decided_user_id = $3, decided_at = now(), updated_at = now()
-WHERE workspace_id = $4 AND nonce = $5 AND kind = 'policy_gate'
-  AND decision IS NULL AND expires_at > $6::timestamptz
-RETURNING id, COALESCE(execution_id, 0)::bigint AS execution_id
+WHERE a.workspace_id = $4 AND a.nonce = $5 AND a.kind = 'policy_gate'
+  AND a.decision IS NULL AND a.expires_at > $6::timestamptz
+  AND NOT EXISTS (SELECT 1 FROM public.workflow_executions e
+                  WHERE e.workspace_id = a.workspace_id AND e.id = a.execution_id
+                    AND (e.state IN ('COMPLETED', 'FAILED', 'CANCELLED')
+                         OR (e.deadline_at IS NOT NULL AND e.deadline_at <= $6::timestamptz)))
+RETURNING a.id, COALESCE(a.execution_id, 0)::bigint AS execution_id
 `
 
 type DecidePolicyGateApprovalParams struct {
@@ -108,8 +117,10 @@ type DecidePolicyGateApprovalRow struct {
 	ExecutionID int64
 }
 
-// Atomic: only an open, unexpired gate is decided, once; records the
-// Telegram actor and the internal user who decided.
+// Atomic: only an open, unexpired gate whose execution is still running
+// (not completed, failed or cancelled, and before its deadline) is
+// decided, once; records the Telegram actor and the internal user who
+// decided (review B R-B-1).
 func (q *Queries) DecidePolicyGateApproval(ctx context.Context, arg DecidePolicyGateApprovalParams) (DecidePolicyGateApprovalRow, error) {
 	row := q.db.QueryRow(ctx, decidePolicyGateApproval,
 		arg.Decision,
@@ -122,6 +133,111 @@ func (q *Queries) DecidePolicyGateApproval(ctx context.Context, arg DecidePolicy
 	var i DecidePolicyGateApprovalRow
 	err := row.Scan(&i.ID, &i.ExecutionID)
 	return i, err
+}
+
+const expireEndedExecutionPolicyGates = `-- name: ExpireEndedExecutionPolicyGates :many
+UPDATE public.approvals a SET decision = 'expired', decided_by = 'system', decided_at = now(), updated_at = now()
+WHERE a.id IN (SELECT g.id FROM public.approvals g
+               JOIN public.workflow_executions e ON e.workspace_id = g.workspace_id AND e.id = g.execution_id
+               WHERE g.kind = 'policy_gate' AND g.decision IS NULL
+                 AND (e.state IN ('COMPLETED', 'FAILED', 'CANCELLED')
+                      OR (e.deadline_at IS NOT NULL AND e.deadline_at <= $1::timestamptz))
+               ORDER BY g.id LIMIT $2::int FOR UPDATE OF g SKIP LOCKED)
+  AND a.decision IS NULL
+RETURNING a.workspace_id, a.id, a.nonce, a.expires_at, COALESCE(a.policy_action, '')::text AS policy_action,
+       COALESCE(a.resource_key, '')::text AS resource_key, COALESCE(a.input_sha256, '')::text AS input_sha256,
+       COALESCE(a.execution_id, 0)::bigint AS execution_id, COALESCE(a.telegram_message_id, 0)::bigint AS telegram_message_id,
+       a.payload
+`
+
+type ExpireEndedExecutionPolicyGatesParams struct {
+	AtTime  pgtype.Timestamptz
+	MaxRows int32
+}
+
+type ExpireEndedExecutionPolicyGatesRow struct {
+	WorkspaceID       pgtype.UUID
+	ID                int64
+	Nonce             string
+	ExpiresAt         pgtype.Timestamptz
+	PolicyAction      string
+	ResourceKey       string
+	InputSha256       string
+	ExecutionID       int64
+	TelegramMessageID int64
+	Payload           []byte
+}
+
+// Expires up to max_rows open policy gates whose execution has ended
+// (completed, failed, cancelled, or past its deadline); the sweep then
+// closes their messages (review B R-B-1).
+func (q *Queries) ExpireEndedExecutionPolicyGates(ctx context.Context, arg ExpireEndedExecutionPolicyGatesParams) ([]ExpireEndedExecutionPolicyGatesRow, error) {
+	rows, err := q.db.Query(ctx, expireEndedExecutionPolicyGates, arg.AtTime, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ExpireEndedExecutionPolicyGatesRow
+	for rows.Next() {
+		var i ExpireEndedExecutionPolicyGatesRow
+		if err := rows.Scan(
+			&i.WorkspaceID,
+			&i.ID,
+			&i.Nonce,
+			&i.ExpiresAt,
+			&i.PolicyAction,
+			&i.ResourceKey,
+			&i.InputSha256,
+			&i.ExecutionID,
+			&i.TelegramMessageID,
+			&i.Payload,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const expireStaleOpenPolicyGate = `-- name: ExpireStaleOpenPolicyGate :one
+UPDATE public.approvals a SET decision = 'expired', decided_by = 'system', decided_at = now(), updated_at = now()
+WHERE a.workspace_id = $1 AND a.kind = 'policy_gate' AND a.decision IS NULL
+  AND a.policy_action = $2::text AND a.resource_key = $3::text
+  AND a.input_sha256 = $4::text
+  AND (a.expires_at <= $5::timestamptz
+       OR EXISTS (SELECT 1 FROM public.workflow_executions e
+                  WHERE e.workspace_id = a.workspace_id AND e.id = a.execution_id
+                    AND (e.state IN ('COMPLETED', 'FAILED', 'CANCELLED')
+                         OR (e.deadline_at IS NOT NULL AND e.deadline_at <= $5::timestamptz))))
+RETURNING a.id
+`
+
+type ExpireStaleOpenPolicyGateParams struct {
+	WorkspaceID  pgtype.UUID
+	PolicyAction string
+	ResourceKey  string
+	InputSha256  string
+	AtTime       pgtype.Timestamptz
+}
+
+// Expires the open gate for the same (workspace, action, resource, input
+// hash) when it is past its expiry or its execution has ended (completed,
+// failed, cancelled, or past its deadline), so a new request gets its own
+// gate (review B R-B-1, R-B-5). No row when there is none.
+func (q *Queries) ExpireStaleOpenPolicyGate(ctx context.Context, arg ExpireStaleOpenPolicyGateParams) (int64, error) {
+	row := q.db.QueryRow(ctx, expireStaleOpenPolicyGate,
+		arg.WorkspaceID,
+		arg.PolicyAction,
+		arg.ResourceKey,
+		arg.InputSha256,
+		arg.AtTime,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }
 
 const getOpenPolicyGateApproval = `-- name: GetOpenPolicyGateApproval :one

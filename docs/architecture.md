@@ -339,6 +339,16 @@ A grant is an `approvals` row of kind `policy_gate`, bound to the workspace,
 action, resource key, input hash and execution. The executor accepts it only
 when it is approved, not expired and not consumed, and marks it consumed in the
 same transaction that begins the tool run. It decides again before running
-(`revalidate_denied` on failure). When the engine or its store is unavailable,
+(`revalidate_denied` on failure; a rule that is already `deny` when the
+approved call runs gives `policy_denied`). A gate's expiry is the rule set's
+TTL capped at the execution's hard deadline. Deciding refuses a gate whose
+execution completed, failed, was cancelled or passed its deadline; creating a
+gate expires an open one for the same action that is past its expiry or whose
+execution ended; and `PolicyGates.Sweep` (every minute) expires the open gates
+of ended executions and edits their messages to `⌛`. Under `allow` (no owner
+approval) the merge task runs only for a repo#number and head SHA that an
+earlier succeeded task of the execution names in its evidence
+(`merge_target_unproven` otherwise); one execution merges at most once
+(dangerous budget 1, dry runs included). When the engine or its store is unavailable,
 a built-in safe set applies (read allow, write approval_required, dangerous
 deny). Only `nh policy` writes rule sets.

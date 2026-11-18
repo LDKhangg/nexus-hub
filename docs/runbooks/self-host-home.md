@@ -1767,13 +1767,17 @@ nh policy decisions --workspace-id $WS --limit 20
 
 `/plan` can end with a task that merges a pull request (capability
 `github.merge`; the plan names the repo, PR number and the head SHA from
-earlier task evidence). It is offered only when the merge tool is wired and the
-workspace grant lists a merge method. With `github_pr_merge: approval_required`:
+earlier task evidence). It is offered only when the merge tool is wired; an
+unwired merge tool means the capability is not offered to the planner, and a
+task that asks for it anyway ends with `executor_unavailable`. The workspace
+grant must also list a merge method (`merge_not_configured` otherwise). With
+`github_pr_merge: approval_required`:
 
 1. The execution's topic (General as fallback) shows
    `🔐 Cần duyệt: merge PR owner/repo#12 (head abc1234)`, the rule that asked,
    the expiry and the buttons **Duyệt** and **Từ chối**. The task waits in
-   `WAITING_FOR_APPROVAL`.
+   `WAITING_FOR_APPROVAL`. The expiry is `approval_ttl_hours`, but never later
+   than the execution's hard deadline (24 hours after it started).
 2. Only the workspace owner counts. Another person's press is answered with a
    toast and ignored. A second press, a press on an old message and a press
    after expiry do nothing. The decision records the Telegram user and the
@@ -1784,13 +1788,32 @@ workspace grant lists a merge method. With `github_pr_merge: approval_required`:
 4. **Từ chối** or expiry: nothing merges, the task is blocked
    (`approval_rejected` or `approval_expired`) and the plan's evaluate step
    decides what next.
+5. A gate never outlives its execution. When the execution completes, fails,
+   is cancelled or passes its deadline, a press on its message is stale (no
+   "Đang kiểm tra lại rồi merge"), and within a minute the sweep expires the
+   gate and edits the message to `⌛ Hết hạn` without buttons. A new `/plan`
+   for the same PR then gets its own gate instead of
+   `approval_pending_elsewhere`. An open gate past its expiry is likewise
+   expired and replaced when the same merge asks again.
 
 An approval is bound to one action, one resource, one input hash and one
 execution, and is used up by the call it allows. It cannot approve a different
 call.
 
-With `github_pr_merge: allow` the merge runs after the normal checks. With
-`deny` the task is blocked with `policy_denied` and nothing happens.
+With `github_pr_merge: allow` the merge runs after the normal checks, but only
+when an earlier succeeded task of the same execution names the exact target in
+its evidence (its evidence refs, branch, PR URL or summary contain both
+`owner/repo#12` or the PR's GitHub URL, and the full head SHA). Otherwise the
+task is blocked with `merge_target_unproven` and nothing happens. Under
+`approval_required` the owner's approval of the target shown in the message is
+the binding instead. With `deny` the task is blocked with `policy_denied` and
+nothing happens. If the rule changes to `deny` after you approved, the merge
+is refused with `policy_denied` when it runs; `revalidate_denied` means the
+grant did not match the call, or the rule changed in the moment between the
+grant check and the merge.
+
+One execution merges at most once: the merge runs with a dangerous-action
+budget of 1, and a dry-run merge (tools `dry_run`) uses that budget too.
 
 A direct agent tool call (not an orchestrated task) that hits
 `approval_required` never waits: it is denied with a tool result that says the
@@ -1802,12 +1825,14 @@ owner must approve, and nothing runs.
 |---|---|
 | `policy_denied` | the rule set says `deny` |
 | `approval_required` | the rule set asks for approval and no approved grant matched (direct calls) |
-| `revalidate_denied` | the re-check right before running an approved action said no, or the grant did not match |
+| `revalidate_denied` | the grant did not match the call, or the rule turned `deny` between the grant check and the run (a rule already `deny` when the approved call runs gives `policy_denied`) |
 | `approval_rejected` | you pressed Từ chối |
-| `approval_expired` | no decision within `approval_ttl_hours` |
+| `approval_expired` | no decision within `approval_ttl_hours` (capped at the execution's deadline) |
 | `approval_pending_elsewhere` | the same action on the same resource is already waiting for approval in another execution |
 | `approval_not_sent` | the Telegram message could not be sent; the hub can send it again later |
-| `merge_not_configured` | no merge method in the GitHub grant, or the merge tool is not wired |
+| `merge_not_configured` | no merge method in the GitHub grant, or the merge tool is not enabled in the workspace's tools |
+| `merge_target_unproven` | `allow` merge whose repo#number and head SHA no earlier succeeded task of the execution named; nothing merged |
+| `executor_unavailable` | the merge tool or the policy engine is not wired, so the hub cannot run the merge |
 | `no_owner_member` | the workspace has no member with role owner to approve |
 | `head_sha_mismatch` | the PR head changed after approval was asked; nothing merged |
 | `tier_escalated` | a stricter tier default overrode the action rule |

@@ -8,6 +8,8 @@ import (
 	"log"
 	"regexp"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,14 +36,18 @@ const MergeToolName = "github_pr_merge"
 
 // Reason codes of github.merge tasks.
 const (
-	ReasonMergeNotConfigured  = "merge_not_configured"
-	ReasonMergeUnknown        = "merge_outcome_unknown"
-	ReasonApprovalRejected    = "approval_rejected"
-	ReasonApprovalExpired     = "approval_expired"
-	ReasonApprovalMissing     = "approval_missing"
-	ReasonApprovalNotSent     = "approval_not_sent"
-	ReasonApprovalElsewhere   = "approval_pending_elsewhere"
-	ReasonApprovalNoApprover  = "no_owner_member"
+	ReasonMergeNotConfigured = "merge_not_configured"
+	ReasonMergeUnknown       = "merge_outcome_unknown"
+	ReasonApprovalRejected   = "approval_rejected"
+	ReasonApprovalExpired    = "approval_expired"
+	ReasonApprovalMissing    = "approval_missing"
+	ReasonApprovalNotSent    = "approval_not_sent"
+	ReasonApprovalElsewhere  = "approval_pending_elsewhere"
+	ReasonApprovalNoApprover = "no_owner_member"
+	// ReasonMergeTargetUnproven: policy allows the merge without the
+	// owner, but no earlier succeeded task of the execution names the
+	// target's repo#number and head SHA (review B R-B-3).
+	ReasonMergeTargetUnproven = "merge_target_unproven"
 	ReasonMergePolicyDenied   = tools.DenyPolicyDenied
 	ReasonMergeRevalidateDeny = tools.DenyRevalidateDenied
 )
@@ -90,19 +96,52 @@ var _ orchestrator.CapabilityOfferer = (*OrchestratorActions)(nil)
 
 // decisionCapture remembers the last decision the executor got, so the
 // gate uses the deciding rule and its approval TTL (one recorded decision
-// per call).
+// per call). Without the owner's approval (no grant in the context), an
+// allow for a merge target that earlier task evidence does not name is
+// turned into a deny before any side effect (review B R-B-3); under
+// approval_required the owner's approval of the shown target binds it.
 type decisionCapture struct {
-	gate tools.PolicyGate
-	mu   sync.Mutex
-	last policy.Decision
+	gate     tools.PolicyGate
+	proven   bool
+	mu       sync.Mutex
+	last     policy.Decision
+	unproven bool
 }
 
 func (c *decisionCapture) Decide(ctx context.Context, req policy.Request) (policy.Decision, error) {
 	d, err := c.gate.Decide(ctx, req)
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.last = d
-	c.mu.Unlock()
+	if _, granted := tools.ApprovalGrantFrom(ctx); err == nil && d.Effect == policy.EffectAllow && !c.proven && !granted {
+		c.unproven = true
+		d.Effect = policy.EffectDeny
+	}
 	return d, err
+}
+
+// unprovenBlocked reports whether an allow was refused because the target
+// is not in earlier evidence.
+func (c *decisionCapture) unprovenBlocked() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.unproven
+}
+
+// mergeTargetProven reports whether one earlier succeeded task's evidence
+// (run.Proofs) names both the target's PR (repo#number or its GitHub pull
+// URL) and its full head SHA.
+func mergeTargetProven(proofs []string, t orchestrator.MergeTarget) bool {
+	num := strconv.FormatInt(t.Number, 10)
+	pr := regexp.MustCompile(`(?i)(?:github\.com/` + regexp.QuoteMeta(t.Repo) + `/pull/|(?:^|[^A-Za-z0-9_.-])` +
+		regexp.QuoteMeta(t.Repo) + `#)` + num + `(?:[^0-9]|$)`)
+	sha := regexp.MustCompile(`(?:^|[^0-9a-f])` + regexp.QuoteMeta(t.HeadSHA) + `(?:[^0-9a-f]|$)`)
+	for _, p := range proofs {
+		if pr.MatchString(p) && sha.MatchString(strings.ToLower(p)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *decisionCapture) decision() policy.Decision {
@@ -150,7 +189,7 @@ func (m *OrchestratorMerge) prepare(ctx context.Context, run orchestrator.TaskRu
 	limits := m.Limits
 	limits.MaxCalls = 2
 	limits.MaxDangerous = max(limits.MaxDangerous, 1)
-	capture := &decisionCapture{gate: m.Engine}
+	capture := &decisionCapture{gate: m.Engine, proven: mergeTargetProven(run.Proofs, *t)}
 	exec := tools.NewExecutor(m.Registry, pol, limits, m.Audit, m.Sanitizer, run.ExecutionID, run.WorkspaceID,
 		tools.WithPolicy(capture, policy.ActorWorkflow), tools.WithExecutionID(run.ExecutionID))
 	exec.ClickUpTokenRef = cfg.ClickUpTokenRef
@@ -198,6 +237,9 @@ func (a *OrchestratorActions) merge(ctx context.Context, run orchestrator.TaskRu
 		return out, err
 	}
 	res := call.exec.Call(ctx, 1, MergeToolName, call.input)
+	if res.Status == tools.StatusDenied && call.capture.unprovenBlocked() {
+		return orchestrator.TaskOutcome{Blocked: true, ReasonCode: ReasonMergeTargetUnproven}, nil
+	}
 	if res.Status != tools.StatusDenied || resultCode(res) != tools.DenyApprovalRequired {
 		return mergeOutcome(res, call.target), nil
 	}
@@ -218,13 +260,35 @@ func (a *OrchestratorActions) askGate(ctx context.Context, run orchestrator.Task
 	}
 	d := call.capture.decision()
 	tool := m.Registry.Get(MergeToolName)
-	gate, err := store.CreateGate(ctx, policy.GateRequest{
-		WorkspaceID: run.WorkspaceID, Action: MergeToolName, ResourceKey: tools.ResourceKey(tool, call.input),
-		InputSHA256: tools.InputSHA256(call.input), ExecutionID: run.ExecutionID, RequestedUserID: owner,
-		ExpiresAt: policy.GateExpiry(m.now(), d),
-	})
-	if err != nil {
-		return orchestrator.TaskOutcome{}, err
+	// The store caps the expiry at the execution's deadline, and expires
+	// an open gate of the same merge that is past its expiry or whose
+	// execution ended (review B R-B-1, R-B-5).
+	var gate policy.Gate
+	for attempt := 0; ; attempt++ {
+		now := m.now()
+		gate, err = store.CreateGate(ctx, policy.GateRequest{
+			WorkspaceID: run.WorkspaceID, Action: MergeToolName, ResourceKey: tools.ResourceKey(tool, call.input),
+			InputSHA256: tools.InputSHA256(call.input), ExecutionID: run.ExecutionID, RequestedUserID: owner,
+			ExpiresAt: policy.GateExpiry(now, d), Now: now,
+		})
+		if err != nil {
+			return orchestrator.TaskOutcome{}, err
+		}
+		if gate.ClosedID > 0 && gate.ClosedID != gate.ID {
+			m.Gates.closeExpired(ctx, run.WorkspaceID, gate.ClosedID)
+		}
+		if gate.Created || m.now().Before(gate.ExpiresAt) {
+			break
+		}
+		// The open gate returned has passed its expiry: the next call
+		// expires it and creates a new one.
+		if attempt == 1 {
+			return orchestrator.TaskOutcome{Blocked: true, ReasonCode: ReasonApprovalExpired}, nil
+		}
+	}
+	if gate.Created && !m.now().Before(gate.ExpiresAt) {
+		// Capped at a deadline that has already passed.
+		return orchestrator.TaskOutcome{Blocked: true, ReasonCode: ReasonApprovalExpired}, nil
 	}
 	if gate.ExecutionID != run.ExecutionID {
 		// Another execution already asks for the very same merge.

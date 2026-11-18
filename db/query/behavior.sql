@@ -261,10 +261,17 @@ RETURNING *;
 -- name: ListDueApprovals :many
 -- Open approvals past their expiry with the execution of their wait (0 for
 -- none), read before expiring them so bound executions are locked first.
+-- A policy gate of an ended execution is left to the policy gate sweep,
+-- which also closes its message (review B R-B-1).
 SELECT a.workspace_id, a.id, COALESCE(w.execution_id, 0)::bigint AS execution_id
 FROM public.approvals a
 LEFT JOIN public.workflow_waits w ON w.workspace_id = a.workspace_id AND w.approval_id = a.id
 WHERE a.decision IS NULL AND a.expires_at <= sqlc.arg(at_time)::timestamptz
+  AND NOT (a.kind = 'policy_gate' AND EXISTS (
+    SELECT 1 FROM public.workflow_executions e
+    WHERE e.workspace_id = a.workspace_id AND e.id = a.execution_id
+      AND (e.state IN ('COMPLETED', 'FAILED', 'CANCELLED')
+           OR (e.deadline_at IS NOT NULL AND e.deadline_at <= sqlc.arg(at_time)::timestamptz))))
 ORDER BY a.expires_at, a.id
 LIMIT sqlc.arg(max_rows)::int;
 

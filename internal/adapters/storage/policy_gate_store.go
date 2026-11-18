@@ -30,9 +30,13 @@ var ErrInvalidGateRequest = errors.New("policy gate: invalid request")
 // CreateGate stores an open policy_gate approval bound to the request's
 // workspace, action, resource key, input hash and execution, or returns
 // the open one that already exists for the same workspace, action,
-// resource key and input hash (Created false). An existing open gate is
-// returned as stored, even when its expiry has passed and the sweep has
-// not expired it yet; the caller compares ExpiresAt.
+// resource key and input hash (Created false). The new gate's expiry is
+// capped at the execution's hard deadline. An open gate that is past its
+// expiry, or whose execution has ended (completed, failed, cancelled or
+// past its deadline), is expired first and named in ClosedID, so the
+// request gets its own gate (review B R-B-1, R-B-5). A gate returned as
+// open can still pass its expiry right after; the caller compares
+// ExpiresAt.
 func (s *PolicyStore) CreateGate(ctx context.Context, req policy.GateRequest) (policy.Gate, error) {
 	ws, err := parseDBID(req.WorkspaceID)
 	if err != nil || !policy.ActionNameRe.MatchString(req.Action) || len(req.ResourceKey) > policy.MaxResourceKeyBytes ||
@@ -46,6 +50,17 @@ func (s *PolicyStore) CreateGate(ctx context.Context, req policy.GateRequest) (p
 		}
 	}
 	exec := pgtype.Int8{Int64: req.ExecutionID, Valid: req.ExecutionID > 0}
+	now := req.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	closed, err := s.q.ExpireStaleOpenPolicyGate(ctx, sqlc.ExpireStaleOpenPolicyGateParams{
+		WorkspaceID: ws, PolicyAction: req.Action, ResourceKey: req.ResourceKey, InputSha256: req.InputSHA256,
+		AtTime: pgtype.Timestamptz{Time: now, Valid: true},
+	})
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return policy.Gate{}, err
+	}
 	// Two rounds: an open gate decided between the insert and the read
 	// frees the index, so the second insert succeeds.
 	for range 2 {
@@ -59,7 +74,7 @@ func (s *PolicyStore) CreateGate(ctx context.Context, req policy.GateRequest) (p
 			ExecutionID: exec, RequestedUserID: user,
 		})
 		if err == nil {
-			return policy.Gate{ID: row.ID, Nonce: row.Nonce, ExpiresAt: row.ExpiresAt.Time, ExecutionID: row.ExecutionID, Created: true}, nil
+			return policy.Gate{ID: row.ID, Nonce: row.Nonce, ExpiresAt: row.ExpiresAt.Time, ExecutionID: row.ExecutionID, Created: true, ClosedID: closed}, nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return policy.Gate{}, err
@@ -68,7 +83,7 @@ func (s *PolicyStore) CreateGate(ctx context.Context, req policy.GateRequest) (p
 			WorkspaceID: ws, PolicyAction: req.Action, ResourceKey: req.ResourceKey, InputSha256: req.InputSHA256,
 		})
 		if err == nil {
-			return policy.Gate{ID: open.ID, Nonce: open.Nonce, ExpiresAt: open.ExpiresAt.Time, ExecutionID: open.ExecutionID}, nil
+			return policy.Gate{ID: open.ID, Nonce: open.Nonce, ExpiresAt: open.ExpiresAt.Time, ExecutionID: open.ExecutionID, ClosedID: closed}, nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return policy.Gate{}, err
@@ -156,6 +171,28 @@ func (s *PolicyStore) DecidePolicyGate(ctx context.Context, workspaceID, nonce s
 		return behavior.PolicyGateRecord{}, behavior.ErrDecided
 	}
 	return behavior.PolicyGateRecord{}, behavior.ErrExpired
+}
+
+var _ behavior.PolicyGateEndStore = (*PolicyStore)(nil)
+
+// ExpireEndedExecutionGates expires up to limit open policy gates whose
+// execution has ended or is past its deadline, and returns them.
+func (s *PolicyStore) ExpireEndedExecutionGates(ctx context.Context, now time.Time, limit int) ([]behavior.PolicyGateRecord, error) {
+	rows, err := s.q.ExpireEndedExecutionPolicyGates(ctx, sqlc.ExpireEndedExecutionPolicyGatesParams{
+		AtTime: pgtype.Timestamptz{Time: now, Valid: true}, MaxRows: int32(clamp(limit, 1, 1000)),
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]behavior.PolicyGateRecord, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, behavior.PolicyGateRecord{
+			WorkspaceID: uuidString(r.WorkspaceID), ID: r.ID, Nonce: r.Nonce, Decision: behavior.DecisionExpired,
+			ExpiresAt: r.ExpiresAt.Time, Action: r.PolicyAction, ResourceKey: r.ResourceKey, InputSHA256: r.InputSha256,
+			ExecutionID: r.ExecutionID, MessageID: r.TelegramMessageID, Payload: r.Payload,
+		})
+	}
+	return out, nil
 }
 
 // WorkspaceOwner returns the users.id of the workspace's owner member.
