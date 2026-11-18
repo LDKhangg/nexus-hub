@@ -19,6 +19,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/agent"
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
 	"github.com/LDKhangg/nexus-hub/internal/people"
+	nhpolicy "github.com/LDKhangg/nexus-hub/internal/policy"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
 )
@@ -217,13 +218,14 @@ type DraftCallerFactory func(workspaceID string, draftID int64, policy tenant.To
 
 // DraftExecutorFactory returns a DraftCallerFactory over the Phase 2
 // executor; the enabled ClickUp write tools run without a repo grant
-// (UnscopedWrites), nothing dangerous.
-func DraftExecutorFactory(reg *tools.Registry, store tools.ToolRunStore, san tools.Sanitizer, base tools.Limits) DraftCallerFactory {
+// (UnscopedWrites), nothing dangerous. Every write asks gate (actor draft);
+// a nil gate denies it.
+func DraftExecutorFactory(reg *tools.Registry, store tools.ToolRunStore, san tools.Sanitizer, base tools.Limits, gate tools.PolicyGate) DraftCallerFactory {
 	return func(ws string, draftID int64, policy tenant.ToolPolicyConfig, ref string) ToolCaller {
 		limits := base
 		limits.MaxCalls = 4
 		limits.MaxDangerous = 0
-		e := tools.NewExecutor(reg, policy, limits, false, store, san, draftID, ws)
+		e := tools.NewExecutor(reg, policy, limits, store, san, draftID, ws, tools.WithPolicy(gate, nhpolicy.ActorDraft))
 		e.ClickUpTokenRef = ref
 		e.KeyScope = DraftKeyScope(draftID)
 		e.UnscopedWrites = append([]string(nil), policy.Enabled...)

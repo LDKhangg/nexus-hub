@@ -11,6 +11,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/memory"
+	"github.com/LDKhangg/nexus-hub/internal/policy"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
 
@@ -87,8 +88,10 @@ type Compressor interface {
 type OrchestratorSettings struct {
 	PollInterval                    time.Duration
 	Limits                          tools.Limits
-	AllowDangerous                  bool
 	MaxInputTokens, MaxOutputTokens int64
+	// Policy is the policy engine every non-read tool call asks (actor
+	// agent, or workflow for the pipeline). Nil denies every non-read call.
+	Policy tools.PolicyGate
 }
 
 // Orchestrator runs claimed agent jobs to an outcome.
@@ -187,7 +190,7 @@ func (o *Orchestrator) run(ctx context.Context, job *AgentJob, jc JobContext, pa
 		return &TriageError{Code: CodeLLMUnconfigured}
 	}
 	cfg := jc.Config
-	exec := tools.NewExecutor(o.reg, cfg.Tools, o.settings.Limits, o.settings.AllowDangerous, o.runs, o.redactor, job.ID, job.WorkspaceID)
+	exec := tools.NewExecutor(o.reg, cfg.Tools, o.settings.Limits, o.runs, o.redactor, job.ID, job.WorkspaceID, tools.WithPolicy(o.settings.Policy, policy.ActorAgent))
 	exec.ClickUpTokenRef = cfg.ClickUpTokenRef
 	specs := exec.Specs()
 	toolsAvailable := len(specs) > 0 && investigator != nil

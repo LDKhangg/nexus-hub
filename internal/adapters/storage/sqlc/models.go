@@ -89,6 +89,17 @@ type Approval struct {
 	ReplyMessageID pgtype.Int8
 	// The owner's free-text reply, staged until the worker hands it on.
 	PendingAnswer pgtype.Text
+	// policy_gate: the tool or capability name the gate authorizes.
+	PolicyAction pgtype.Text
+	// policy_gate: the bounded resource key, such as owner/repo#12.
+	ResourceKey pgtype.Text
+	// policy_gate: SHA-256 of the canonical action input; never the input itself.
+	InputSha256     pgtype.Text
+	ExecutionID     pgtype.Int8
+	RequestedUserID pgtype.UUID
+	DecidedUserID   pgtype.UUID
+	// policy_gate: set once, in the same transaction as the tool run it authorized.
+	ConsumedAt pgtype.Timestamptz
 }
 
 type Behavior struct {

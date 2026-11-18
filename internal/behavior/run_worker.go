@@ -96,13 +96,14 @@ type CallerFactory func(run Run, policy tenant.ToolPolicyConfig, clickUpTokenRef
 // ExecutorFactory returns a CallerFactory over the Phase 2 executor: the
 // run's workspace, policy, audit (store) and caps; reads only, no writes,
 // nothing dangerous. Keys are scoped to behavior runs (RunToolKeyScope).
+// The executor has no policy gate: a non-read call is denied.
 func ExecutorFactory(reg *tools.Registry, store tools.ToolRunStore, san tools.Sanitizer, base tools.Limits) CallerFactory {
 	return func(run Run, policy tenant.ToolPolicyConfig, ref string, outputCap, maxCalls int) ToolCaller {
 		limits := base
 		limits.OutputCap = outputCap
 		limits.MaxCalls = maxCalls
 		limits.MaxDangerous = 0
-		e := tools.NewExecutor(reg, policy, limits, false, store, san, run.ID, run.WorkspaceID)
+		e := tools.NewExecutor(reg, policy, limits, store, san, run.ID, run.WorkspaceID)
 		e.ClickUpTokenRef = ref
 		e.KeyScope = RunToolKeyScope
 		return e

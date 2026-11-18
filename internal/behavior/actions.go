@@ -16,6 +16,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
 	"github.com/LDKhangg/nexus-hub/internal/descblock"
 	"github.com/LDKhangg/nexus-hub/internal/people"
+	nhpolicy "github.com/LDKhangg/nexus-hub/internal/policy"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
@@ -132,13 +133,14 @@ type ActionCallerFactory func(run Run, keyScope string, policy tenant.ToolPolicy
 // ActionExecutorFactory returns an ActionCallerFactory over the Phase 2
 // executor: the run's workspace, audit (store, rows owned by the run) and
 // write budget; the enabled ClickUp write tool is allowed without a repo
-// grant (UnscopedWrites), nothing dangerous.
-func ActionExecutorFactory(reg *tools.Registry, store tools.ToolRunStore, san tools.Sanitizer, base tools.Limits) ActionCallerFactory {
+// grant (UnscopedWrites), nothing dangerous. Every write asks gate (actor
+// behavior); a nil gate denies it.
+func ActionExecutorFactory(reg *tools.Registry, store tools.ToolRunStore, san tools.Sanitizer, base tools.Limits, gate tools.PolicyGate) ActionCallerFactory {
 	return func(run Run, scope string, policy tenant.ToolPolicyConfig, ref string) ToolCaller {
 		limits := base
 		limits.MaxCalls = 4
 		limits.MaxDangerous = 0
-		e := tools.NewExecutor(reg, policy, limits, false, store, san, run.ID, run.WorkspaceID)
+		e := tools.NewExecutor(reg, policy, limits, store, san, run.ID, run.WorkspaceID, tools.WithPolicy(gate, nhpolicy.ActorBehavior))
 		e.ClickUpTokenRef = ref
 		e.KeyScope = scope
 		e.UnscopedWrites = append([]string(nil), policy.Enabled...)

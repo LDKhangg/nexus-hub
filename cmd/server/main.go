@@ -60,6 +60,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if s.AllowDangerous {
+		log.Print("setting allow_dangerous is deprecated and has no effect; the policy rule set decides dangerous tools (nh policy)")
+	}
 	credentials, err := storage.NewCredentialStore(pool)
 	if err != nil {
 		return errors.New("credential store startup failed")

@@ -35,6 +35,10 @@ const (
 	ReasonFallbackStoreErr  = "fallback_store_error"
 	ReasonRecordFailed      = "record_failed"
 	ReasonEngineUnavailable = "engine_unavailable"
+	// ReasonRevalidateDenied: the re-check right before an approved action
+	// (FR-130) refused it, because the rule now denies it or the approval
+	// grant did not verify. Nothing ran.
+	ReasonRevalidateDenied = "revalidate_denied"
 )
 
 // MaxResourceKeyBytes bounds a resource key (for example "owner/repo#12").
@@ -60,6 +64,12 @@ type Request struct {
 	ApprovalID  int64
 	// InputSHA256 is the hex SHA-256 of the action's canonical input, or "".
 	InputSHA256 string
+	// Revalidate marks the re-check right before an approved action runs:
+	// a deny is then recorded with reason revalidate_denied.
+	Revalidate bool
+	// GrantRejected marks a re-check whose approval grant did not verify:
+	// the decision is deny, reason revalidate_denied, whatever the rules say.
+	GrantRejected bool
 }
 
 // Decision is the engine's answer.
@@ -207,6 +217,9 @@ func Resolve(active *RuleSet, version int32, fallbackReason string, known KnownA
 	}
 	if !known[req.Action] {
 		d.Effect, d.Reason = EffectDeny, ReasonUnknownAction
+		if req.Revalidate || req.GrantRejected {
+			d.Reason = ReasonRevalidateDenied
+		}
 		return d
 	}
 	effect, key, byAction := Evaluate(rs, req.Action, req.Tier)
@@ -222,6 +235,9 @@ func Resolve(active *RuleSet, version int32, fallbackReason string, known KnownA
 		d.Reason = ReasonActionRule
 	default:
 		d.Reason = ReasonTierDefault
+	}
+	if req.GrantRejected || (req.Revalidate && d.Effect == EffectDeny) {
+		d.Effect, d.Reason = EffectDeny, ReasonRevalidateDenied
 	}
 	return d
 }

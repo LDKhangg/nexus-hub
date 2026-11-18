@@ -95,7 +95,8 @@ func (e *OrchestratorInvestigate) RunTask(ctx context.Context, run orchestrator.
 	limits := e.Limits
 	limits.MaxDangerous = 0
 	audit := &investigateAudit{store: e.Audit}
-	exec := tools.NewExecutor(e.Registry, readOnlyPolicy(cfg.Tools, e.Registry.Tiers()), limits, false, audit, e.Sanitizer, run.ExecutionID, run.WorkspaceID)
+	// Read tools only: no policy gate, so a non-read call would be denied.
+	exec := tools.NewExecutor(e.Registry, readOnlyPolicy(cfg.Tools, e.Registry.Tiers()), limits, audit, e.Sanitizer, run.ExecutionID, run.WorkspaceID, tools.WithExecutionID(run.ExecutionID))
 	exec.ClickUpTokenRef = cfg.ClickUpTokenRef
 	exec.KeyScope = investigateKeyScope
 	specs := exec.Specs()

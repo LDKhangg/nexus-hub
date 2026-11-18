@@ -15,6 +15,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/memory"
+	"github.com/LDKhangg/nexus-hub/internal/policy"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
 )
@@ -148,7 +149,6 @@ func PipelineDefinition() workflow.Definition {
 // pipeline at enqueue (from the DB settings).
 type PipelineSettings struct {
 	Limits                          tools.Limits
-	AllowDangerous                  bool
 	MaxInputTokens, MaxOutputTokens int64
 	DebounceWindow, DebounceMaxWait time.Duration
 }
@@ -179,13 +179,15 @@ type PipelineSnapshot struct {
 	DryRun              bool                `json:"dry_run"`
 	MaxWritesPerJob     int                 `json:"max_writes_per_job"`
 	RepoAllow           map[string][]string `json:"repo_allow"`
-	AllowDangerous      bool                `json:"allow_dangerous"`
-	MaxInputTokens      int64               `json:"max_input_tokens"`
-	MaxOutputTokens     int64               `json:"max_output_tokens"`
-	Limits              SnapshotLimits      `json:"limits"`
-	DebounceWindowMS    int64               `json:"debounce_window_ms"`
-	DebounceMaxWaitMS   int64               `json:"debounce_max_wait_ms"`
-	Workflow            workflow.Definition `json:"workflow"`
+	// AllowDangerous is retired (Phase 9 P5): always false in new
+	// snapshots and ignored; the policy engine decides dangerous tools.
+	AllowDangerous    bool                `json:"allow_dangerous"`
+	MaxInputTokens    int64               `json:"max_input_tokens"`
+	MaxOutputTokens   int64               `json:"max_output_tokens"`
+	Limits            SnapshotLimits      `json:"limits"`
+	DebounceWindowMS  int64               `json:"debounce_window_ms"`
+	DebounceMaxWaitMS int64               `json:"debounce_max_wait_ms"`
+	Workflow          workflow.Definition `json:"workflow"`
 }
 
 // BuildPipelineSnapshot snapshots cfg (valid reports whether the source's
@@ -193,7 +195,7 @@ type PipelineSnapshot struct {
 func BuildPipelineSnapshot(cfg tenant.AgentConfig, valid bool, ps PipelineSettings) PipelineSnapshot {
 	snap := PipelineSnapshot{
 		Schema: 1, Kind: InternalPipelineKind, ConfigValid: valid, Enabled: valid && cfg.Enabled,
-		AllowDangerous: ps.AllowDangerous, MaxInputTokens: ps.MaxInputTokens, MaxOutputTokens: ps.MaxOutputTokens,
+		MaxInputTokens: ps.MaxInputTokens, MaxOutputTokens: ps.MaxOutputTokens,
 		Limits: SnapshotLimits{
 			MaxCalls: ps.Limits.MaxCalls, MaxDangerous: ps.Limits.MaxDangerous,
 			ReadTimeoutMS: ps.Limits.ReadTimeout.Milliseconds(), NetworkTimeoutMS: ps.Limits.NetworkTimeout.Milliseconds(),
@@ -256,7 +258,6 @@ func (p PipelineSnapshot) Apply(cur tenant.AgentConfig) tenant.AgentConfig {
 // settings narrows the current process settings cur by the snapshot.
 func (p PipelineSnapshot) settings(cur OrchestratorSettings) OrchestratorSettings {
 	out := cur
-	out.AllowDangerous = cur.AllowDangerous && p.AllowDangerous
 	out.MaxInputTokens = minBudget(cur.MaxInputTokens, p.MaxInputTokens)
 	out.MaxOutputTokens = minBudget(cur.MaxOutputTokens, p.MaxOutputTokens)
 	l := cur.Limits
@@ -709,7 +710,7 @@ func (r *batchRun) models(ctx context.Context, cfg tenant.AgentConfig) (Triager,
 		return nil, nil, nil, nil, &TriageError{Code: CodeLLMUnconfigured}
 	}
 	var runs tools.ToolRunStore = gatedRunStore{inner: o.runs, gate: r.gate}
-	exec := tools.NewExecutor(o.reg, cfg.Tools, r.settings.Limits, r.settings.AllowDangerous, runs, o.redactor, r.batch.ID, r.batch.WorkspaceID)
+	exec := tools.NewExecutor(o.reg, cfg.Tools, r.settings.Limits, runs, o.redactor, r.batch.ID, r.batch.WorkspaceID, tools.WithPolicy(r.settings.Policy, policy.ActorWorkflow))
 	exec.ClickUpTokenRef = cfg.ClickUpTokenRef
 	return triager, investigator, exec, exec.Specs(), nil
 }
@@ -997,6 +998,19 @@ func (g gatedRunStore) JobCounts(ctx context.Context, jobID int64) (int, int, er
 		return c.JobCounts(ctx, jobID)
 	}
 	return 0, 0, nil
+}
+
+// BeginGranted is Begin under an approval grant, after the same claim
+// check; an inner store without grant support refuses the grant.
+func (g gatedRunStore) BeginGranted(ctx context.Context, start tools.RunStart, grant tools.GrantCheck) (int64, *tools.PriorRun, error) {
+	gs, ok := g.inner.(tools.GrantedRunStore)
+	if !ok {
+		return 0, nil, tools.ErrGrantInvalid
+	}
+	if err := g.gate(ctx); err != nil {
+		return 0, nil, err
+	}
+	return gs.BeginGranted(ctx, start, grant)
 }
 
 // FindPrior forwards the inner store's prior lookup, if any.
