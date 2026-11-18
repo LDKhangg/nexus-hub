@@ -362,7 +362,7 @@ func (e *b2Env) owners(t *testing.T) b2Owners {
 }
 
 func (e *b2Env) toolRun(job, run, exec any, key string) error {
-	_, err := e.pool.Exec(e.ctx, `INSERT INTO tool_runs(workspace_id,agent_job_id,behavior_run_id,workflow_execution_id,step,tool,tier,idempotency_key,status) VALUES($1,$2,$3,$4,1,'t','read',$5,'started')`,
+	_, err := e.pool.Exec(e.ctx, `INSERT INTO tool_runs(workspace_id,agent_job_id,behavior_run_id,workflow_execution_id,step,tool,tier,idempotency_key,status,correlation_id) VALUES($1,$2,$3,$4,1,'t','read',$5,'started',CASE WHEN $3::bigint IS NULL THEN NULL ELSE gen_random_uuid() END)`,
 		workspaceA, job, run, exec, key)
 	return err
 }

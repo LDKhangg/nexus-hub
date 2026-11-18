@@ -541,10 +541,19 @@ func TestB2StartTask_StartsInTopicAndOncePerTurn(t *testing.T) {
 	if isErr || m["status"] != "already_started" || e.st.callCount() != 1 {
 		t.Fatalf("second call: %v calls %d", m, e.st.callCount())
 	}
-	// A request at the tool's argument limit (200 runes) works.
+	// The request may be as long as a /plan instruction (2000 runes); one more is too_long, not a tool error.
 	e2 := newB2Env()
-	if m, text, isErr := e2.startTool(e2.turn(b1Thread), map[string]any{"request": strings.Repeat("é", 200)}); isErr || m["status"] != "started" {
-		t.Fatalf("200 runes: %q", text)
+	if m, text, isErr := e2.startTool(e2.turn(b1Thread), map[string]any{"request": strings.Repeat("é", 2000)}); isErr || m["status"] != "started" {
+		t.Fatalf("2000 runes: %q", text)
+	}
+	e3 := newB2Env()
+	if m, text, isErr := e3.startTool(e3.turn(b1Thread), map[string]any{"request": strings.Repeat("é", 2001)}); isErr || m["status"] != "too_long" || e3.st.callCount() != 0 {
+		t.Fatalf("2001 runes: %q calls %d", text, e3.st.callCount())
+	}
+	// Other arguments keep the 200 cap.
+	e4 := newB2Env()
+	if _, text, isErr := e4.startTool(e4.turn(0), map[string]any{"request": "do it", "task": strings.Repeat("x", 201)}); !isErr || e4.st.callCount() != 0 {
+		t.Fatalf("task over 200: err=%v %q", isErr, text)
 	}
 }
 
