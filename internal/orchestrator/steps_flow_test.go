@@ -480,7 +480,8 @@ func TestStepsFlow_CompleteWithoutEvidenceConverted(t *testing.T) {
 				h.plan("EXECUTE", shWrite("w", "Change"))
 				h.eval("COMPLETE", "done")
 				h.must(StepKeyPlan)
-				if r, err := h.step("run_01"); err != nil || r.WaitState != workflow.StateWaitingForUser {
+				// K1 ruling 1: the orchestrated worker wait is WAITING_FOR_WORKER.
+				if r, err := h.step("run_01"); err != nil || r.WaitState != workflow.StateWaitingForWorker {
 					t.Fatalf("%q %v", r.WaitState, err)
 				}
 				h.jobs.set("run_01", c.job)
