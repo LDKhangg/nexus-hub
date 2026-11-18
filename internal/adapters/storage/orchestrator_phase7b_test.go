@@ -454,6 +454,8 @@ func TestOrchestratorMigration_DownUp(t *testing.T) {
 	}
 	up, _, _ := strings.Cut(string(raw), "-- +goose Down")
 	mustExec(t, e.ctx, e.pool, up)
+	// The store also needs the later orchestrator migration (merge_target, 00037); the approvals CHECK it redefines is replaced by name, so applying it again is safe.
+	mustExec(t, e.ctx, e.pool, upSection(t, "00037_orchestrator_merge_target.sql"))
 	var on bool
 	if err := e.pool.QueryRow(e.ctx, `SELECT relrowsecurity FROM pg_class WHERE oid='public.orchestrator_plans'::regclass`).Scan(&on); err != nil || !on {
 		t.Fatal("Up did not restore RLS")

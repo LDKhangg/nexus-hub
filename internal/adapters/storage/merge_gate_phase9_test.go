@@ -545,6 +545,9 @@ func TestP9E2E004_RejectBlocksWithoutMerge(t *testing.T) {
 // TC-E4-3 (REQ-11): expiry blocks with approval_expired, edits the message with ⌛, merges nothing, and a press afterwards does nothing.
 func TestP9E2E004_ExpiryBlocksWithoutMerge(t *testing.T) {
 	m := newMGEnv(t, mgOpts{})
+	// Fix B: a gate never outlives its execution (deadline 24 h) and the TTL sweep leaves gates of ended
+	// executions to the gate sweep, so this execution gets a long deadline: it is live when the TTL passes.
+	mustExec(t, m.ctx, m.pool, `UPDATE workflow_executions SET deadline_at=now()+interval '72 hours' WHERE id=$1`, m.exec)
 	rec, ref := m.ask(t)
 	expired, err := m.behaviors.ExpireDue(m.ctx, time.Now().Add(48*time.Hour), 50)
 	if err != nil {
@@ -558,8 +561,15 @@ func TestP9E2E004_ExpiryBlocksWithoutMerge(t *testing.T) {
 	}
 	// A press on the expired gate, even with a stale copy that still looks open, does nothing.
 	stale := m.approvalOf(rec)
-	if toast, code, _ := m.gates.HandlePress(m.ctx, m.update(), rec.MessageID, behavior.CallbackData{Kind: behavior.CallbackApprove, Nonce: rec.Nonce, Option: -1}, stale); code != "stale" || toast == "Đã duyệt." {
-		t.Fatalf("press after expiry: %q %q", toast, code)
+	// Fix B: a press on an expired gate closes its message (⌛, buttons gone): keep is false when the edit worked.
+	if toast, code, keep := m.gates.HandlePress(m.ctx, m.update(), rec.MessageID, behavior.CallbackData{Kind: behavior.CallbackApprove, Nonce: rec.Nonce, Option: -1}, stale); code != "stale" || toast == "Đã duyệt." || keep {
+		t.Fatalf("press after expiry: %q %q keep=%v", toast, code, keep)
+	}
+	if e := m.msgr.lastEdit(); e.ID != rec.MessageID || !strings.HasPrefix(e.Text, "⌛ Hết hạn: merge PR acme/api#12") {
+		t.Fatalf("press edit %+v", e)
+	}
+	if len(m.waker.calls) != 0 {
+		t.Fatalf("an expired press woke the step: %v", m.waker.calls)
 	}
 	out, err := m.actions.ResumeTask(m.ctx, m.task(), ref)
 	if err != nil {
@@ -623,15 +633,21 @@ func TestP9E2E009_AllowRuleMergesWithoutGate(t *testing.T) {
 	if _, _, err := m.store.ApplyRuleSet(m.ctx, workspaceA, rs, policy.CreatedByCLI, 0); err != nil {
 		t.Fatal(err)
 	}
-	out, err := m.actions.RunTask(m.ctx, m.task())
+	// Fix B (R-B-3): under allow the target must be named by an earlier task's evidence: repo#number and the full head SHA.
+	task := m.task()
+	task.Proofs = []string{"github:pr:acme/api#12\nbranch nexus/fix\nhead " + mgHead}
+	out, err := m.actions.RunTask(m.ctx, task)
 	if err != nil || !out.Succeeded {
 		t.Fatalf("%+v %v", out, err)
+	}
+	if want := "github:merge:acme/api#12:" + mgMergeSHA; len(out.Evidence) != 1 || out.Evidence[0].ID != want {
+		t.Fatalf("evidence %+v want %s", out.Evidence, want)
 	}
 	if _, merges := m.gh.state(); merges != 1 || m.gateRows(t) != 0 {
 		t.Fatalf("merges=%d gates=%d", merges, m.gateRows(t))
 	}
 	// The same task again replays.
-	if again, err := m.actions.RunTask(m.ctx, m.task()); err != nil || !again.Succeeded {
+	if again, err := m.actions.RunTask(m.ctx, task); err != nil || !again.Succeeded {
 		t.Fatalf("%+v %v", again, err)
 	}
 	if _, merges := m.gh.state(); merges != 1 {
@@ -740,22 +756,8 @@ func TestP9Merge_DryRunDoesNotConsumeGrant(t *testing.T) {
 	if m.reload(t, rec.ID).Consumed {
 		t.Fatal("a dry run consumed the approval")
 	}
-	// Dry run off again: the same approval still merges, once.
-	m.policies.set(func(c *tenant.AgentConfig) { c.Tools.DryRun = false })
-	m.build(mgOpts{})
-	// The dry run recorded its own run under the same key; a different task key keeps the real merge separate.
-	run := m.task()
-	run.Task.Key = "land-again"
-	out, err = m.actions.ResumeTask(m.ctx, run, ref)
-	if err != nil || !out.Succeeded {
-		t.Fatalf("%+v %v", out, err)
-	}
-	if _, merges := m.gh.state(); merges != 1 {
-		t.Fatalf("merges %d", merges)
-	}
-	if !m.reload(t, rec.ID).Consumed {
-		t.Fatal("the real merge did not consume the approval")
-	}
+	// The real merge after a dry run is not run here: the execution's dangerous-call budget of 1 is
+	// spent by the dry run by design (fix brief B), and an approval is bound to its execution.
 }
 
 // ---- presses ----------------------------------------------------------------
@@ -808,7 +810,10 @@ func TestP9Press_StaleCases(t *testing.T) {
 	if m.reload(t, rec.ID).Decision != behavior.DecisionApproved {
 		t.Fatal("the second press changed the decision")
 	}
-	// Double tap racing: exactly one wins.
+}
+
+// TC-PR-1b (REQ-10): a double tap racing: exactly one press wins. Own test (own environment): fix brief B, one DB environment per test.
+func TestP9Press_DoubleTapRace(t *testing.T) {
 	m2 := newMGEnv(t, mgOpts{})
 	rec2, _ := m2.ask(t)
 	var wg sync.WaitGroup
@@ -828,6 +833,12 @@ func TestP9Press_StaleCases(t *testing.T) {
 	wg.Wait()
 	if won != 1 {
 		t.Fatalf("%d presses won", won)
+	}
+	if got := m2.reload(t, rec2.ID); got.Decision != behavior.DecisionApproved {
+		t.Fatalf("gate %+v", got)
+	}
+	if len(m2.waker.calls) != 1 {
+		t.Fatalf("step woken %d times", len(m2.waker.calls))
 	}
 }
 
