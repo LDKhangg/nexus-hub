@@ -299,3 +299,26 @@ stored as sanitized rows (`orchestrator_plans`, `orchestrator_plan_tasks`,
 (`orchestrator.plan`, `.run_task`, `.evaluate`, `.report`) whose checkpoints
 carry the budget counters.
 
+
+## 8. Task topics and ClickUp drafts (Phase 10, NFR-034)
+
+Destination resolution: a ClickUp notice or a behavior report about a task
+asks `DestinationResolver.ForClickUpTask` first. If the workspace's forum chat
+has a `clickup_task` topic for the task, delivery goes there (a closed topic
+is reopened through the lifecycle path). Otherwise delivery goes to General.
+A Telegram rejection of the topic falls back to General once; it never picks
+another topic.
+
+`telegram_message_links` maps a sent Telegram message (workspace, integration,
+chat, message id) to a ClickUp task id and comment id. It holds ids only, never
+text, and rows are pruned after `message_link_retention_days`. A Telegram reply
+to a linked message gives the parent comment of a threaded reply.
+
+`clickup_drafts` holds the comment a person must confirm before the hub writes
+to ClickUp. States: `pending`, `posting`, `posted`, `cancelled`, `expired`,
+`failed` (retry allowed) and `failed_final` (no retry). The body is stored only
+while the draft can still be posted and is cleared in every terminal state; the
+draft keeps a body hash. Posting goes through the tool executor (policy, audit,
+idempotency key `draft:<id>`), so the model never writes to ClickUp directly:
+the `draft_clickup_comment` tool and the orchestrator's `clickup.write` task
+only create drafts.

@@ -1568,6 +1568,110 @@ reports and dedupe behave as before.
 - Wall time is checked when the execution wakes, so an execution may run a
   little past its cap before it stops.
 
+## Task topics and ClickUp replies (Phase 10)
+
+Phase 10 puts the life of one ClickUp task in one Telegram topic, and lets you
+answer in ClickUp from that topic. It needs the Telegram topics of Phase 6b.
+
+### The flow
+
+1. A notice about a ClickUp task arrives in General with the
+   **📌 Mở topic task** button (see "Notices in General, task topic on demand").
+2. Press it. The hub opens the task's topic (or reuses it).
+3. From then on, ClickUp activity on that task goes to the topic, not to
+   General: a comment, a threaded reply, a status change and an assignee
+   change. Each message shows who, what kind of event, and the text or the
+   change. Comment text is shown as untrusted text.
+4. A task without a topic behaves as before: its notices stay in General.
+5. A behavior run about that task whose `report.topic` is `general` also
+   reports into the topic. Fixed topics (for example `PR approve`) and
+   workflow topics do not change.
+6. A closed topic is reopened when new activity arrives. If Telegram says the
+   topic no longer exists, the message goes to General once with the
+   **📌 Mở topic task** button. It never goes to another topic.
+
+Not shown in the topic: comments the hub posted itself, and a comment that
+started a behavior run (the run's own report covers it). A redelivered
+webhook gives no second message. Inside a task topic,
+`notice_mentions_only` does not filter: you see all activity of that task.
+
+### The hub always asks before it writes to ClickUp
+
+Every comment the hub writes on your behalf is a draft first. The draft is
+shown in the task topic as an exact preview with these buttons:
+
+- **Đăng**: posts the text once. The preview becomes "✅ Đã đăng lên
+  ClickUp" with a link to the task.
+- **Sửa**: press it, then reply to the preview with the new text. A new
+  preview appears and the old buttons stop working.
+- **Huỷ**: posts nothing.
+- **Thử lại**: shown only after a failed post that is safe to retry.
+
+A second press, a press on an old preview, or a press by anyone but the owner
+does nothing. A draft that you do not decide expires (setting below) and posts
+nothing. The text is deleted from the database once the draft is posted,
+cancelled or expired. A failed post shows "❌ Không đăng được: <reason code>".
+
+### Ask the assistant to draft a comment
+
+In a task topic, write to the assistant as usual:
+
+- "comment lên task là ..." drafts a comment on that task.
+- "tag anh X hỏi deadline": the assistant resolves the name through the
+  people directory (section 11) and tags the person (up to 5 people). An
+  unknown or ambiguous name gets a question back, never a guess.
+- "đổi status sang review": the draft sets the status after the comment.
+- Reply to a Telegram message that shows a ClickUp comment: the draft becomes
+  a threaded reply to that comment.
+
+The assistant only makes the draft. It never posts. Outside a task topic it
+needs an explicit task id or URL.
+
+### Post a task result: 📤 Đăng lên ClickUp
+
+When a `/task` or `/plan` execution on a ClickUp task ends (completed or
+failed), its final report in the topic has the **📤 Đăng lên ClickUp** button.
+Press it to get a draft with the summary and the artifact links (PR URL,
+branch). Then press **Đăng** as above. A failed or cancelled post never
+changes the state of the execution. An orchestrated plan that includes a
+`clickup.write` task also creates a draft and waits for your decision.
+
+### When the outcome is unknown
+
+If the hub cannot tell whether ClickUp received a comment (for example a
+timeout after the request was sent), the preview shows "❌ Không đăng được:
+unknown_outcome" without **Thử lại**. The hub never retries by itself, so it
+cannot post twice. Open the task in ClickUp and check by hand whether the
+comment is there. The same applies to a dry run or a denied post: no retry
+button, the draft is over.
+
+### Settings
+
+| Setting | Default | Range | Meaning |
+|---|---|---|---|
+| `message_link_retention_days` | 30 | 1 to 3650 | How long the hub remembers which Telegram message shows which ClickUp comment (needed for "reply to a comment"). Older links are pruned hourly. |
+| `clickup_draft_expiry_hours` | 24 | 1 to 168 | How long a draft waits for your decision before it expires. |
+
+### Migrations
+
+Run `goose … up` after the update: `00031` (`telegram_message_links`),
+`00032` (`clickup_drafts`), `00033` (workflow state `WAITING_FOR_WORKER`) and
+`00034` (draft state `failed_final`).
+
+### Live checks still open
+
+These facts are unconfirmed against the real ClickUp until checked once:
+
+- U1: tags inside threaded replies, and whether a tagged person is notified
+  when the comment is sent with `notify_all: false`. Also the exact comment
+  request shape.
+- U2: the webhook shape of a threaded reply (which field carries the parent
+  comment id).
+- U3: the task link shown after posting. The fallback is
+  `https://app.clickup.com/t/<task id>`.
+
+`nh telegram topics` is unchanged by Phase 10.
+
 ## Upkeep
 
 - Updates: `git pull`, rebuild both binaries, run `goose … up`, then
