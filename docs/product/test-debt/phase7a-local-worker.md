@@ -1,6 +1,6 @@
 # Test debt — Phase 7a local worker
 
-Status: OPEN.
+Status: PARTLY CLOSED 2026-11-18 — TD-7A-2..4 paid in Phase 7b Batch A (tests 43be7fa, CI 44042781670); TD-7A-1 (live laptop check) stays open with the owner.
 
 - Code head: `c85e9ca` on `feature/phase7a` (CI 44009727911 green, Review APPROVE).
 - Unproven (open):

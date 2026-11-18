@@ -1,6 +1,6 @@
 # Test debt — hotfix task topic names
 
-Status: OPEN.
+Status: CLOSED 2026-11-18 (Phase 7b Batch A: tests 43be7fa, CI 44042781670 green) — TD-TT-1..7 paid.
 
 - Code head: `92f7920` on `hotfix/task-topic-names`. The owner skipped the Tester and the Reviewer for this hotfix (2026-11-17); only the existing suite ran in CI.
 - Unproven (open), plan `docs/plans/2026-11-17-hotfix-task-topics.md`:

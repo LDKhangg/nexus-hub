@@ -54,24 +54,24 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | FR-040 | Hỗ trợ cancel, resume, status và list từ conversation. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988 |
 | FR-041 | Không trộn context của hai workflow độc lập. | 6 | VERIFIED | Phase 6: Test PASS (CI 43670776642, 1258 tests, 0 skip) + Review APPROVE on feature/phase6 52af5e0; merged d7e4988; Phase 6b: Test PASS (CI 43823427615) + Review APPROVE on feature/phase6b 6b514c8: per-topic conversations and topic-aware follow-up resolution |
 | FR-042 | Có cơ chế giới hạn và tóm tắt context khi cần. | 2, 6, 6a | IN_PROGRESS | Phase 2: rolling summary + packet budget; Phase 6: persisted conversation summary ≤2,000 bytes, 8 KiB instruction block (52af5e0); Phase 6a: assistant history = summary + last N, cached (8bd07d9) |
-| FR-043 | Intent classification. | 2, 7b, 6a | IN_PROGRESS | Phase 2: Tier-1 triage categories; Phase 6a: assistant router answer/work/deep (8bd07d9) |
-| FR-044 | Task type classification. | 7b | PENDING |  |
-| FR-045 | Task priority proposal. | 2, 7b | IN_PROGRESS | Phase 2: urgency in triage |
-| FR-046 | Complexity estimation. | 7b | PENDING |  |
-| FR-047 | Capability requirements. | 7b | PENDING |  |
-| FR-048 | Execution plan generation. | 7b | PENDING |  |
-| FR-049 | Worker selection recommendation. | 7b | PENDING |  |
-| FR-050 | Task decomposition. | 7b | PENDING |  |
-| FR-051 | Result evaluation. | 7b | PENDING |  |
-| FR-052 | Next-action recommendation. | 7b | PENDING |  |
-| FR-053 | Clarification request generation. | 7b | PENDING |  |
-| FR-054 | Plan revision. | 7b | PENDING |  |
-| FR-055 | Structured outputs và schema validation. | 2, 7b | IN_PROGRESS | Phase 2: triage JSON validated |
-| FR-056 | Configurable reasoning/iteration budget. | 2, 7b, 6a | IN_PROGRESS | Phase 2: token budget, step limit; Phase 6a: fast/work/deep model settings, history turns (8bd07d9) |
+| FR-043 | Intent classification. | 2, 7b, 6a | IN_PROGRESS | Phase 2: Tier-1 triage categories; Phase 6a: assistant router answer/work/deep (8bd07d9); Phase 7b: Tier-1 triage through Classify (classify@2) (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
+| FR-044 | Task type classification. | 7b | DONE | Phase 7b: Classify task type (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
+| FR-045 | Task priority proposal. | 2, 7b | IN_PROGRESS | Phase 2: urgency in triage; Phase 7b: Classify priority (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
+| FR-046 | Complexity estimation. | 7b | DONE | Phase 7b: Classify complexity (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
+| FR-047 | Capability requirements. | 7b | DONE | Phase 7b: plan task capabilities, Go-checked (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
+| FR-048 | Execution plan generation. | 7b | DONE | Phase 7b: Plan with Go checks, /plan + start_task (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
+| FR-049 | Worker selection recommendation. | 7b | DONE | Phase 7b: least-privilege executor matching, repo.write → 7a worker (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
+| FR-050 | Task decomposition. | 7b | DONE | Phase 7b: decomposition with dependencies (DAG) (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
+| FR-051 | Result evaluation. | 7b | DONE | Phase 7b: Evaluate with evidence refs (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
+| FR-052 | Next-action recommendation. | 7b | DONE | Phase 7b: 7 decisions + next action (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
+| FR-053 | Clarification request generation. | 7b | DONE | Phase 7b: REQUEST_CLARIFICATION bound to WF-n (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
+| FR-054 | Plan revision. | 7b | DONE | Phase 7b: REPLAN v+1, finished tasks carried (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
+| FR-055 | Structured outputs và schema validation. | 2, 7b | IN_PROGRESS | Phase 2: triage JSON validated; Phase 7b: versioned JSON schemas + bounded repair (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
+| FR-056 | Configurable reasoning/iteration budget. | 2, 7b, 6a | IN_PROGRESS | Phase 2: token budget, step limit; Phase 6a: fast/work/deep model settings, history turns (8bd07d9); Phase 7b: per-execution budgets, O4a gate (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
 | FR-057 | Worker registry. | 7a, 8 | IN_PROGRESS | Phase 7a: device enrollment, hashed tokens, revoke (c85e9ca, CI 44009727911; live laptop check pending) |
 | FR-058 | Worker capability profiles. | 7a, 8 | IN_PROGRESS | Phase 7a: device capability profiles (c85e9ca, CI 44009727911; live laptop check pending) |
 | FR-059 | Worker availability tracking. | 7a, 8 | IN_PROGRESS | Phase 7a: presence, offline after 90 s, telemetry card (c85e9ca, CI 44009727911; live laptop check pending) |
-| FR-060 | Worker task assignment. | 7a, 8 | IN_PROGRESS | Phase 7a: lease protocol, /task → local-task worker.run (c85e9ca, CI 44009727911; live laptop check pending) |
+| FR-060 | Worker task assignment. | 7a, 8 | IN_PROGRESS | Phase 7a: lease protocol, /task → local-task worker.run (c85e9ca, CI 44009727911; live laptop check pending); Phase 7b: DELEGATE → 7a worker job (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
 | FR-061 | Isolated working directories. | 7a, 8 | IN_PROGRESS | Phase 7a: per-job git worktree on the laptop (c85e9ca, CI 44009727911; live laptop check pending) |
 | FR-062 | Tool permission enforcement. | 2, 8 | IN_PROGRESS | Phase 2: tiered tool policy executor |
 | FR-063 | Execution timeout. | 2, 7a, 8 | IN_PROGRESS | Phase 2: tool timeouts; Phase 7a: 60 min wall, turn limit, test timeout, sleep inhibitor (c85e9ca, CI 44009727911; live laptop check pending) |
@@ -218,7 +218,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | NFR-031 | Health/readiness endpoints. | 3 | PENDING |  |
 | NFR-032 | Có cảnh báo hoặc notification cho stuck/failed workflows. | 12 | PENDING |  |
 | NFR-033 | Có README. | 3 | PENDING |  |
-| NFR-034 | Có architecture documentation. | every | IN_PROGRESS | docs/architecture.md predates PCC; ROADMAP.md added; Phase 6 runbook section |
+| NFR-034 | Có architecture documentation. | every | IN_PROGRESS | docs/architecture.md predates PCC; ROADMAP.md added; Phase 6 runbook section; Phase 7b: docs/architecture.md §7 AIRuntime boundary (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending) |
 | NFR-035 | Có database migrations. | 3 | IN_PROGRESS | goose migrations 00001–00003 |
 | NFR-036 | Có OpenAPI hoặc tài liệu API tương đương. | 11 | PENDING |  |
 | NFR-037 | Có automated tests. | 3 | IN_PROGRESS | Go tests exist; CI missing (P3) |
