@@ -555,7 +555,9 @@ func TestP10FixA_ClaimAfterExecutionEndedIsStale(t *testing.T) {
 
 	e.store.execEnded[12] = true
 	toast, code, remove := e.press(CallbackApprove, pPost, pMsg)
-	if toast != msgDraftStale || code != "stale" || !remove {
+	// R-A-4: the pending draft is still open on that message, so its live
+	// buttons stay until the sweep cancels the draft.
+	if toast != msgDraftStale || code != "stale" || remove {
 		t.Fatalf("pending press: %q %q %v", toast, code, remove)
 	}
 	if _, code, _ := e.press(CallbackApprove, retry, fEdit.msgID); code != "stale" {
@@ -576,6 +578,9 @@ func TestP10FixA_ClaimAfterExecutionEndedIsStale(t *testing.T) {
 		if d := e.draft(t, id); d.State != DraftCancelled {
 			t.Fatalf("draft %d: %+v", id, d)
 		}
+	}
+	if ed, ok := e.msg.editOf(pMsg); !ok || len(ed.buttons) != 0 {
+		t.Fatalf("the cancelled draft's preview must be edited with no buttons: %+v %v", ed, ok)
 	}
 
 	// A past deadline counts like an ended execution.

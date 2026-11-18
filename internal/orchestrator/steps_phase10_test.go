@@ -398,3 +398,62 @@ func TestP10Executor_InputsCarryDependencySummaries(t *testing.T) {
 		t.Fatalf("inputs %q", in)
 	}
 }
+
+// p10FinalOwner is an Owner that also implements FinalSayer.
+type p10FinalOwner struct {
+	*shOwner
+	finals []string
+}
+
+func (o *p10FinalOwner) SayFinal(_ context.Context, _ Route, text string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.finals = append(o.finals, text)
+	return nil
+}
+
+func p10CompleteRun(t *testing.T, h *shH) {
+	t.Helper()
+	h.plan("EXECUTE", shRead("a", "First"))
+	h.eval("COMPLETE", "done")
+	if key, _, err := h.flow(); key != "" || err != nil {
+		t.Fatalf("flow stopped at %q: %v", key, err)
+	}
+}
+
+// P10-B (REQ-9): an Owner that implements FinalSayer gets the final report
+// through SayFinal, and only through it.
+func TestP10Report_FinalReportUsesSayFinal(t *testing.T) {
+	h := newSH(t)
+	o := &p10FinalOwner{shOwner: h.owner}
+	h.s.Owner = o
+	p10CompleteRun(t, h)
+	o.mu.Lock()
+	finals := append([]string(nil), o.finals...)
+	said := append([]string(nil), o.said...)
+	o.mu.Unlock()
+	if len(finals) != 1 || !strings.Contains(finals[0], "WF-1: hoàn tất") {
+		t.Fatalf("SayFinal got %q", finals)
+	}
+	for _, s := range said {
+		if strings.Contains(s, "hoàn tất") {
+			t.Fatalf("the final report also went through Say: %q", s)
+		}
+	}
+	if len(said) == 0 {
+		t.Fatal("the plan message should still use Say")
+	}
+}
+
+// P10-B (REQ-9): an Owner without FinalSayer still gets the final report
+// through Say.
+func TestP10Report_OwnerWithoutFinalSayerUsesSay(t *testing.T) {
+	h := newSH(t)
+	if _, ok := Owner(h.owner).(FinalSayer); ok {
+		t.Fatal("the plain test owner must not implement FinalSayer")
+	}
+	p10CompleteRun(t, h)
+	if !strings.Contains(h.owner.lastSaid(), "WF-1: hoàn tất") {
+		t.Fatalf("last said %q", h.owner.lastSaid())
+	}
+}
