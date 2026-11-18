@@ -619,7 +619,9 @@ func (e *Engine) expired(ctx context.Context, a Approval) {
 	default:
 		log.Printf("behavior run %d item %d corr=%s: approval %d expired", run.ID, a.ItemID, run.CorrelationID, a.ID)
 	}
-	if a.TelegramMessageID == 0 || a.Kind == ApprovalFeedback || a.Kind == ApprovalFeedbackReason {
+	// A ClickUp draft's preview lives in its own chat and topic; the draft
+	// sweep edits it (ClickUpDrafts.Sweep).
+	if a.TelegramMessageID == 0 || a.Kind == ApprovalFeedback || a.Kind == ApprovalFeedbackReason || a.Kind == ApprovalClickUpDraft {
 		return
 	}
 	chat, err := e.d.Chats.OwnerChat(ctx, a.WorkspaceID, TriggerData{})

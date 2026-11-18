@@ -54,6 +54,7 @@ type Settings struct {
 	TelegramCommandTopic                  string        // fixed topic name handled like General; empty: none
 	TopicCloseStatuses                    string        // comma-separated ClickUp status names that close a task topic
 	MessageLinkRetentionDays              int64         // days a Telegram message to ClickUp comment link is kept
+	ClickUpDraftExpiryHours               int64         // hours a ClickUp draft waits for the owner's confirm
 	AssistantModel                        string        // the Telegram assistant's default Claude model id
 	AssistantFastModel                    string        // the Telegram assistant's fast Claude model id
 	AssistantDeepModel                    string        // the Telegram assistant's deep Claude model id
@@ -178,6 +179,7 @@ var specs = map[string]spec{
 	"orchestrator_max_tokens":          {kind: kInt, def: int64(80000), min: 1000, max: 2_000_000, set: func(s *Settings, v any) { s.OrchestratorMaxTokens = v.(int64) }},
 	"orchestrator_max_wall_minutes":    {kind: kInt, def: int64(90), min: 1, max: 1440, set: func(s *Settings, v any) { s.OrchestratorMaxWallMinutes = v.(int64) }},
 	"message_link_retention_days":      {kind: kInt, def: int64(30), min: 1, max: 3650, set: func(s *Settings, v any) { s.MessageLinkRetentionDays = v.(int64) }},
+	"clickup_draft_expiry_hours":       {kind: kInt, def: int64(24), min: 1, max: 168, set: func(s *Settings, v any) { s.ClickUpDraftExpiryHours = v.(int64) }},
 	"telegram_command_topic":           {kind: kTopicName, def: "", set: func(s *Settings, v any) { s.TelegramCommandTopic = v.(string) }},
 	"telegram_mode":                    {kind: kEnum, def: TelegramModeAuto, enum: []string{TelegramModeAuto, TelegramModeWebhook, TelegramModePoll}, set: func(s *Settings, v any) { s.TelegramMode = v.(string) }},
 }

@@ -248,6 +248,45 @@ func buildBehaviorEngine(pool *pgxpool.Pool, s settings.Settings, store *storage
 	return runs, engine, nil
 }
 
+// buildClickUpDrafts wires the ClickUp draft-and-confirm flow (Phase 10
+// REQ-7): drafts and their audit rows in PostgreSQL, the approval store for
+// the preview buttons, the workspace's ClickUp source credential and policy,
+// and the task link shown after posting. Nothing posts without "Đăng".
+func buildClickUpDrafts(pool *pgxpool.Pool, s settings.Settings, approvals behavior.ApprovalStore, integrations *storage.IntegrationRepository, ag agentServices, redactor *agent.Redactor, resolver *secrets.Resolver, messenger behavior.Messenger) (*behavior.ClickUpDrafts, error) {
+	store, err := storage.NewClickUpDraftStore(pool)
+	if err != nil {
+		return nil, errors.New("clickup draft store startup failed")
+	}
+	audit, err := storage.NewClickUpDraftToolRunStore(pool)
+	if err != nil {
+		return nil, errors.New("clickup draft tool run store startup failed")
+	}
+	policies := behaviorPolicies{integrations: integrations, known: ag.known}
+	reader := clickuptools.NewTaskReader(netguard.Client(s.ToolTimeout, netguard.DefaultHosts), resolver)
+	drafts, err := behavior.NewClickUpDrafts(behavior.ClickUpDraftDeps{
+		Store: store, Approvals: approvals, Messenger: messenger, Policies: policies,
+		Callers: behavior.DraftExecutorFactory(ag.reg, audit, redactor, ag.limits),
+		People:  ag.people, Redactor: redactor,
+		TaskURL: func(ctx context.Context, workspaceID, taskID string) string {
+			cfg, err := policies.RunPolicy(ctx, workspaceID, "")
+			if err != nil {
+				return ""
+			}
+			st, err := reader.ReadTask(ctx, workspaceID, cfg.ClickUpTokenRef, taskID)
+			if err != nil {
+				return ""
+			}
+			return st.URL
+		},
+	}, behavior.ClickUpDraftSettings{
+		Expiry: time.Duration(s.ClickUpDraftExpiryHours) * time.Hour, RequestTimeout: s.NoticeRequestTimeout,
+	})
+	if err != nil {
+		return nil, errors.New("clickup drafts startup failed")
+	}
+	return drafts, nil
+}
+
 // taskReader adapts the ClickUp exact task reader to the engine.
 type taskReader struct{ r *clickuptools.TaskReader }
 

@@ -97,6 +97,9 @@ type InboxDeps struct {
 	// OrchestratorPlans adds the plan, task, decision and budget lines to
 	// /status of an orchestrated execution. Optional.
 	OrchestratorPlans OrchestratorPlanReader
+	// ClickUpDrafts backs the "Đăng" / "Sửa" / "Huỷ" / "Thử lại" buttons
+	// and the edit replies of ClickUp drafts. Nil answers "not available".
+	ClickUpDrafts ClickUpDraftHandler
 }
 
 // InboxWorker processes stored Telegram updates: built-in commands,
@@ -551,6 +554,20 @@ func (w *InboxWorker) decideCallback(ctx context.Context, u InboundUpdate, to Ch
 		}
 		return w.orchestratorGateCallback(ctx, u, data, a, actor)
 	}
+	if a.Kind == ApprovalClickUpDraft {
+		if a.Decision != "" || !w.now().Before(a.ExpiresAt) {
+			return msgStale, "stale", true
+		}
+		if w.d.ClickUpDrafts == nil {
+			return msgNotAvailable, "not_available", false
+		}
+		hctx, cancel := context.WithTimeout(ctx, w.settings.HandlerTimeout)
+		defer cancel()
+		return w.d.ClickUpDrafts.HandleDraftPress(hctx, DraftPress{
+			WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, MessageID: msgID,
+			Kind: data.Kind, Approval: a, Actor: actor,
+		})
+	}
 	if data.Kind.Decides() && (a.Decision != "" || !w.now().Before(a.ExpiresAt)) {
 		return msgStale, "stale", true
 	}
@@ -598,10 +615,21 @@ func (w *InboxWorker) freeText(ctx context.Context, u InboundUpdate, to ChatRef,
 		return w.reply(ctx, to, msgNoAnswer, "no_pending_answer")
 	}
 	hctx, cancel := context.WithTimeout(ctx, w.settings.HandlerTimeout)
-	reply, err := w.d.Callbacks.HandleFreeText(hctx, FreeTextAnswer{
-		WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, ThreadID: u.ThreadID,
-		Approval: a, Answer: a.PendingAnswer, Actor: actor, CorrelationID: corr,
-	})
+	var reply string
+	switch {
+	case a.Kind == ApprovalClickUpDraft && w.d.ClickUpDrafts == nil:
+		err = ErrNotAvailable
+	case a.Kind == ApprovalClickUpDraft:
+		reply, err = w.d.ClickUpDrafts.HandleDraftReply(hctx, DraftReply{
+			WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID,
+			Approval: a, Text: a.PendingAnswer, Actor: actor,
+		})
+	default:
+		reply, err = w.d.Callbacks.HandleFreeText(hctx, FreeTextAnswer{
+			WorkspaceID: u.WorkspaceID, IntegrationID: u.IntegrationID, ChatID: u.ChatID, ThreadID: u.ThreadID,
+			Approval: a, Answer: a.PendingAnswer, Actor: actor, CorrelationID: corr,
+		})
+	}
 	cancel()
 	text, code := handlerText(reply, err)
 	// Handed on or refused: the staged text is never kept for a retry.

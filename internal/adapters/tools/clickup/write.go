@@ -362,44 +362,106 @@ func runBlock(ctx context.Context, c client, token string, call tools.Call) (too
 
 // --- clickup_post_comment ---
 
+// maxMentions caps the users one comment tags.
+const maxMentions = 5
+
+// Request shapes (ClickUp API v2, read 2026-11-18):
+//   - Create Task Comment, POST /api/v2/task/{task_id}/comment
+//     (https://developer.clickup.com/reference/createtaskcomment): body
+//     fields comment_text, notify_all, assignee, group_assignee; response
+//     {"id","hist_id","date"}. notify_all only decides whether the
+//     comment's creator is notified; assignees and watchers always are.
+//   - Create Threaded Comment, POST /api/v2/comment/{comment_id}/reply
+//     (https://developer.clickup.com/reference/createthreadedcomment): the
+//     same body as Create Task Comment; the response shape is not
+//     documented, so an id is read when present.
+//   - Tagging people (https://developer.clickup.com/docs/comment-formatting,
+//     "Tag people in task comments"): a structured "comment" array of parts,
+//     {"text": "..."} and {"type": "tag", "user": {"id": <number>}}, used
+//     instead of comment_text.
+//
+// Not confirmed by the docs (U1, live check): whether a tag notifies the
+// person when notify_all is false (the tag is the documented @mention, so
+// it is expected to), and whether tags work in threaded replies.
 var commentSpec = tools.ToolSpec{
-	Name:        "clickup_post_comment",
-	Description: "Post a plain-text comment on a ClickUp task without notifying everyone.",
+	Name: "clickup_post_comment",
+	Description: "Post a plain-text comment on a ClickUp task without notifying everyone. With parent_comment_id it is a " +
+		"threaded reply to that comment; mention_user_ids (ClickUp user IDs, at most 5) tag those people after the text.",
 	InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{` +
-		`"task_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,64}$"},"text":{"type":"string","minLength":1,"maxLength":8000}},` +
+		`"task_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,64}$"},"text":{"type":"string","minLength":1,"maxLength":8000},` +
+		`"parent_comment_id":{"type":"string","pattern":"^[0-9]{1,20}$"},` +
+		`"mention_user_ids":{"type":"array","maxItems":5,"uniqueItems":true,"items":{"type":"string","pattern":"^[0-9]{1,20}$"}}},` +
 		`"required":["task_id","text"]}`),
 	Tier: tenant.TierWrite,
 }
 
 type commentInput struct {
-	TaskID string `json:"task_id"`
-	Text   string `json:"text"`
+	TaskID          string   `json:"task_id"`
+	Text            string   `json:"text"`
+	ParentCommentID *string  `json:"parent_comment_id"`
+	MentionUserIDs  []string `json:"mention_user_ids"`
 }
 
-func parseCommentInput(raw json.RawMessage) (commentInput, error) {
+func parseCommentInput(raw json.RawMessage) (commentInput, []int64, error) {
 	var in commentInput
 	if err := decodeStrict(raw, &in); err != nil {
-		return in, err
+		return in, nil, err
 	}
 	if !taskIDRe.MatchString(in.TaskID) || strings.TrimSpace(in.Text) == "" || !utf8.ValidString(in.Text) ||
 		utf8.RuneCountInString(in.Text) > maxCommentRunes {
-		return in, toolErr("invalid_input", false)
+		return in, nil, toolErr("invalid_input", false)
 	}
-	return in, nil
+	if in.ParentCommentID != nil && !userIDRe.MatchString(*in.ParentCommentID) {
+		return in, nil, toolErr("invalid_input", false)
+	}
+	if len(in.MentionUserIDs) > maxMentions {
+		return in, nil, toolErr("invalid_input", false)
+	}
+	ids := make([]int64, 0, len(in.MentionUserIDs))
+	seen := map[int64]bool{}
+	for _, s := range in.MentionUserIDs {
+		if !userIDRe.MatchString(s) {
+			return in, nil, toolErr("invalid_input", false)
+		}
+		id, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || id <= 0 || seen[id] {
+			return in, nil, toolErr("invalid_input", false)
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	return in, ids, nil
 }
 
 func checkCommentInput(raw json.RawMessage) error {
-	_, err := parseCommentInput(raw)
+	_, _, err := parseCommentInput(raw)
 	return err
 }
 
+// commentBody is the request body: plain comment_text without tags (the
+// shape used before Phase 10), otherwise the structured comment array with
+// the text first and one tag per user after it.
+func commentBody(text string, mentions []int64) map[string]any {
+	if len(mentions) == 0 {
+		return map[string]any{"comment_text": text, "notify_all": false}
+	}
+	parts := []map[string]any{{"text": text}}
+	for _, id := range mentions {
+		parts = append(parts, map[string]any{"text": " "}, map[string]any{"type": "tag", "user": map[string]any{"id": id}})
+	}
+	return map[string]any{"comment": parts, "notify_all": false}
+}
+
 func runComment(ctx context.Context, c client, token string, call tools.Call) (tools.ToolOutput, error) {
-	in, err := parseCommentInput(call.Input)
+	in, mentions, err := parseCommentInput(call.Input)
 	if err != nil {
 		return tools.ToolOutput{}, err
 	}
-	data, err := c.do(ctx, token, http.MethodPost, "/api/v2/task/"+in.TaskID+"/comment",
-		map[string]any{"comment_text": in.Text, "notify_all": false}, true)
+	path := "/api/v2/task/" + in.TaskID + "/comment"
+	if in.ParentCommentID != nil {
+		path = "/api/v2/comment/" + *in.ParentCommentID + "/reply"
+	}
+	data, err := c.do(ctx, token, http.MethodPost, path, commentBody(in.Text, mentions), true)
 	if err != nil {
 		return tools.ToolOutput{}, err
 	}
