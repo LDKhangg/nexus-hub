@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
@@ -333,6 +334,12 @@ type TaskRun struct {
 	// (summary, PR URL, branch; untrusted text), one line each, in
 	// dependency order. Executors pass them only as data.
 	Inputs []string
+	// Proofs are the evidence of the execution's other succeeded tasks, one
+	// entry per task: its evidence refs and stored result fields (job id,
+	// branch, PR URL, summary) joined by newlines. A github.merge task run
+	// under policy effect allow merges only a target named here (review B
+	// R-B-3).
+	Proofs []string
 }
 
 // TaskOutcome is an in-process executor's structured result. Evidence must
@@ -438,12 +445,45 @@ type Steps struct {
 // profile when Jobs is set). Unwired executors' capabilities are never
 // offered.
 func (s *Steps) offeredCapabilities() []string {
-	return s.Registry.CapabilitiesFor(func(p ExecutorProfile) bool {
+	caps := s.Registry.CapabilitiesFor(func(p ExecutorProfile) bool {
 		if p.Worker {
 			return s.Jobs != nil
 		}
 		return s.Executors[p.Name] != nil
 	})
+	// A capability whose only wired executors decline it (CapabilityOfferer)
+	// is not offered.
+	out := caps[:0:0]
+	for _, c := range caps {
+		if s.offers(c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// offers reports whether some wired profile covering c can run it.
+func (s *Steps) offers(c string) bool {
+	for _, p := range s.Registry.Profiles() {
+		if !slices.Contains(p.Capabilities, c) {
+			continue
+		}
+		if p.Worker {
+			if s.Jobs != nil {
+				return true
+			}
+			continue
+		}
+		ex := s.Executors[p.Name]
+		if ex == nil {
+			continue
+		}
+		if o, ok := ex.(CapabilityOfferer); ok && !o.Offers(c) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func (s *Steps) now() time.Time {

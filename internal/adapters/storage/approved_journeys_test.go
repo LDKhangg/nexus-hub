@@ -121,7 +121,7 @@ func TestApproved_DurableVietnameseRoutesAndDeliveryRecovery(t *testing.T) {
 			llm := &approvedJourneyLLM{mode: mode, secret: values[3]}
 			orch := agent.NewOrchestrator(e.store, func(context.Context, string) (agent.Triager, agent.Investigator, error) {
 				return agent.NewTier1Router(llm, "triage"), agent.NewTier2Actor(llm, "actor"), nil
-			}, reg, runs, red, nil, agent.OrchestratorSettings{PollInterval: 5 * time.Millisecond, Limits: tools.DefaultLimits(), MaxInputTokens: 60000, MaxOutputTokens: 6000})
+			}, reg, runs, red, nil, agent.OrchestratorSettings{PollInterval: 5 * time.Millisecond, Limits: tools.DefaultLimits(), MaxInputTokens: 60000, MaxOutputTokens: 6000, Policy: gateAllowAll})
 			var mu sync.Mutex
 			var texts []string
 			sender := telegram.NewClient(&http.Client{Transport: fakeTelegramTransport(func(req *http.Request) (*http.Response, error) {

@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	nhpolicy "github.com/LDKhangg/nexus-hub/internal/policy"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
 
@@ -27,6 +28,102 @@ const (
 	StatusUnknownOutcome = "unknown_outcome"
 	StatusDryRun         = "dry_run"
 )
+
+// Denial codes of the policy gate (tool_runs.error_code).
+const (
+	// DenyPolicyDenied: the policy engine denied the action, or no engine
+	// is configured (fail safe).
+	DenyPolicyDenied = "policy_denied"
+	// DenyApprovalRequired: the rule requires the owner's approval and the
+	// call carried no approval grant. Nothing ran.
+	DenyApprovalRequired = "approval_required"
+	// DenyRevalidateDenied: the call carried an approval grant, but the
+	// grant did not verify or the re-check right before the side effect
+	// denied it (FR-130). Nothing ran.
+	DenyRevalidateDenied = "revalidate_denied"
+)
+
+// approvalRequiredText is the tool result the model gets for an action that
+// waits for the owner's approval.
+const approvalRequiredText = "denied: approval_required (the owner must approve this action first; nothing was done)"
+
+// PolicyGate is the policy engine as the executor sees it
+// (policy.Engine). Decide always returns a usable decision; its error is
+// for logging only.
+type PolicyGate interface {
+	Decide(ctx context.Context, req nhpolicy.Request) (nhpolicy.Decision, error)
+}
+
+// ApprovalGrant names an approval of kind policy_gate that the owner
+// approved for one exact action. Only trusted hub code (an orchestrator
+// action resuming after the owner's decision) puts it in a call context;
+// the context value alone never authorizes: the store verifies and
+// consumes it in the tool run's Begin transaction.
+type ApprovalGrant struct{ ApprovalID int64 }
+
+type approvalGrantKey struct{}
+
+// WithApprovalGrant returns ctx carrying g.
+func WithApprovalGrant(ctx context.Context, g ApprovalGrant) context.Context {
+	return context.WithValue(ctx, approvalGrantKey{}, g)
+}
+
+// ApprovalGrantFrom returns the grant ctx carries, if any.
+func ApprovalGrantFrom(ctx context.Context) (ApprovalGrant, bool) {
+	g, ok := ctx.Value(approvalGrantKey{}).(ApprovalGrant)
+	return g, ok && g.ApprovalID > 0
+}
+
+// GrantCheck is what an approval grant must match: an approved, unexpired,
+// unconsumed policy_gate of this workspace for this action, resource key,
+// input hash and execution (0 = none).
+type GrantCheck struct {
+	ApprovalID  int64
+	WorkspaceID string
+	Action      string
+	ResourceKey string
+	InputSHA256 string
+	ExecutionID int64
+	// VerifyOnly checks the grant without consuming it (a dry run: nothing
+	// runs, so the approval stays usable for the real call).
+	VerifyOnly bool
+}
+
+// ErrGrantInvalid is returned by BeginGranted when the grant does not
+// verify; nothing was recorded or consumed.
+var ErrGrantInvalid = errors.New("tools: approval grant invalid")
+
+// GrantedRunStore is optionally implemented by a ToolRunStore. BeginGranted
+// is Begin for a call under an approval grant: in one transaction it
+// replays a prior run of the same key (without touching the grant), or
+// verifies the grant, marks it consumed and records the started run. A
+// store without it cannot run approved calls (they are denied).
+type GrantedRunStore interface {
+	BeginGranted(ctx context.Context, r RunStart, g GrantCheck) (runID int64, prior *PriorRun, err error)
+}
+
+// ResourceKeyer is optionally implemented by a tool to name the resource a
+// call targets for the policy engine (printable ASCII, no spaces, at most
+// nhpolicy.MaxResourceKeyBytes). Without it the executor builds the key from
+// the input's repo, number and task_id fields.
+type ResourceKeyer interface {
+	ResourceKey(input json.RawMessage) string
+}
+
+// Option configures an Executor.
+type Option func(*Executor)
+
+// WithPolicy sets the policy engine and the actor kind (nhpolicy.Actor*) the
+// executor asks it as. Without a gate every non-read call is denied.
+func WithPolicy(gate PolicyGate, actorKind string) Option {
+	return func(e *Executor) { e.gate, e.actorKind = gate, actorKind }
+}
+
+// WithExecutionID binds the executor's calls to a workflow execution: the
+// policy decisions name it and an approval grant must match it.
+func WithExecutionID(id int64) Option {
+	return func(e *Executor) { e.executionID = id }
+}
 
 // InvalidToolName is stored in the audit trail instead of a tool name that
 // is not registered.
@@ -105,14 +202,16 @@ type CallResult struct {
 
 // Executor enforces the tool policy for one agent job.
 type Executor struct {
-	reg            *Registry
-	policy         tenant.ToolPolicyConfig
-	limits         Limits
-	allowDangerous bool
-	store          ToolRunStore
-	san            Sanitizer
-	jobID          int64
-	workspaceID    string
+	reg         *Registry
+	policy      tenant.ToolPolicyConfig
+	limits      Limits
+	store       ToolRunStore
+	san         Sanitizer
+	jobID       int64
+	workspaceID string
+	gate        PolicyGate
+	actorKind   string
+	executionID int64
 
 	// ClickUpTokenRef is passed to tools that call ClickUp.
 	ClickUpTokenRef string
@@ -139,9 +238,16 @@ type Executor struct {
 	budgetLoaded bool
 }
 
-// NewExecutor builds the executor for one job attempt.
-func NewExecutor(reg *Registry, policy tenant.ToolPolicyConfig, limits Limits, allowDangerous bool, store ToolRunStore, s Sanitizer, jobID int64, workspaceID string) *Executor {
-	return &Executor{reg: reg, policy: policy, limits: limits, allowDangerous: allowDangerous, store: store, san: s, jobID: jobID, workspaceID: workspaceID}
+// NewExecutor builds the executor for one job attempt. Every non-read call
+// asks the policy gate set by WithPolicy; without one it is denied.
+func NewExecutor(reg *Registry, policy tenant.ToolPolicyConfig, limits Limits, store ToolRunStore, s Sanitizer, jobID int64, workspaceID string, opts ...Option) *Executor {
+	e := &Executor{reg: reg, policy: policy, limits: limits, store: store, san: s, jobID: jobID, workspaceID: workspaceID}
+	for _, o := range opts {
+		if o != nil {
+			o(e)
+		}
+	}
+	return e
 }
 
 // CleanText applies the executor's sanitizer (control characters and secret
@@ -264,9 +370,6 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 		if !unscoped && (call.Repo == nil || !slices.Contains(call.Repo.Allow, name)) {
 			return e.deny(ctx, start, "tool_not_allowed")
 		}
-		if tier == tenant.TierDangerous && !e.allowDangerous {
-			return e.deny(ctx, start, "dangerous_disabled")
-		}
 	}
 	// 6. budgets
 	if overCalls {
@@ -300,33 +403,92 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 		}
 		e.mu.Unlock()
 	}
-	// 7-8. idempotency and record started
+	// 7. policy: every non-read call asks the engine, after the grants and
+	// budgets above (policy only narrows them).
+	var (
+		preq    nhpolicy.Request
+		granted *GrantCheck
+	)
+	if tier != tenant.TierRead {
+		preq = e.policyRequest(tool, name, tier, start.Repo, input)
+		preq.Escalated = tier != spec.Tier
+		d := e.decide(ctx, preq)
+		switch d.Effect {
+		case nhpolicy.EffectAllow:
+		case nhpolicy.EffectApprovalRequired:
+			g, ok := ApprovalGrantFrom(ctx)
+			if !ok {
+				e.refund(tier)
+				_ = e.store.Deny(ctx, start, DenyApprovalRequired)
+				return CallResult{Content: approvalRequiredText, IsError: true, Status: StatusDenied, Tier: tier}
+			}
+			preq.ApprovalID = g.ApprovalID
+			// A dry run verifies the grant but never consumes it: nothing
+			// runs, so the owner's approval stays usable.
+			granted = &GrantCheck{ApprovalID: g.ApprovalID, WorkspaceID: e.workspaceID, Action: preq.Action,
+				ResourceKey: preq.ResourceKey, InputSHA256: preq.InputSHA256, ExecutionID: e.executionID,
+				VerifyOnly: e.policy.DryRun}
+		default:
+			e.refund(tier)
+			return e.deny(ctx, start, DenyPolicyDenied)
+		}
+	}
+	// 8-9. idempotency and record started (an approval grant is verified
+	// and consumed in the same transaction)
 	start.Key = e.key(name, input)
-	runID, prior, err := e.store.Begin(ctx, start)
+	var (
+		runID int64
+		prior *PriorRun
+		err   error
+	)
+	if granted != nil {
+		gs, ok := e.store.(GrantedRunStore)
+		if !ok {
+			err = ErrGrantInvalid
+		} else {
+			runID, prior, err = gs.BeginGranted(ctx, start, *granted)
+		}
+		if errors.Is(err, ErrGrantInvalid) {
+			e.refund(tier)
+			// The approval id is left out: an id that names no approval
+			// of this workspace would fail the decision's foreign key and
+			// lose the audit row.
+			rreq := preq
+			rreq.GrantRejected, rreq.ApprovalID = true, 0
+			e.decide(ctx, rreq)
+			return e.deny(ctx, start, DenyRevalidateDenied)
+		}
+	} else {
+		runID, prior, err = e.store.Begin(ctx, start)
+	}
 	if err != nil {
 		return CallResult{Content: "error: audit_unavailable", IsError: true, Status: StatusError, Tier: tier}
 	}
 	if prior != nil {
 		// A replay does not run the tool, so it gives back this attempt's
 		// budget; the earlier run is already counted.
-		if tier != tenant.TierRead {
-			e.mu.Lock()
-			e.writes--
-			if tier == tenant.TierDangerous {
-				e.dangerous--
-			}
-			e.mu.Unlock()
-		}
+		e.refund(tier)
 		return replayResult(prior, tier)
 	}
-	// 9. dry run
+	// 10. an approved call: decide again right before the side effect
+	// (FR-130). A rule now denying it stops it; the grant stays consumed.
+	if granted != nil {
+		rreq := preq
+		rreq.Revalidate, rreq.ToolRunID = true, runID
+		if d := e.decide(ctx, rreq); d.Effect == nhpolicy.EffectDeny {
+			e.refund(tier)
+			e.finish(ctx, RunFinish{RunID: runID, Status: StatusDenied, ErrorCode: DenyRevalidateDenied})
+			return CallResult{Content: "denied: " + DenyRevalidateDenied, IsError: true, Status: StatusDenied, Tier: tier}
+		}
+	}
+	// 11. dry run
 	if tier != tenant.TierRead && e.policy.DryRun {
 		msg := fmt.Sprintf("DRY RUN: would call %s (%s) with %s", name, tier, e.san.CleanOutbound(string(e.auditInput(name, input)), false))
 		msg = capText(msg, e.limits.OutputCap)
 		e.finish(ctx, RunFinish{RunID: runID, Status: StatusDryRun, Summary: summarize(msg)})
 		return CallResult{Content: msg, Status: StatusDryRun, Tier: tier}
 	}
-	// 10. run with the tier timeout
+	// 12. run with the tier timeout
 	timeout := e.limits.ReadTimeout
 	if nt, ok := tool.(NetworkTool); ok && nt.UsesNetwork() {
 		timeout = e.limits.NetworkTimeout
@@ -340,15 +502,121 @@ func (e *Executor) Call(ctx context.Context, step int, name string, input json.R
 		e.finish(ctx, RunFinish{RunID: runID, Status: status, ErrorCode: code, DurationMS: dur})
 		return CallResult{Content: "error: " + code, IsError: true, Status: status, Tier: tier}
 	}
-	// 11. sanitize, compact, cap
+	// 13. sanitize, compact, cap
 	text := capText(compact(e.san.CleanOutbound(out.Text, false)), e.limits.OutputCap)
 	summary := out.Summary
 	if summary == "" {
 		summary = text
 	}
-	// 12. final status
+	// 14. final status
 	e.finish(ctx, RunFinish{RunID: runID, Status: StatusOK, DurationMS: dur, OutputBytes: len(out.Text), Summary: summarize(e.san.CleanOutbound(summary, false))})
 	return CallResult{Content: text, Status: StatusOK, Tier: tier}
+}
+
+// refund gives back the write (and dangerous) budget this call took when
+// it does not run.
+func (e *Executor) refund(tier tenant.Tier) {
+	if tier == tenant.TierRead {
+		return
+	}
+	e.mu.Lock()
+	e.writes--
+	if tier == tenant.TierDangerous {
+		e.dangerous--
+	}
+	e.mu.Unlock()
+}
+
+// decide asks the policy gate; without a gate the answer is deny.
+func (e *Executor) decide(ctx context.Context, req nhpolicy.Request) nhpolicy.Decision {
+	if e.gate == nil {
+		return nhpolicy.Decision{Effect: nhpolicy.EffectDeny, Reason: nhpolicy.ReasonEngineUnavailable}
+	}
+	d, _ := e.gate.Decide(ctx, req)
+	if !d.Effect.Valid() {
+		d.Effect = nhpolicy.EffectDeny
+	}
+	return d
+}
+
+// policyRequest builds the engine request of a call: ids, names, the
+// resource key and the input hash only.
+func (e *Executor) policyRequest(tool Tool, name string, tier tenant.Tier, repo string, input json.RawMessage) nhpolicy.Request {
+	return nhpolicy.Request{
+		WorkspaceID: e.workspaceID, ActorKind: e.actorKind, Action: name, Tier: nhpolicy.Tier(tier),
+		ResourceKey: resourceKey(tool, repo, input), ExecutionID: e.executionID,
+		InputSHA256: InputSHA256(input),
+	}
+}
+
+// InputSHA256 is the hex SHA-256 of a call's canonical input (sorted keys,
+// no whitespace): the hash a policy decision and a policy_gate approval
+// carry.
+func InputSHA256(input json.RawMessage) string {
+	sum := sha256.Sum256(canonicalJSON(input))
+	return hex.EncodeToString(sum[:])
+}
+
+// ResourceKey is the policy resource key of a call to tool t: the tool's
+// own key (ResourceKeyer), or one built from the input's repo, number and
+// task_id fields, such as "owner/repo#12" or "task:abc123". A part that is
+// not printable ASCII without spaces, or a key over the size bound, is
+// replaced by a short hash so the key stays stable and bounded.
+func ResourceKey(t Tool, input json.RawMessage) string {
+	return resourceKey(t, "", input)
+}
+
+func resourceKey(t Tool, repo string, input json.RawMessage) string {
+	if rk, ok := t.(ResourceKeyer); ok {
+		return boundKey(rk.ResourceKey(input))
+	}
+	var fields struct {
+		Repo   string          `json:"repo"`
+		Number json.Number     `json:"number"`
+		TaskID json.RawMessage `json:"task_id"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(input))
+	dec.UseNumber()
+	_ = dec.Decode(&fields)
+	if repo == "" {
+		repo = fields.Repo
+	}
+	key := ""
+	if repo != "" {
+		key = safePart(repo)
+	}
+	if n, err := fields.Number.Int64(); err == nil && n > 0 {
+		key += fmt.Sprintf("#%d", n)
+	}
+	var task string
+	if json.Unmarshal(fields.TaskID, &task) == nil && task != "" {
+		if key != "" {
+			key += "/"
+		}
+		key += "task:" + safePart(task)
+	}
+	return boundKey(key)
+}
+
+// safePart keeps a printable-ASCII, space-free part as is and hashes any
+// other.
+func safePart(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x21 || s[i] > 0x7e {
+			sum := sha256.Sum256([]byte(s))
+			return "h:" + hex.EncodeToString(sum[:8])
+		}
+	}
+	return s
+}
+
+func boundKey(k string) string {
+	k = safePart(k)
+	if len(k) > nhpolicy.MaxResourceKeyBytes {
+		sum := sha256.Sum256([]byte(k))
+		return "h:" + hex.EncodeToString(sum[:16])
+	}
+	return k
 }
 
 // loadBudget seeds the write and dangerous counters, once, with what earlier

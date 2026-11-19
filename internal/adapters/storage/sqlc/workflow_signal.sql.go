@@ -258,7 +258,7 @@ func (q *Queries) InsertWorkflowWait(ctx context.Context, arg InsertWorkflowWait
 }
 
 const listStepWaits = `-- name: ListStepWaits :many
-SELECT w.id AS wait_id, w.wait_kind, a.id, a.workspace_id, a.kind, a.run_id, a.item_id, a.action, a.resource, a.payload, a.options, a.nonce, a.expires_at, a.decision, a.answer, a.decided_by, a.decided_at, a.telegram_message_id, a.created_at, a.updated_at, a.reply_message_id, a.pending_answer,
+SELECT w.id AS wait_id, w.wait_kind, a.id, a.workspace_id, a.kind, a.run_id, a.item_id, a.action, a.resource, a.payload, a.options, a.nonce, a.expires_at, a.decision, a.answer, a.decided_by, a.decided_at, a.telegram_message_id, a.created_at, a.updated_at, a.reply_message_id, a.pending_answer, a.policy_action, a.resource_key, a.input_sha256, a.execution_id, a.requested_user_id, a.decided_user_id, a.consumed_at,
   COALESCE(sg.id, 0)::bigint AS signal_row_id, sg.consumed_at
 FROM public.workflow_waits w
 JOIN public.approvals a ON a.workspace_id = w.workspace_id AND a.id = w.approval_id
@@ -314,6 +314,13 @@ func (q *Queries) ListStepWaits(ctx context.Context, arg ListStepWaitsParams) ([
 			&i.Approval.UpdatedAt,
 			&i.Approval.ReplyMessageID,
 			&i.Approval.PendingAnswer,
+			&i.Approval.PolicyAction,
+			&i.Approval.ResourceKey,
+			&i.Approval.InputSha256,
+			&i.Approval.ExecutionID,
+			&i.Approval.RequestedUserID,
+			&i.Approval.DecidedUserID,
+			&i.Approval.ConsumedAt,
 			&i.SignalRowID,
 			&i.ConsumedAt,
 		); err != nil {

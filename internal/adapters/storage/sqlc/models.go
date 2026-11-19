@@ -89,6 +89,17 @@ type Approval struct {
 	ReplyMessageID pgtype.Int8
 	// The owner's free-text reply, staged until the worker hands it on.
 	PendingAnswer pgtype.Text
+	// policy_gate: the tool or capability name the gate authorizes.
+	PolicyAction pgtype.Text
+	// policy_gate: the bounded resource key, such as owner/repo#12.
+	ResourceKey pgtype.Text
+	// policy_gate: SHA-256 of the canonical action input; never the input itself.
+	InputSha256     pgtype.Text
+	ExecutionID     pgtype.Int8
+	RequestedUserID pgtype.UUID
+	DecidedUserID   pgtype.UUID
+	// policy_gate: set once, in the same transaction as the tool run it authorized.
+	ConsumedAt pgtype.Timestamptz
 }
 
 type Behavior struct {
@@ -499,6 +510,8 @@ type OrchestratorPlanTask struct {
 	EvidenceRefs []byte
 	CreatedAt    pgtype.Timestamptz
 	UpdatedAt    pgtype.Timestamptz
+	// github.merge task: {repo, number, head_sha}; NULL for other tasks.
+	MergeTarget []byte
 }
 
 // Where the messages of an orchestrated task go, and its explicit repo; ids only.
@@ -531,6 +544,40 @@ type OutboundAction struct {
 	CreatedAt         pgtype.Timestamptz
 	UpdatedAt         pgtype.Timestamptz
 	SentAt            pgtype.Timestamptz
+}
+
+// Workspace-scoped audit of every policy engine decision; metadata and an input hash only.
+type PolicyDecision struct {
+	ID             int64
+	WorkspaceID    pgtype.UUID
+	Action         string
+	Tier           string
+	ResourceKey    string
+	Effect         string
+	Reason         string
+	RuleSetVersion pgtype.Int4
+	RuleKey        string
+	ActorKind      string
+	ExecutionID    pgtype.Int8
+	ToolRunID      pgtype.Int8
+	ApprovalID     pgtype.Int8
+	InputSha256    string
+	CreatedAt      pgtype.Timestamptz
+}
+
+// Workspace-scoped, immutable policy rule set versions; exactly one active per workspace; written only by the owner CLI.
+type PolicyRuleSet struct {
+	ID                  int64
+	WorkspaceID         pgtype.UUID
+	Version             int32
+	Schema              string
+	Body                []byte
+	BodySha256          string
+	CreatedBy           string
+	RestoredFromVersion pgtype.Int4
+	IsActive            bool
+	CreatedAt           pgtype.Timestamptz
+	ActivatedAt         pgtype.Timestamptz
 }
 
 type ReportPreference struct {

@@ -26,51 +26,53 @@ type Settings struct {
 	AgentPollInterval                     time.Duration
 	ToolTimeout, GitNetworkTimeout        time.Duration
 	MaxInputTokens, MaxOutputTokens       int64
-	AllowDangerous                        bool
-	GitPath, ReposDir, TmpDir             string
-	MaxCloneBytes                         int64
-	DebounceWindow, DebounceMaxWait       time.Duration
-	NoticePollInterval                    time.Duration
-	NoticeRequestTimeout                  time.Duration
-	AnthropicCredential                   string
-	ListenAddr                            string
-	OwnerTelegramChatID                   int64         // 0: not set
-	OwnerTelegramUserID                   int64         // 0: the owner chat is a private chat (user ID = chat ID)
-	OwnerClickUpUserID                    string        // empty: not set
-	PublicBaseURL                         string        // empty: not set
-	BehaviorWorkers                       int64         // concurrent behavior run executors
-	BehaviorPollInterval                  time.Duration // idle wait between behavior run claims
-	BehaviorMaxTokens                     int64         // run token budget when neither behavior nor profile sets one
-	ClickUpChatPollInterval               time.Duration // wait between ClickUp Chat polls
-	LLMProvider                           string        // anthropic (API key) | claude_cli | opencode_cli
-	ClaudeCLIPath                         string        // empty: not set
-	ClaudeCLITimeout                      time.Duration // one Claude CLI call
-	ClaudeCLIConcurrency                  int64         // Claude CLI calls at once
-	OpencodeCLIPath                       string        // empty: not set
-	OpencodeCLITimeout                    time.Duration // one opencode call
-	OpencodeCLIConcurrency                int64         // opencode calls at once
-	TelegramAssistant                     bool          // owner free text goes to the LLM assistant
-	TelegramMode                          string        // auto | webhook | poll: how Telegram updates arrive
-	TelegramCommandTopic                  string        // fixed topic name handled like General; empty: none
-	TopicCloseStatuses                    string        // comma-separated ClickUp status names that close a task topic
-	MessageLinkRetentionDays              int64         // days a Telegram message to ClickUp comment link is kept
-	ClickUpDraftExpiryHours               int64         // hours a ClickUp draft waits for the owner's confirm
-	AssistantModel                        string        // the Telegram assistant's default Claude model id
-	AssistantFastModel                    string        // the Telegram assistant's fast Claude model id
-	AssistantDeepModel                    string        // the Telegram assistant's deep Claude model id
-	AssistantHistoryTurns                 int64         // recent exchanges sent to the assistant
-	AssistantTimeout                      time.Duration // one assistant answer, tool steps included
-	AssistantRatePerMinute                int64         // assistant messages per chat per minute (runaway guard)
-	WorkerMinClaudeLeft                   int64         // % of a Claude limit a worker needs left to take a job
-	WorkerMinDiskFree                     int64         // bytes free under a worker's repos_dir to take a job
-	WorkerMaxRAMUsed                      int64         // % RAM in use above which a worker takes no job
-	OrchestratorMinConfidence             float64       // Classify confidence below which the orchestrator asks
-	OrchestratorMaxRepair                 int64         // repair attempts per orchestrator model call
-	OrchestratorMaxPlanIterations         int64         // plan calls per orchestrated execution
-	OrchestratorMaxReplans                int64         // replans per orchestrated execution
-	OrchestratorMaxRepairAttempts         int64         // repair attempts per orchestrated execution
-	OrchestratorMaxTokens                 int64         // model tokens per orchestrated execution
-	OrchestratorMaxWallMinutes            int64         // wall minutes per orchestrated execution
+	// AllowDangerous is deprecated (Phase 9): still a known key, but it has
+	// no effect; the policy rule set decides dangerous tools.
+	AllowDangerous                  bool
+	GitPath, ReposDir, TmpDir       string
+	MaxCloneBytes                   int64
+	DebounceWindow, DebounceMaxWait time.Duration
+	NoticePollInterval              time.Duration
+	NoticeRequestTimeout            time.Duration
+	AnthropicCredential             string
+	ListenAddr                      string
+	OwnerTelegramChatID             int64         // 0: not set
+	OwnerTelegramUserID             int64         // 0: the owner chat is a private chat (user ID = chat ID)
+	OwnerClickUpUserID              string        // empty: not set
+	PublicBaseURL                   string        // empty: not set
+	BehaviorWorkers                 int64         // concurrent behavior run executors
+	BehaviorPollInterval            time.Duration // idle wait between behavior run claims
+	BehaviorMaxTokens               int64         // run token budget when neither behavior nor profile sets one
+	ClickUpChatPollInterval         time.Duration // wait between ClickUp Chat polls
+	LLMProvider                     string        // anthropic (API key) | claude_cli | opencode_cli
+	ClaudeCLIPath                   string        // empty: not set
+	ClaudeCLITimeout                time.Duration // one Claude CLI call
+	ClaudeCLIConcurrency            int64         // Claude CLI calls at once
+	OpencodeCLIPath                 string        // empty: not set
+	OpencodeCLITimeout              time.Duration // one opencode call
+	OpencodeCLIConcurrency          int64         // opencode calls at once
+	TelegramAssistant               bool          // owner free text goes to the LLM assistant
+	TelegramMode                    string        // auto | webhook | poll: how Telegram updates arrive
+	TelegramCommandTopic            string        // fixed topic name handled like General; empty: none
+	TopicCloseStatuses              string        // comma-separated ClickUp status names that close a task topic
+	MessageLinkRetentionDays        int64         // days a Telegram message to ClickUp comment link is kept
+	ClickUpDraftExpiryHours         int64         // hours a ClickUp draft waits for the owner's confirm
+	AssistantModel                  string        // the Telegram assistant's default Claude model id
+	AssistantFastModel              string        // the Telegram assistant's fast Claude model id
+	AssistantDeepModel              string        // the Telegram assistant's deep Claude model id
+	AssistantHistoryTurns           int64         // recent exchanges sent to the assistant
+	AssistantTimeout                time.Duration // one assistant answer, tool steps included
+	AssistantRatePerMinute          int64         // assistant messages per chat per minute (runaway guard)
+	WorkerMinClaudeLeft             int64         // % of a Claude limit a worker needs left to take a job
+	WorkerMinDiskFree               int64         // bytes free under a worker's repos_dir to take a job
+	WorkerMaxRAMUsed                int64         // % RAM in use above which a worker takes no job
+	OrchestratorMinConfidence       float64       // Classify confidence below which the orchestrator asks
+	OrchestratorMaxRepair           int64         // repair attempts per orchestrator model call
+	OrchestratorMaxPlanIterations   int64         // plan calls per orchestrated execution
+	OrchestratorMaxReplans          int64         // replans per orchestrated execution
+	OrchestratorMaxRepairAttempts   int64         // repair attempts per orchestrated execution
+	OrchestratorMaxTokens           int64         // model tokens per orchestrated execution
+	OrchestratorMaxWallMinutes      int64         // wall minutes per orchestrated execution
 }
 
 // Store reads every stored setting.
@@ -249,6 +251,18 @@ func modelMismatches(s Settings) []string {
 		}
 	}
 	return bad
+}
+
+// deprecated maps a retired key to the note shown for it. The key stays
+// known (stored values still load) but has no effect.
+var deprecated = map[string]string{
+	"allow_dangerous": "deprecated: no effect; the policy rule set decides dangerous tools (nh policy)",
+}
+
+// Deprecated returns the note of a retired key, if key is one.
+func Deprecated(key string) (string, bool) {
+	n, ok := deprecated[key]
+	return n, ok
 }
 
 // Keys lists every known setting key, sorted.

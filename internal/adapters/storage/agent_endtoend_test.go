@@ -177,7 +177,7 @@ func TestAgentEndToEnd(t *testing.T) {
 	runs, _ := NewToolRunStore(pool)
 	orch := agent.NewOrchestrator(store, func(context.Context, string) (agent.Triager, agent.Investigator, error) {
 		return agent.NewTier1Router(llm, "triage"), agent.NewTier2Actor(llm, "actor"), nil
-	}, reg, runs, redactor, nil, agent.OrchestratorSettings{PollInterval: 20 * time.Millisecond, Limits: tools.DefaultLimits(), MaxInputTokens: 60000, MaxOutputTokens: 6000})
+	}, reg, runs, redactor, nil, agent.OrchestratorSettings{PollInterval: 20 * time.Millisecond, Limits: tools.DefaultLimits(), MaxInputTokens: 60000, MaxOutputTokens: 6000, Policy: gateAllowAll})
 
 	// 6. Fake Telegram behind the action worker.
 	var tgMu sync.Mutex

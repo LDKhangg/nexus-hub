@@ -29,10 +29,12 @@ func settingsCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 		if err != nil {
 			return errors.New("settings read failed")
 		}
+		row := map[string]any{"key": key, "value": v, "source": "db"}
 		if !ok {
-			return enc.Encode(map[string]any{"key": key, "value": def, "source": "default"})
+			row["value"], row["source"] = def, "default"
 		}
-		return enc.Encode(map[string]any{"key": key, "value": v, "source": "db"})
+		markDeprecated(row, key)
+		return enc.Encode(row)
 	case len(args) >= 3 && len(args)%2 == 1 && args[0] == "set":
 		// One or more key value pairs, stored together in one transaction.
 		pairs := map[string]json.RawMessage{}
@@ -64,7 +66,9 @@ func settingsCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 			return errors.New("settings write failed")
 		}
 		for _, k := range order {
-			if err := enc.Encode(map[string]any{"key": k, "value": pairs[k], "source": "db", "note": "restart nexus-hub to apply"}); err != nil {
+			row := map[string]any{"key": k, "value": pairs[k], "source": "db", "note": "restart nexus-hub to apply"}
+			markDeprecated(row, k)
+			if err := enc.Encode(row); err != nil {
 				return err
 			}
 		}
@@ -82,6 +86,7 @@ func settingsCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 				def, _ := settings.DefaultJSON(key)
 				row["value"], row["source"] = def, "default"
 			}
+			markDeprecated(row, key)
 			if err := enc.Encode(row); err != nil {
 				return err
 			}
@@ -89,6 +94,13 @@ func settingsCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out
 		return nil
 	}
 	return errors.New("usage: settings get <key> | set <key> <value> [<key> <value> ...] | list")
+}
+
+// markDeprecated adds the deprecation note of a retired key to its row.
+func markDeprecated(row map[string]any, key string) {
+	if note, ok := settings.Deprecated(key); ok {
+		row["deprecated"] = note
+	}
 }
 
 type mapStore map[string]json.RawMessage

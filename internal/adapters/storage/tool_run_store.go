@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
 	"github.com/LDKhangg/nexus-hub/internal/agent/tools"
@@ -194,4 +195,72 @@ func (s *ToolRunStore) JobCounts(ctx context.Context, jobID int64) (writes, dang
 		return 0, 0, err
 	}
 	return int(row.Writes), int(row.Dangerous), nil
+}
+
+var _ tools.GrantedRunStore = (*ToolRunStore)(nil)
+
+// BeginGranted is Begin for a call under an approval grant (REQ-7). In one
+// transaction it replays a prior run of the same key without touching the
+// grant; otherwise it locks the policy_gate approval, checks that it is
+// approved, unexpired, unconsumed and bound to the same workspace, action,
+// resource key, input hash and execution, marks it consumed and records
+// the started run (a VerifyOnly grant, for a dry run, is checked but not
+// consumed). A grant that does not verify returns
+// tools.ErrGrantInvalid and nothing is written.
+func (s *ToolRunStore) BeginGranted(ctx context.Context, r tools.RunStart, g tools.GrantCheck) (int64, *tools.PriorRun, error) {
+	if r.Tier == tenant.TierRead || g.ApprovalID <= 0 || g.WorkspaceID != r.WorkspaceID {
+		return 0, nil, tools.ErrGrantInvalid
+	}
+	ws, err := parseDBID(r.WorkspaceID)
+	if err != nil {
+		return 0, nil, tools.ErrGrantInvalid
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer tx.Rollback(ctx)
+	q := sqlc.New(tx)
+	if err := q.LockToolRunKey(ctx, r.Key); err != nil {
+		return 0, nil, err
+	}
+	prior, err := q.FindPriorToolRun(ctx, r.Key)
+	switch {
+	case err == nil:
+		if prior.Status == tools.StatusOK {
+			return 0, &tools.PriorRun{Status: tools.StatusOK, Summary: prior.ResultSummary}, nil
+		}
+		return 0, &tools.PriorRun{Status: tools.StatusUnknownOutcome}, nil
+	case !errors.Is(err, pgx.ErrNoRows):
+		return 0, nil, err
+	}
+	a, err := q.LockPolicyGateApproval(ctx, sqlc.LockPolicyGateApprovalParams{WorkspaceID: ws, ID: g.ApprovalID})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return 0, nil, tools.ErrGrantInvalid
+	case err != nil:
+		return 0, nil, err
+	}
+	now := time.Now()
+	if !a.Decision.Valid || a.Decision.String != "approved" || a.ConsumedAt.Valid ||
+		!a.ExpiresAt.Valid || !a.ExpiresAt.Time.After(now) ||
+		a.PolicyAction != g.Action || a.ResourceKey != g.ResourceKey || a.InputSha256 != g.InputSHA256 ||
+		a.ExecutionID != g.ExecutionID {
+		return 0, nil, tools.ErrGrantInvalid
+	}
+	// A dry run (VerifyOnly) checks the grant above but never consumes it.
+	if !g.VerifyOnly {
+		n, err := q.ConsumePolicyGateApproval(ctx, sqlc.ConsumePolicyGateApprovalParams{WorkspaceID: ws, ID: g.ApprovalID, AtTime: pgtype.Timestamptz{Time: now, Valid: true}})
+		if err != nil {
+			return 0, nil, err
+		}
+		if n != 1 {
+			return 0, nil, tools.ErrGrantInvalid
+		}
+	}
+	id, err := s.insert(ctx, q, r, tools.StatusStarted, "")
+	if err != nil {
+		return 0, nil, err
+	}
+	return id, nil, tx.Commit(ctx)
 }

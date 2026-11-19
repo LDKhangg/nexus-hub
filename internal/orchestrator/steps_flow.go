@@ -681,7 +681,7 @@ func planFromRecords(tasks []PlanTaskRecord) Plan {
 	for _, t := range tasks {
 		p.Tasks = append(p.Tasks, PlanTask{
 			Key: t.Key, Title: t.Title, Capabilities: slices.Clone(t.Capabilities), DependsOn: slices.Clone(t.DependsOn),
-			Priority: t.Priority, Complexity: t.Complexity, Executor: t.Executor,
+			Priority: t.Priority, Complexity: t.Complexity, Executor: t.Executor, Merge: cloneMerge(t.Merge),
 		})
 	}
 	if order, ok := topoOrder(p.Tasks); ok {
@@ -825,7 +825,7 @@ func (r *stepRun) storePlan(version int, p Plan, carried []PlanTaskRecord, u Usa
 		}
 		records = append(records, PlanTaskRecord{
 			Key: t.Key, Title: t.Title, Capabilities: slices.Clone(t.Capabilities), DependsOn: slices.Clone(t.DependsOn),
-			Priority: t.Priority, Complexity: t.Complexity, Executor: t.Executor, State: state,
+			Priority: t.Priority, Complexity: t.Complexity, Executor: t.Executor, Merge: cloneMerge(t.Merge), State: state,
 		})
 	}
 	budget, _ := json.Marshal(p.Budget)
@@ -1078,7 +1078,31 @@ func (r *stepRun) taskRun(t PlanTaskRecord, request string) TaskRun {
 	return TaskRun{
 		WorkspaceID: r.ws, ExecutionID: r.id, StepKey: r.key, Task: planFromRecords([]PlanTaskRecord{t}).Tasks[0], Route: r.route, Fence: r.fence(),
 		Request: request, TokensLeft: max(snap.Caps.Tokens-snap.Used.Tokens, 0), Inputs: r.taskInputs(t),
+		Proofs: r.taskProofs(t),
 	}
+}
+
+// taskProofs are the evidence refs and stored result fields of the
+// execution's succeeded tasks other than t, one entry per task.
+func (r *stepRun) taskProofs(t PlanTaskRecord) []string {
+	var out []string
+	for _, d := range r.tasks {
+		if d.Key == t.Key || d.State != TaskSucceeded {
+			continue
+		}
+		parts := slices.Clone(d.EvidenceRefs)
+		var res map[string]string
+		_ = json.Unmarshal(d.Result, &res)
+		for _, k := range []string{"job_id", "branch", "pr_url", "summary"} {
+			if v := strings.TrimSpace(res[k]); v != "" {
+				parts = append(parts, v)
+			}
+		}
+		if len(parts) > 0 {
+			out = append(out, strings.Join(parts, "\n"))
+		}
+	}
+	return out
 }
 
 // taskInputs are the bounded results of t's succeeded dependencies: the

@@ -1688,6 +1688,166 @@ These facts are unconfirmed against the real ClickUp until checked once:
 
 `nh telegram topics` is unchanged by Phase 10.
 
+## Policy and approvals (Phase 9)
+
+Every write or dangerous action the hub takes (tool calls from the agent,
+behaviors, workflows, drafts, and orchestrated tasks) asks the policy engine
+first. The engine reads the workspace's active rule set, answers `allow`,
+`approval_required` or `deny`, and records each answer in `policy_decisions`.
+Only the `nh policy` command changes the rule set. No assistant tool, behavior
+action or capability can write it. A change applies to the next decision; no
+restart is needed.
+
+### The rule file
+
+```yaml
+schema: policy/v1
+defaults: {read: allow, write: allow, dangerous: approval_required}
+actions:
+  github_pr_merge: approval_required
+approval_ttl_hours: 24
+```
+
+- `schema` must be `policy/v1`. Any other value is refused.
+- `defaults` sets an effect for each tier (`read`, `write`, `dangerous`). All
+  three are required.
+- `actions` sets an effect for one named tool or orchestrator capability. The
+  name must be known to this hub build (the CLI and the server use the same
+  list). An exact action rule wins over the tier default.
+- Effects are `allow`, `approval_required` and `deny`. Anything else is invalid.
+- `approval_ttl_hours` is 1 to 168 (default 24): how long a pending approval
+  stays open.
+- Errors name the path in the file (for example `actions.foo`), never the
+  value.
+
+Every workspace starts on version 1, which keeps the behaviour from before
+Phase 9: read allow, write allow, dangerous `approval_required`, and
+`github_pr_merge: approval_required`. `nh init` applies the same version to a
+new workspace.
+
+**Tier escalation.** A tool can raise its own tier for a given input. When an
+action rule exists but the raised tier's default is stricter, the stricter
+effect wins and the decision reason is `tier_escalated`.
+
+**Safe fallback set.** When there is no active rule set, the stored set is
+invalid (edited by hand, or no longer valid with the current tools), or the
+store cannot be read, the hub uses a built-in set: read `allow`, write
+`approval_required`, dangerous `deny`, no action rules. The decision reason says
+which case applied (`fallback_no_rule_set`, `fallback_invalid_rule_set`,
+`fallback_store_error`). If the decision cannot be recorded, the answer becomes
+`deny` (`record_failed`). A call with an unknown action is denied
+(`unknown_action`).
+
+### `nh policy`
+
+```sh
+nh policy show --workspace-id $WS               # the active rule set as a policy/v1 file, with version and sha256
+nh policy validate ./policy.yaml                # check only; no workspace, changes nothing
+nh policy apply ./policy.yaml --workspace-id $WS
+# {"version":2,"body_sha256":"…","active":true,"changed":true}
+nh policy history --workspace-id $WS --limit 10 # one JSON row per stored version, newest first
+nh policy rollback 1 --workspace-id $WS         # re-activates version 1 as a new version
+nh policy decisions --workspace-id $WS --limit 20
+```
+
+- `apply` validates, stores a new version and activates it in one transaction.
+  Applying a file equal to the active set adds no version (`"changed":false`).
+- `rollback N` never deletes anything: it copies version N into a new active
+  version and reports `restored_from_version`. It refuses a version that is
+  not valid with the current tools; apply a corrected file instead.
+- `--limit` is 1 to 500 (default 20) and works only on `history` and
+  `decisions`.
+- `decisions` prints the action, tier, resource key, effect, reason, rule key
+  and rule set version, plus execution, tool run and approval ids when they
+  exist. It prints hashes of inputs, never inputs.
+- When `show` finds no active or no valid set, it prints a comment line and the
+  built-in safe set.
+
+### Merge approval
+
+`/plan` can end with a task that merges a pull request (capability
+`github.merge`; the plan names the repo, PR number and the head SHA from
+earlier task evidence). It is offered only when the merge tool is wired; an
+unwired merge tool means the capability is not offered to the planner, and a
+task that asks for it anyway ends with `executor_unavailable`. The workspace
+grant must also list a merge method (`merge_not_configured` otherwise). With
+`github_pr_merge: approval_required`:
+
+1. The execution's topic (General as fallback) shows
+   `🔐 Cần duyệt: merge PR owner/repo#12 (head abc1234)`, the rule that asked,
+   the expiry and the buttons **Duyệt** and **Từ chối**. The task waits in
+   `WAITING_FOR_APPROVAL`. The expiry is `approval_ttl_hours`, but never later
+   than the execution's hard deadline (24 hours after it started).
+2. Only the workspace owner counts. Another person's press is answered with a
+   toast and ignored. A second press, a press on an old message and a press
+   after expiry do nothing. The decision records the Telegram user and the
+   internal member.
+3. **Duyệt**: the hub decides again, checks that the PR head still equals the
+   approved SHA and the checks are green, then merges once. A restart while it
+   waits keeps the wait. A restart after the approval never merges twice.
+4. **Từ chối** or expiry: nothing merges, the task is blocked
+   (`approval_rejected` or `approval_expired`) and the plan's evaluate step
+   decides what next.
+5. A gate never outlives its execution. When the execution completes, fails,
+   is cancelled or passes its deadline, a press on its message is stale (no
+   "Đang kiểm tra lại rồi merge"), and within a minute the sweep expires the
+   gate and edits the message to `⌛ Hết hạn` without buttons. A new `/plan`
+   for the same PR then gets its own gate instead of
+   `approval_pending_elsewhere`. An open gate past its expiry is likewise
+   expired and replaced when the same merge asks again.
+
+An approval is bound to one action, one resource, one input hash and one
+execution, and is used up by the call it allows. It cannot approve a different
+call.
+
+With `github_pr_merge: allow` the merge runs after the normal checks, but only
+when an earlier succeeded task of the same execution names the exact target in
+its evidence (its evidence refs, branch, PR URL or summary contain both
+`owner/repo#12` or the PR's GitHub URL, and the full head SHA). Otherwise the
+task is blocked with `merge_target_unproven` and nothing happens. Under
+`approval_required` the owner's approval of the target shown in the message is
+the binding instead. With `deny` the task is blocked with `policy_denied` and
+nothing happens. If the rule changes to `deny` after you approved, the merge
+is refused with `policy_denied` when it runs; `revalidate_denied` means the
+grant did not match the call, or the rule changed in the moment between the
+grant check and the merge.
+
+One execution merges at most once: the merge runs with a dangerous-action
+budget of 1, and a dry-run merge (tools `dry_run`) uses that budget too.
+
+A direct agent tool call (not an orchestrated task) that hits
+`approval_required` never waits: it is denied with a tool result that says the
+owner must approve, and nothing runs.
+
+### Reason codes you may see
+
+| Code | Meaning |
+|---|---|
+| `policy_denied` | the rule set says `deny` |
+| `approval_required` | the rule set asks for approval and no approved grant matched (direct calls) |
+| `revalidate_denied` | the grant did not match the call, or the rule turned `deny` between the grant check and the run (a rule already `deny` when the approved call runs gives `policy_denied`) |
+| `approval_rejected` | you pressed Từ chối |
+| `approval_expired` | no decision within `approval_ttl_hours` (capped at the execution's deadline) |
+| `approval_pending_elsewhere` | the same action on the same resource is already waiting for approval in another execution |
+| `approval_not_sent` | the Telegram message could not be sent; the hub can send it again later |
+| `merge_not_configured` | no merge method in the GitHub grant, or the merge tool is not enabled in the workspace's tools |
+| `merge_target_unproven` | `allow` merge whose repo#number and head SHA no earlier succeeded task of the execution named; nothing merged |
+| `executor_unavailable` | the merge tool or the policy engine is not wired, so the hub cannot run the merge |
+| `no_owner_member` | the workspace has no member with role owner to approve |
+| `head_sha_mismatch` | the PR head changed after approval was asked; nothing merged |
+| `tier_escalated` | a stricter tier default overrode the action rule |
+
+Other reasons in `nh policy decisions`: `action_rule`, `tier_default`,
+`unknown_action`, `invalid_request`, `fallback_*`, `record_failed`,
+`engine_unavailable`.
+
+### `allow_dangerous` is retired
+
+The setting is still accepted so old configs load, but it has no effect. If it
+is true at startup the hub logs one line saying so, and `nh settings` marks it
+deprecated. Dangerous tools follow the rule set: set `defaults.dangerous` or
+an `actions` entry.
+
 ## Upkeep
 
 - Updates: `git pull`, rebuild both binaries, run `goose … up`, then

@@ -416,7 +416,7 @@ const createApproval = `-- name: CreateApproval :one
 INSERT INTO public.approvals(workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at)
 VALUES ($1, $2, $3, $4, $5, $6,
   $7, $8, $9, $10)
-RETURNING id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer
+RETURNING id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer, policy_action, resource_key, input_sha256, execution_id, requested_user_id, decided_user_id, consumed_at
 `
 
 type CreateApprovalParams struct {
@@ -468,6 +468,13 @@ func (q *Queries) CreateApproval(ctx context.Context, arg CreateApprovalParams) 
 		&i.UpdatedAt,
 		&i.ReplyMessageID,
 		&i.PendingAnswer,
+		&i.PolicyAction,
+		&i.ResourceKey,
+		&i.InputSha256,
+		&i.ExecutionID,
+		&i.RequestedUserID,
+		&i.DecidedUserID,
+		&i.ConsumedAt,
 	)
 	return i, err
 }
@@ -551,7 +558,7 @@ UPDATE public.approvals SET decision = $1::text, answer = $2,
   decided_by = $3::text, decided_at = now(), updated_at = now()
 WHERE workspace_id = $4 AND nonce = $5
   AND decision IS NULL AND expires_at > $6::timestamptz
-RETURNING id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer
+RETURNING id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer, policy_action, resource_key, input_sha256, execution_id, requested_user_id, decided_user_id, consumed_at
 `
 
 type DecideApprovalParams struct {
@@ -595,6 +602,13 @@ func (q *Queries) DecideApproval(ctx context.Context, arg DecideApprovalParams) 
 		&i.UpdatedAt,
 		&i.ReplyMessageID,
 		&i.PendingAnswer,
+		&i.PolicyAction,
+		&i.ResourceKey,
+		&i.InputSha256,
+		&i.ExecutionID,
+		&i.RequestedUserID,
+		&i.DecidedUserID,
+		&i.ConsumedAt,
 	)
 	return i, err
 }
@@ -603,7 +617,7 @@ const expireApproval = `-- name: ExpireApproval :one
 UPDATE public.approvals SET decision = 'expired', decided_by = 'system', decided_at = now(), updated_at = now()
 WHERE workspace_id = $1 AND id = $2
   AND decision IS NULL AND expires_at <= $3::timestamptz
-RETURNING id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer
+RETURNING id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer, policy_action, resource_key, input_sha256, execution_id, requested_user_id, decided_user_id, consumed_at
 `
 
 type ExpireApprovalParams struct {
@@ -637,6 +651,13 @@ func (q *Queries) ExpireApproval(ctx context.Context, arg ExpireApprovalParams) 
 		&i.UpdatedAt,
 		&i.ReplyMessageID,
 		&i.PendingAnswer,
+		&i.PolicyAction,
+		&i.ResourceKey,
+		&i.InputSha256,
+		&i.ExecutionID,
+		&i.RequestedUserID,
+		&i.DecidedUserID,
+		&i.ConsumedAt,
 	)
 	return i, err
 }
@@ -757,7 +778,7 @@ func (q *Queries) ForgetDecision(ctx context.Context, arg ForgetDecisionParams) 
 }
 
 const getApproval = `-- name: GetApproval :one
-SELECT id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer FROM public.approvals WHERE workspace_id = $1 AND id = $2
+SELECT id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer, policy_action, resource_key, input_sha256, execution_id, requested_user_id, decided_user_id, consumed_at FROM public.approvals WHERE workspace_id = $1 AND id = $2
 `
 
 type GetApprovalParams struct {
@@ -789,12 +810,19 @@ func (q *Queries) GetApproval(ctx context.Context, arg GetApprovalParams) (Appro
 		&i.UpdatedAt,
 		&i.ReplyMessageID,
 		&i.PendingAnswer,
+		&i.PolicyAction,
+		&i.ResourceKey,
+		&i.InputSha256,
+		&i.ExecutionID,
+		&i.RequestedUserID,
+		&i.DecidedUserID,
+		&i.ConsumedAt,
 	)
 	return i, err
 }
 
 const getApprovalByNonce = `-- name: GetApprovalByNonce :one
-SELECT id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer FROM public.approvals WHERE workspace_id = $1 AND nonce = $2
+SELECT id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer, policy_action, resource_key, input_sha256, execution_id, requested_user_id, decided_user_id, consumed_at FROM public.approvals WHERE workspace_id = $1 AND nonce = $2
 `
 
 type GetApprovalByNonceParams struct {
@@ -826,6 +854,13 @@ func (q *Queries) GetApprovalByNonce(ctx context.Context, arg GetApprovalByNonce
 		&i.UpdatedAt,
 		&i.ReplyMessageID,
 		&i.PendingAnswer,
+		&i.PolicyAction,
+		&i.ResourceKey,
+		&i.InputSha256,
+		&i.ExecutionID,
+		&i.RequestedUserID,
+		&i.DecidedUserID,
+		&i.ConsumedAt,
 	)
 	return i, err
 }
@@ -1553,7 +1588,7 @@ func (q *Queries) LatestBehaviorRunBySubject(ctx context.Context, arg LatestBeha
 }
 
 const listApprovalsByRun = `-- name: ListApprovalsByRun :many
-SELECT id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer FROM public.approvals WHERE workspace_id = $1 AND run_id = $2 ORDER BY id
+SELECT id, workspace_id, kind, run_id, item_id, action, resource, payload, options, nonce, expires_at, decision, answer, decided_by, decided_at, telegram_message_id, created_at, updated_at, reply_message_id, pending_answer, policy_action, resource_key, input_sha256, execution_id, requested_user_id, decided_user_id, consumed_at FROM public.approvals WHERE workspace_id = $1 AND run_id = $2 ORDER BY id
 `
 
 type ListApprovalsByRunParams struct {
@@ -1591,6 +1626,13 @@ func (q *Queries) ListApprovalsByRun(ctx context.Context, arg ListApprovalsByRun
 			&i.UpdatedAt,
 			&i.ReplyMessageID,
 			&i.PendingAnswer,
+			&i.PolicyAction,
+			&i.ResourceKey,
+			&i.InputSha256,
+			&i.ExecutionID,
+			&i.RequestedUserID,
+			&i.DecidedUserID,
+			&i.ConsumedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1753,6 +1795,11 @@ SELECT a.workspace_id, a.id, COALESCE(w.execution_id, 0)::bigint AS execution_id
 FROM public.approvals a
 LEFT JOIN public.workflow_waits w ON w.workspace_id = a.workspace_id AND w.approval_id = a.id
 WHERE a.decision IS NULL AND a.expires_at <= $1::timestamptz
+  AND NOT (a.kind = 'policy_gate' AND EXISTS (
+    SELECT 1 FROM public.workflow_executions e
+    WHERE e.workspace_id = a.workspace_id AND e.id = a.execution_id
+      AND (e.state IN ('COMPLETED', 'FAILED', 'CANCELLED')
+           OR (e.deadline_at IS NOT NULL AND e.deadline_at <= $1::timestamptz))))
 ORDER BY a.expires_at, a.id
 LIMIT $2::int
 `
@@ -1770,6 +1817,8 @@ type ListDueApprovalsRow struct {
 
 // Open approvals past their expiry with the execution of their wait (0 for
 // none), read before expiring them so bound executions are locked first.
+// A policy gate of an ended execution is left to the policy gate sweep,
+// which also closes its message (review B R-B-1).
 func (q *Queries) ListDueApprovals(ctx context.Context, arg ListDueApprovalsParams) ([]ListDueApprovalsRow, error) {
 	rows, err := q.db.Query(ctx, listDueApprovals, arg.AtTime, arg.MaxRows)
 	if err != nil {

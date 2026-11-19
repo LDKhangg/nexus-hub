@@ -98,7 +98,7 @@ func TestRegistry_OrderAndKnown(t *testing.T) {
 	if !slices.IsSorted(known) {
 		t.Fatalf("not sorted %v", known)
 	}
-	want := []string{CapClickUpRead, CapClickUpWrite, CapGitHubRead, CapRepoRead, CapRepoWrite, CapTelegramNotify}
+	want := []string{CapClickUpRead, CapClickUpWrite, CapGitHubMerge, CapGitHubRead, CapRepoRead, CapRepoWrite, CapTelegramNotify}
 	if !slices.Equal(known, want) {
 		t.Fatalf("known %v", known)
 	}

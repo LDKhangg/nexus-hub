@@ -8,10 +8,10 @@ RETURNING *;
 
 -- name: InsertOrchestratorPlanTask :one
 INSERT INTO public.orchestrator_plan_tasks (workspace_id, plan_id, key, title, capabilities, depends_on, priority, complexity, executor,
-                                            state, result_step_id, result, evidence_refs)
+                                            state, result_step_id, result, evidence_refs, merge_target)
 VALUES (sqlc.arg(workspace_id), sqlc.arg(plan_id), sqlc.arg(key), sqlc.arg(title), sqlc.arg(capabilities)::text[], sqlc.arg(depends_on)::text[],
         sqlc.arg(priority), sqlc.arg(complexity), sqlc.arg(executor),
-        sqlc.arg(state), sqlc.arg(result_step_id), sqlc.arg(result), sqlc.arg(evidence_refs))
+        sqlc.arg(state), sqlc.arg(result_step_id), sqlc.arg(result), sqlc.arg(evidence_refs), sqlc.narg(merge_target))
 RETURNING *;
 
 -- name: SetOrchestratorPlanStatus :one
@@ -65,9 +65,10 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(executio
 -- over (the step's orchestrator_wake_at reference, unix seconds); the
 -- worker job the step waits on for the owner (job_owner:<id>) was retried
 -- and runs again; or the ClickUp draft the step waits on (task:draft:<id>)
--- has ended (posted, cancelled, expired or failed_final). Executions past
--- their deadline are left to the reconciler, and
--- one with a live queue row is already running.
+-- has ended (posted, cancelled, expired or failed_final); or the policy
+-- gate the step waits on (task:gate:<id>, Phase 9) was decided or expired.
+-- Executions past their deadline are left to the reconciler, and one with
+-- a live queue row is already running.
 SELECT s.workspace_id, s.execution_id, s.step_key
 FROM public.execution_steps s
 JOIN public.workflow_executions e ON e.workspace_id = s.workspace_id AND e.id = s.execution_id
@@ -90,6 +91,12 @@ WHERE s.kind = 'orchestrator.run_task' AND s.state = 'WAITING'
                  AND COALESCE(jsonb_path_exists(s.checkpoint,
                      '$.references[*] ? (@.kind == "orchestrator_wait" && @.reference_id == $ref)',
                      jsonb_build_object('ref', 'task:draft:' || d.id::text), true), false))
+    OR EXISTS (SELECT 1 FROM public.approvals a
+               WHERE a.workspace_id = s.workspace_id AND a.execution_id = s.execution_id
+                 AND a.kind = 'policy_gate' AND a.decision IS NOT NULL
+                 AND COALESCE(jsonb_path_exists(s.checkpoint,
+                     '$.references[*] ? (@.kind == "orchestrator_wait" && @.reference_id == $ref)',
+                     jsonb_build_object('ref', 'task:gate:' || a.id::text), true), false))
   )
   AND NOT EXISTS (SELECT 1 FROM public.jobs q
                   WHERE q.workspace_id = e.workspace_id AND q.execution_id = e.id AND q.status IN ('pending', 'processing'))

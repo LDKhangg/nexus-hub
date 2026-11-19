@@ -81,6 +81,9 @@ type OrchestratorActions struct {
 	// Chat is where a draft preview goes: the execution's topic. nil means
 	// the route's own chat and thread.
 	Chat func(ctx context.Context, route orchestrator.Route) ChatRef
+	// Merge runs github.merge tasks (Phase 9); nil: github.merge is not
+	// offered to Plan and its tasks fail with executor_unavailable.
+	Merge *OrchestratorMerge
 }
 
 var (
@@ -109,9 +112,12 @@ func actionFailed(reason string) orchestrator.TaskOutcome {
 }
 
 // RunTask starts one behavior-actions task. A ClickUp write returns a wait
-// on its draft; a notify finishes at once.
+// on its draft; a notify finishes at once; a merge runs under the policy
+// engine and may wait on the owner's approval (orchestrator_merge.go).
 func (a *OrchestratorActions) RunTask(ctx context.Context, run orchestrator.TaskRun) (orchestrator.TaskOutcome, error) {
 	switch {
+	case slices.Contains(run.Task.Capabilities, orchestrator.CapGitHubMerge):
+		return a.merge(ctx, run)
 	case slices.Contains(run.Task.Capabilities, orchestrator.CapClickUpWrite):
 		return a.draft(ctx, run)
 	case slices.Contains(run.Task.Capabilities, orchestrator.CapTelegramNotify):
@@ -124,6 +130,9 @@ func (a *OrchestratorActions) RunTask(ctx context.Context, run orchestrator.Task
 // interrupted cannot tell whether its message went out: it is reported as
 // interrupted, never sent twice.
 func (a *OrchestratorActions) ResumeTask(ctx context.Context, run orchestrator.TaskRun, waitRef string) (orchestrator.TaskOutcome, error) {
+	if slices.Contains(run.Task.Capabilities, orchestrator.CapGitHubMerge) {
+		return a.resumeMerge(ctx, run, waitRef)
+	}
 	if !slices.Contains(run.Task.Capabilities, orchestrator.CapClickUpWrite) {
 		return actionFailed(ReasonActionInterrupted), nil
 	}

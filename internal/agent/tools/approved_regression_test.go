@@ -55,7 +55,7 @@ func TestApproved_AmbiguousWriteTimeoutPanicNeverRepeated(t *testing.T) {
 				return ToolOutput{}, &ToolError{Code: "invalid_response", Ambiguous: true}
 			}
 			a := e.exec.Call(context.Background(), 1, "write_a", json.RawMessage(repoIn))
-			fresh := NewExecutor(e.exec.reg, policy(), l, false, e.store, upperSan{}, 42, "ws-1")
+			fresh := NewExecutor(e.exec.reg, policy(), l, e.store, upperSan{}, 42, "ws-1", execOpts(e.gate)...)
 			b := fresh.Call(context.Background(), 2, "write_a", json.RawMessage(`{ "repo":"o/r" }`))
 			if !a.IsError || a.Status != StatusUnknownOutcome || !b.IsError || b.Status != StatusUnknownOutcome || e.tools["write_a"].count() != 1 {
 				t.Error("uncertain effect repeated or not classified unknown_outcome")
@@ -73,13 +73,13 @@ func TestApproved_DryRunPreservesPolicyAndRealWrite(t *testing.T) {
 	p := policy()
 	p.DryRun = true
 	e := newEnv(t, p, false, Limits{})
-	expectDenied(t, e, e.exec.Call(context.Background(), 1, "danger_a", json.RawMessage(repoIn)), "dangerous_disabled")
+	expectDenied(t, e, e.exec.Call(context.Background(), 1, "danger_a", json.RawMessage(repoIn)), DenyApprovalRequired)
 	r := e.exec.Call(context.Background(), 2, "write_a", json.RawMessage(repoIn))
 	if r.IsError || r.Status != StatusDryRun || e.tools["write_a"].count() != 0 {
 		t.Error("dry-run write executed")
 	}
 	p.DryRun = false
-	real := NewExecutor(e.exec.reg, p, DefaultLimits(), false, e.store, upperSan{}, 42, "ws-1")
+	real := NewExecutor(e.exec.reg, p, DefaultLimits(), e.store, upperSan{}, 42, "ws-1", execOpts(e.gate)...)
 	r = real.Call(context.Background(), 3, "write_a", json.RawMessage(repoIn))
 	if r.IsError || r.Status != StatusOK || e.tools["write_a"].count() != 1 {
 		t.Error("dry-run audit suppressed later real effect")

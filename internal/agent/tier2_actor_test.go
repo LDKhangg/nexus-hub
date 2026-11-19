@@ -102,7 +102,7 @@ func newActorEnv(t *testing.T) actorEnv {
 		t.Fatal(err)
 	}
 	policy := tenant.ToolPolicyConfig{Enabled: []string{"code_search", "git_log", "github_pr_comment"}, MaxWritesPerJob: 2}
-	exec := tools.NewExecutor(reg, policy, tools.DefaultLimits(), false, &memRuns{}, NewRedactor(nil), 7, "ws")
+	exec := tools.NewExecutor(reg, policy, tools.DefaultLimits(), &memRuns{}, NewRedactor(nil), 7, "ws", tools.WithPolicy(allowWritesGate{}, "agent"))
 	return actorEnv{exec: exec, search: search, specs: reg.Specs([]string{"code_search", "git_log", "github_pr_comment"})}
 }
 

@@ -72,7 +72,7 @@ func TestApproved_RemoteAcceptedUncertainCommentNeverRepeats(t *testing.T) {
 			}
 			p := tenant.ToolPolicyConfig{MaxWritesPerJob: 2, Accounts: map[string]tenant.GitHubAccount{"p": {Name: "p"}}, Repos: map[string]tenant.RepoGrant{"o/r": {Repo: "o/r", Account: "p", Allow: []string{"github_pr_comment"}}}}
 			fresh := func() *tools.Executor {
-				return tools.NewExecutor(reg, p, tools.DefaultLimits(), false, store, red, job, workspaceA)
+				return tools.NewExecutor(reg, p, tools.DefaultLimits(), store, red, job, workspaceA, tools.WithPolicy(gateAllowAll, "agent"))
 			}
 			a := fresh().Call(ctx, 1, "github_pr_comment", json.RawMessage(`{"repo":"o/r","number":7,"body":"Báo cáo an toàn 🧠"}`))
 			b := fresh().Call(ctx, 2, "github_pr_comment", json.RawMessage(`{ "body":"Báo cáo an toàn 🧠", "number":7, "repo":"o/r" }`))

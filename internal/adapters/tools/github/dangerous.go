@@ -99,7 +99,9 @@ func merge(ctx context.Context, t *dangerTool, c tools.Call, in input) (tools.To
 	if !out.Merged {
 		return tools.ToolOutput{}, toolErr("not_merged")
 	}
-	return tools.ToolOutput{Text: fmt.Sprintf("merged #%d into %s (%s) as %s", p.Number, p.Base.Ref, in.MergeMethod, out.SHA), Summary: fmt.Sprintf("merged #%d %s", p.Number, short(out.SHA))}, nil
+	// The summary keeps the full merge SHA: a replay after a restart returns
+	// only the stored summary, and the merge evidence must stay the same.
+	return tools.ToolOutput{Text: fmt.Sprintf("merged #%d into %s (%s) as %s", p.Number, p.Base.Ref, in.MergeMethod, out.SHA), Summary: fmt.Sprintf("merged #%d %s", p.Number, out.SHA)}, nil
 }
 
 func (t *dangerTool) comment(ctx context.Context, c tools.Call, in input) error {

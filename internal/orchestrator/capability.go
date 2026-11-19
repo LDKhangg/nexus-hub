@@ -13,6 +13,10 @@ const (
 	CapGitHubRead     = "github.read"
 	CapClickUpWrite   = "clickup.write"
 	CapTelegramNotify = "telegram.notify"
+	// CapGitHubMerge merges one pull request (repo, number and the exact
+	// head SHA from earlier task evidence, PlanTask.Merge) under the policy
+	// engine; the default rule asks the owner first (Phase 9 REQ-9).
+	CapGitHubMerge = "github.merge"
 )
 
 // Executor names of the static registry (O3a).
@@ -26,6 +30,14 @@ const (
 	// local-task machinery).
 	ExecutorLocalWorker = "local-worker"
 )
+
+// CapabilityOfferer is optionally implemented by an in-process executor
+// that can run only some of its profile's capabilities (the merge needs
+// its tool and the policy engine wired). Plan is offered a capability of
+// such an executor only when Offers reports true.
+type CapabilityOfferer interface {
+	Offers(capability string) bool
+}
 
 // ExecutorProfile is one executor and the capabilities it covers.
 type ExecutorProfile struct {
@@ -58,7 +70,7 @@ type CapabilityRegistry struct {
 func NewCapabilityRegistry() *CapabilityRegistry {
 	return &CapabilityRegistry{profiles: []ExecutorProfile{
 		{Name: ExecutorInvestigate, Capabilities: []string{CapClickUpRead, CapGitHubRead, CapRepoRead}},
-		{Name: ExecutorBehaviorActions, Capabilities: []string{CapClickUpWrite, CapTelegramNotify}},
+		{Name: ExecutorBehaviorActions, Capabilities: []string{CapClickUpWrite, CapTelegramNotify, CapGitHubMerge}},
 		{Name: ExecutorLocalWorker, Capabilities: []string{CapRepoWrite, CapRepoRead}, Worker: true},
 	}}
 }

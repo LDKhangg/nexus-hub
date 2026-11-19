@@ -129,7 +129,12 @@ var (
         "priority":{"type":"string","enum":`+enumJSON(Priorities)+`},
         "complexity":{"type":"string","enum":`+enumJSON(Complexities)+`},
         "acceptance_hint":{"type":"string","maxLength":500},
-        "executor":{"type":"string","pattern":"^[a-z][a-z0-9_.-]{0,63}$"}
+        "executor":{"type":"string","pattern":"^[a-z][a-z0-9_.-]{0,63}$"},
+        "merge":{"type":"object","additionalProperties":false,"required":["repo","number","head_sha"],"properties":{
+          "repo":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_.-]{0,38}/[A-Za-z0-9_.-]{1,100}$"},
+          "number":{"type":"integer","minimum":1,"maximum":2147483647},
+          "head_sha":{"type":"string","pattern":"^[0-9a-f]{40}$"}
+        }}
       }}},
     "decision":{"type":"string","enum":`+enumJSON(Decisions)+`},
     "budget":{"type":"object","additionalProperties":false,"properties":{

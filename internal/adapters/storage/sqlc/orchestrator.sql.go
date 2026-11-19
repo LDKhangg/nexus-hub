@@ -148,11 +148,11 @@ func (q *Queries) InsertOrchestratorPlan(ctx context.Context, arg InsertOrchestr
 
 const insertOrchestratorPlanTask = `-- name: InsertOrchestratorPlanTask :one
 INSERT INTO public.orchestrator_plan_tasks (workspace_id, plan_id, key, title, capabilities, depends_on, priority, complexity, executor,
-                                            state, result_step_id, result, evidence_refs)
+                                            state, result_step_id, result, evidence_refs, merge_target)
 VALUES ($1, $2, $3, $4, $5::text[], $6::text[],
         $7, $8, $9,
-        $10, $11, $12, $13)
-RETURNING id, workspace_id, plan_id, key, title, capabilities, depends_on, priority, complexity, executor, state, result_step_id, result, evidence_refs, created_at, updated_at
+        $10, $11, $12, $13, $14)
+RETURNING id, workspace_id, plan_id, key, title, capabilities, depends_on, priority, complexity, executor, state, result_step_id, result, evidence_refs, created_at, updated_at, merge_target
 `
 
 type InsertOrchestratorPlanTaskParams struct {
@@ -169,6 +169,7 @@ type InsertOrchestratorPlanTaskParams struct {
 	ResultStepID string
 	Result       []byte
 	EvidenceRefs []byte
+	MergeTarget  []byte
 }
 
 func (q *Queries) InsertOrchestratorPlanTask(ctx context.Context, arg InsertOrchestratorPlanTaskParams) (OrchestratorPlanTask, error) {
@@ -186,6 +187,7 @@ func (q *Queries) InsertOrchestratorPlanTask(ctx context.Context, arg InsertOrch
 		arg.ResultStepID,
 		arg.Result,
 		arg.EvidenceRefs,
+		arg.MergeTarget,
 	)
 	var i OrchestratorPlanTask
 	err := row.Scan(
@@ -205,6 +207,7 @@ func (q *Queries) InsertOrchestratorPlanTask(ctx context.Context, arg InsertOrch
 		&i.EvidenceRefs,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.MergeTarget,
 	)
 	return i, err
 }
@@ -284,7 +287,7 @@ func (q *Queries) ListOrchestratorDecisions(ctx context.Context, arg ListOrchest
 }
 
 const listOrchestratorPlanTasks = `-- name: ListOrchestratorPlanTasks :many
-SELECT t.id, t.workspace_id, t.plan_id, t.key, t.title, t.capabilities, t.depends_on, t.priority, t.complexity, t.executor, t.state, t.result_step_id, t.result, t.evidence_refs, t.created_at, t.updated_at FROM public.orchestrator_plan_tasks t
+SELECT t.id, t.workspace_id, t.plan_id, t.key, t.title, t.capabilities, t.depends_on, t.priority, t.complexity, t.executor, t.state, t.result_step_id, t.result, t.evidence_refs, t.created_at, t.updated_at, t.merge_target FROM public.orchestrator_plan_tasks t
 JOIN public.orchestrator_plans p ON p.workspace_id = t.workspace_id AND p.id = t.plan_id
 WHERE p.workspace_id = $1 AND p.execution_id = $2
 ORDER BY p.version, t.id
@@ -321,6 +324,7 @@ func (q *Queries) ListOrchestratorPlanTasks(ctx context.Context, arg ListOrchest
 			&i.EvidenceRefs,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.MergeTarget,
 		); err != nil {
 			return nil, err
 		}
@@ -403,6 +407,12 @@ WHERE s.kind = 'orchestrator.run_task' AND s.state = 'WAITING'
                  AND COALESCE(jsonb_path_exists(s.checkpoint,
                      '$.references[*] ? (@.kind == "orchestrator_wait" && @.reference_id == $ref)',
                      jsonb_build_object('ref', 'task:draft:' || d.id::text), true), false))
+    OR EXISTS (SELECT 1 FROM public.approvals a
+               WHERE a.workspace_id = s.workspace_id AND a.execution_id = s.execution_id
+                 AND a.kind = 'policy_gate' AND a.decision IS NOT NULL
+                 AND COALESCE(jsonb_path_exists(s.checkpoint,
+                     '$.references[*] ? (@.kind == "orchestrator_wait" && @.reference_id == $ref)',
+                     jsonb_build_object('ref', 'task:gate:' || a.id::text), true), false))
   )
   AND NOT EXISTS (SELECT 1 FROM public.jobs q
                   WHERE q.workspace_id = e.workspace_id AND q.execution_id = e.id AND q.status IN ('pending', 'processing'))
@@ -427,9 +437,10 @@ type ListOrchestratorStepsToWakeRow struct {
 // over (the step's orchestrator_wake_at reference, unix seconds); the
 // worker job the step waits on for the owner (job_owner:<id>) was retried
 // and runs again; or the ClickUp draft the step waits on (task:draft:<id>)
-// has ended (posted, cancelled, expired or failed_final). Executions past
-// their deadline are left to the reconciler, and
-// one with a live queue row is already running.
+// has ended (posted, cancelled, expired or failed_final); or the policy
+// gate the step waits on (task:gate:<id>, Phase 9) was decided or expired.
+// Executions past their deadline are left to the reconciler, and one with
+// a live queue row is already running.
 func (q *Queries) ListOrchestratorStepsToWake(ctx context.Context, arg ListOrchestratorStepsToWakeParams) ([]ListOrchestratorStepsToWakeRow, error) {
 	rows, err := q.db.Query(ctx, listOrchestratorStepsToWake, arg.AtTime, arg.NowUnix, arg.RowLimit)
 	if err != nil {
@@ -498,7 +509,7 @@ UPDATE public.orchestrator_plan_tasks
 SET state = $1, executor = $2, result_step_id = $3,
     result = $4, evidence_refs = $5, updated_at = now()
 WHERE workspace_id = $6 AND plan_id = $7 AND key = $8
-RETURNING id, workspace_id, plan_id, key, title, capabilities, depends_on, priority, complexity, executor, state, result_step_id, result, evidence_refs, created_at, updated_at
+RETURNING id, workspace_id, plan_id, key, title, capabilities, depends_on, priority, complexity, executor, state, result_step_id, result, evidence_refs, created_at, updated_at, merge_target
 `
 
 type UpdateOrchestratorPlanTaskParams struct {
@@ -541,6 +552,7 @@ func (q *Queries) UpdateOrchestratorPlanTask(ctx context.Context, arg UpdateOrch
 		&i.EvidenceRefs,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.MergeTarget,
 	)
 	return i, err
 }

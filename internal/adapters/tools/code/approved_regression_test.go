@@ -270,11 +270,11 @@ func TestApproved_DefaultBranchUnknownIsDangerous(t *testing.T) {
 					}
 					audit := &approvedAuditStore{}
 					policy := tenant.ToolPolicyConfig{MaxWritesPerJob: 2, Accounts: map[string]tenant.GitHubAccount{"acc": {Name: "acc"}}, Repos: map[string]tenant.RepoGrant{"acme/app": g}}
-					exec := tools.NewExecutor(reg, policy, tools.DefaultLimits(), false, audit, testSan{}, 42, "ws")
+					exec := tools.NewExecutor(reg, policy, tools.DefaultLimits(), audit, testSan{}, 42, "ws", tools.WithPolicy(approvalGate{}, "agent"))
 					before := len(e.rec.all())
 					r := exec.Call(context.Background(), 1, "git_push", json.RawMessage(`{"repo":"acme/app","branch":"`+b+`"}`))
-					if !r.IsError || r.Status != tools.StatusDenied || audit.code != "dangerous_disabled" {
-						t.Error("dangerous push bypassed disabled DB switch")
+					if !r.IsError || r.Status != tools.StatusDenied || audit.code != tools.DenyApprovalRequired {
+						t.Error("dangerous push ran without the owner approval")
 					}
 					for _, cmd := range e.rec.all()[before:] {
 						if cmd.Network {

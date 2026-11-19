@@ -9,8 +9,52 @@ import (
 	"testing"
 	"time"
 
+	nhpolicy "github.com/LDKhangg/nexus-hub/internal/policy"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 )
+
+// ruleGate is a fake policy gate: tier defaults, then per-action effects.
+// It records every request it was asked.
+type ruleGate struct {
+	mu       sync.Mutex
+	tiers    map[nhpolicy.Tier]nhpolicy.Effect
+	byAction map[string]nhpolicy.Effect
+	reqs     []nhpolicy.Request
+}
+
+func (g *ruleGate) Decide(_ context.Context, r nhpolicy.Request) (nhpolicy.Decision, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.reqs = append(g.reqs, r)
+	if e, ok := g.byAction[r.Action]; ok {
+		return nhpolicy.Decision{Effect: e}, nil
+	}
+	if e, ok := g.tiers[r.Tier]; ok {
+		return nhpolicy.Decision{Effect: e}, nil
+	}
+	return nhpolicy.Decision{Effect: nhpolicy.EffectDeny}, nil
+}
+
+func (g *ruleGate) requests() []nhpolicy.Request {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]nhpolicy.Request(nil), g.reqs...)
+}
+
+// v1Gate is rule set v1: read and write allow, dangerous approval_required;
+// with dangerousAllowed the dangerous tier is allowed.
+func v1Gate(dangerousAllowed bool) *ruleGate {
+	d := nhpolicy.EffectApprovalRequired
+	if dangerousAllowed {
+		d = nhpolicy.EffectAllow
+	}
+	return &ruleGate{tiers: map[nhpolicy.Tier]nhpolicy.Effect{
+		nhpolicy.TierRead: nhpolicy.EffectAllow, nhpolicy.TierWrite: nhpolicy.EffectAllow, nhpolicy.TierDangerous: d,
+	}}
+}
+
+// execOpts is how the tests build a fresh executor over the same store.
+func execOpts(g PolicyGate) []Option { return []Option{WithPolicy(g, nhpolicy.ActorAgent)} }
 
 type fakeTool struct {
 	spec    ToolSpec
@@ -136,9 +180,15 @@ type env struct {
 	exec  *Executor
 	store *fakeStore
 	tools map[string]*fakeTool
+	gate  PolicyGate
 }
 
-func newEnv(t *testing.T, p tenant.ToolPolicyConfig, allowDangerous bool, limits Limits) env {
+func newEnv(t *testing.T, p tenant.ToolPolicyConfig, dangerousAllowed bool, limits Limits) env {
+	t.Helper()
+	return newEnvGate(t, p, v1Gate(dangerousAllowed), limits)
+}
+
+func newEnvGate(t *testing.T, p tenant.ToolPolicyConfig, gate PolicyGate, limits Limits) env {
 	t.Helper()
 	ra := readTool("read_a")
 	rr := tierTool("read_repo", tenant.TierRead)
@@ -160,8 +210,8 @@ func newEnv(t *testing.T, p tenant.ToolPolicyConfig, allowDangerous bool, limits
 	if limits == (Limits{}) {
 		limits = DefaultLimits()
 	}
-	e := NewExecutor(reg, p, limits, allowDangerous, store, upperSan{}, 42, "ws-1")
-	return env{exec: e, store: store, tools: map[string]*fakeTool{
+	e := NewExecutor(reg, p, limits, store, upperSan{}, 42, "ws-1", execOpts(gate)...)
+	return env{exec: e, store: store, gate: gate, tools: map[string]*fakeTool{
 		"read_a": ra, "read_repo": rr.fakeTool, "net_read": nr.fakeTool, "write_a": wa.fakeTool, "write_b": wb.fakeTool,
 		"write_c": wc.fakeTool, "danger_a": da.fakeTool, "danger_b": db.fakeTool, "push": push.fakeTool,
 	}}
@@ -220,9 +270,9 @@ func TestExecutor_WriteNotAllowedForRepo(t *testing.T) {
 	}
 }
 
-func TestExecutor_DangerousNeedsSwitch(t *testing.T) {
+func TestExecutor_DangerousNeedsApproval(t *testing.T) {
 	e := newEnv(t, policy(), false, Limits{})
-	expectDenied(t, e, e.exec.Call(context.Background(), 1, "danger_a", json.RawMessage(repoIn)), "dangerous_disabled")
+	expectDenied(t, e, e.exec.Call(context.Background(), 1, "danger_a", json.RawMessage(repoIn)), DenyApprovalRequired)
 	on := newEnv(t, policy(), true, Limits{})
 	if r := on.exec.Call(context.Background(), 1, "danger_a", json.RawMessage(repoIn)); r.IsError {
 		t.Fatalf("%+v", r)
@@ -235,7 +285,7 @@ func TestExecutor_EscalatedTierGated(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 	r := e.exec.Call(context.Background(), 1, "push", json.RawMessage(`{"repo":"o/r","branch":"main"}`))
-	expectDenied(t, e, r, "dangerous_disabled")
+	expectDenied(t, e, r, DenyApprovalRequired)
 	if r.Tier != tenant.TierDangerous || e.store.last().Start.Tier != tenant.TierDangerous {
 		t.Fatalf("tier not escalated %+v", r)
 	}
@@ -278,7 +328,7 @@ func TestExecutor_IdempotentReplayOK(t *testing.T) {
 	e := newEnv(t, policy(), false, Limits{})
 	first := e.exec.Call(context.Background(), 1, "write_a", json.RawMessage(repoIn))
 	// A retry builds a new executor for the same job with the same store.
-	again := NewExecutor(e.exec.reg, policy(), DefaultLimits(), false, e.store, upperSan{}, 42, "ws-1")
+	again := NewExecutor(e.exec.reg, policy(), DefaultLimits(), e.store, upperSan{}, 42, "ws-1", execOpts(e.gate)...)
 	second := again.Call(context.Background(), 2, "write_a", json.RawMessage(`{ "repo" : "o/r" }`))
 	if first.IsError || second.IsError || second.Status != "ok" || !strings.Contains(second.Content, "ran") {
 		t.Fatalf("first %+v second %+v", first, second)
@@ -420,7 +470,7 @@ func TestExecutor_WriteTimeoutNotRepeated(t *testing.T) {
 	if !r.IsError || r.Status != "unknown_outcome" || e.store.last().Status != "unknown_outcome" {
 		t.Fatalf("%+v", r)
 	}
-	again := NewExecutor(e.exec.reg, policy(), l, false, e.store, upperSan{}, 42, "ws-1")
+	again := NewExecutor(e.exec.reg, policy(), l, e.store, upperSan{}, 42, "ws-1", execOpts(e.gate)...)
 	if r := again.Call(context.Background(), 2, "write_a", json.RawMessage(repoIn)); r.Status != "unknown_outcome" || e.tools["write_a"].count() != 1 {
 		t.Fatalf("retry re-executed: %+v count %d", r, e.tools["write_a"].count())
 	}

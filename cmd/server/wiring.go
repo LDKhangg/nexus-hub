@@ -16,6 +16,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/adapters/netguard"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/sources/clickupchat"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage"
+	"github.com/LDKhangg/nexus-hub/internal/adapters/tools/catalog"
 	clickuptools "github.com/LDKhangg/nexus-hub/internal/adapters/tools/clickup"
 	codetools "github.com/LDKhangg/nexus-hub/internal/adapters/tools/code"
 	"github.com/LDKhangg/nexus-hub/internal/adapters/tools/execrunner"
@@ -28,6 +29,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/memory"
 	"github.com/LDKhangg/nexus-hub/internal/orchestrator"
+	"github.com/LDKhangg/nexus-hub/internal/policy"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/secrets"
@@ -45,6 +47,11 @@ type agentServices struct {
 	limits       tools.Limits
 	people       *storage.PeopleRepository
 	store        *storage.AgentStore
+	// policy is the Phase 9 policy engine. P1 constructs it; the tool
+	// executor and the orchestrator actions call it from P2/P3.
+	policy *policy.Engine
+	// policyStore holds rule sets, decisions and policy gates.
+	policyStore *storage.PolicyStore
 
 	conversations workflow.ConversationStore
 	// provider returns the workspace's default LLM provider.
@@ -187,12 +194,29 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 	compressor := memory.NewCompressor(store, provider, s.SummaryModel, func(v string) string { return redactor.RedactSecrets(agent.CleanInput(v)) })
 	limits := tools.DefaultLimits()
 	limits.ReadTimeout, limits.NetworkTimeout = s.ToolTimeout, s.GitNetworkTimeout
+	policyStore, err := storage.NewPolicyStore(pool)
+	if err != nil {
+		return agentServices{}, errors.New("policy store startup failed")
+	}
+	policyEngine := policy.NewEngine(policyStore, policyKnownActions(reg))
 	orch := agent.NewOrchestrator(store, models, reg, runs, redactor, compressor, agent.OrchestratorSettings{
-		PollInterval: s.AgentPollInterval, Limits: limits, AllowDangerous: s.AllowDangerous,
+		PollInterval: s.AgentPollInterval, Limits: limits,
 		MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
+		Policy: policyEngine,
 	})
 	worker := relay.NewActionWorker(actions, sender, relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout}, conversations)
-	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, investigators: investigators, people: directory, store: store, conversations: conversations}, nil
+	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, investigators: investigators, people: directory, store: store, conversations: conversations, policy: policyEngine, policyStore: policyStore}, nil
+}
+
+// policyKnownActions is the closed set of names a rule set may use: the
+// shared catalog (the same set nh policy validates against) plus every
+// name of the live registry, so a registered tool is never unknown.
+func policyKnownActions(reg *tools.Registry) policy.KnownActions {
+	names := make([]string, 0, len(reg.Tiers()))
+	for name := range reg.Tiers() {
+		names = append(names, name)
+	}
+	return catalog.PolicyKnownActions(names...)
 }
 
 // buildBehaviorEngine wires the behavior run executor and the action
@@ -214,7 +238,7 @@ func buildBehaviorEngine(pool *pgxpool.Pool, s settings.Settings, store *storage
 		Tasks:     taskReader{r: clickuptools.NewTaskReader(netguard.Client(s.ToolTimeout, netguard.DefaultHosts), resolver)},
 		Chats:     ownerChats{integrations: integrations, ownerChatID: s.OwnerTelegramChatID},
 		Messenger: messenger,
-		Callers:   behavior.ActionExecutorFactory(ag.reg, audit, redactor, ag.limits),
+		Callers:   behavior.ActionExecutorFactory(ag.reg, audit, redactor, ag.limits, ag.policy),
 		Decisions: behavior.MemoryRecorder{Store: store},
 		Digests:   store,
 		Redactor:  redactor,
@@ -265,7 +289,7 @@ func buildClickUpDrafts(pool *pgxpool.Pool, s settings.Settings, approvals behav
 	reader := clickuptools.NewTaskReader(netguard.Client(s.ToolTimeout, netguard.DefaultHosts), resolver)
 	drafts, err := behavior.NewClickUpDrafts(behavior.ClickUpDraftDeps{
 		Store: store, Approvals: approvals, Messenger: messenger, Policies: policies,
-		Callers: behavior.DraftExecutorFactory(ag.reg, audit, redactor, ag.limits),
+		Callers: behavior.DraftExecutorFactory(ag.reg, audit, redactor, ag.limits, ag.policy),
 		People:  ag.people, Redactor: redactor,
 		TaskURL: func(ctx context.Context, workspaceID, taskID string) string {
 			cfg, err := policies.RunPolicy(ctx, workspaceID, "")
@@ -661,7 +685,7 @@ func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServi
 	return &workflowRuntime{
 		store: store, commands: workflow.NewEngine(store), agents: agents, worker: worker, reconciler: workflow.NewReconciler(store), orch: ag.orchestrator,
 		pipeline: agent.PipelineSettings{
-			Limits: ag.limits, AllowDangerous: s.AllowDangerous,
+			Limits:         ag.limits,
 			MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
 			DebounceWindow: s.DebounceWindow, DebounceMaxWait: s.DebounceMaxWait,
 		},
@@ -765,7 +789,8 @@ func orchestratorStepSettings(s settings.Settings) orchestrator.StepSettings {
 // progress and Retry/Cancel (REQ-12).
 func registerOrchestratorSteps(ports *orchestratorPorts, reg *workflow.Registry, pool *pgxpool.Pool, store *storage.WorkflowStore, s settings.Settings, ag agentServices,
 	behaviors *storage.BehaviorStore, messenger behavior.Messenger, topics orchestratorTopics, jobs behavior.LocalTaskJobs, tasks *storage.WorkerTaskStore,
-	integrations *storage.IntegrationRepository, redactor *agent.Redactor, drafts *behavior.ClickUpDrafts, queued behavior.WorkerJobQueued) error {
+	integrations *storage.IntegrationRepository, redactor *agent.Redactor, drafts *behavior.ClickUpDrafts, queued behavior.WorkerJobQueued,
+	gates *behavior.PolicyGates) error {
 	plans, err := storage.NewOrchestratorStore(pool)
 	if err != nil {
 		return err
@@ -793,7 +818,17 @@ func registerOrchestratorSteps(ports *orchestratorPorts, reg *workflow.Registry,
 		},
 	}
 	if drafts != nil {
-		executors[orchestrator.ExecutorBehaviorActions] = &behavior.OrchestratorActions{Drafts: drafts, Owner: owner, Chat: owner.TopicChat}
+		actions := &behavior.OrchestratorActions{Drafts: drafts, Owner: owner, Chat: owner.TopicChat}
+		// github.merge (Phase 9): the merge tool under the policy engine,
+		// audited on the execution; approvals are policy gates.
+		if gates != nil && gates.Store != nil && ag.policy != nil {
+			actions.Merge = &behavior.OrchestratorMerge{
+				Registry: ag.reg, Audit: investigateAudit, Sanitizer: redactor, Limits: ag.limits,
+				Policies: behaviorPolicies{integrations: integrations, known: ag.known},
+				Engine:   ag.policy, Gates: gates,
+			}
+		}
+		executors[orchestrator.ExecutorBehaviorActions] = actions
 		drafts.OnFinished(behavior.OrchestratorDraftWaker(tasks))
 	}
 	steps := &orchestrator.Steps{
