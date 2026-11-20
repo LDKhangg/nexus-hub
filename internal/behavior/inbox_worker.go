@@ -176,7 +176,13 @@ func waitFor(ctx context.Context, d time.Duration) error {
 
 // Run processes updates until ctx ends. It also runs the assistant queue
 // and returns only after the assistant job in progress has stopped.
-func (w *InboxWorker) Run(ctx context.Context) error {
+func (w *InboxWorker) Run(ctx context.Context) error { return w.RunDrain(ctx, ctx) }
+
+// RunDrain claims updates until stop ends; an update already claimed is
+// handled and finished with hard, so a button press or command in flight at
+// shutdown completes instead of being cut off mid-handler. The assistant
+// loop stops with stop.
+func (w *InboxWorker) RunDrain(stop, hard context.Context) error {
 	var wg sync.WaitGroup
 	if w.d.Assistant != nil {
 		defer w.d.Assistant.waitSummaries()
@@ -184,18 +190,18 @@ func (w *InboxWorker) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		w.runAssistant(ctx)
+		w.runAssistant(stop)
 	}()
 	defer wg.Wait()
-	for ctx.Err() == nil {
-		worked, err := w.processNext(ctx)
-		if err != nil && ctx.Err() == nil {
+	for stop.Err() == nil && hard.Err() == nil {
+		worked, err := w.processNext(hard)
+		if err != nil && hard.Err() == nil {
 			log.Print("telegram inbound: storage operation failed; pending work retained")
 		}
 		if worked && err == nil {
 			continue
 		}
-		if err := w.wait(ctx, w.settings.PollInterval); err != nil {
+		if err := w.wait(stop, w.settings.PollInterval); err != nil {
 			return nil
 		}
 	}

@@ -138,6 +138,35 @@ func (q *Queries) CountUnsafeRetrySteps(ctx context.Context, arg CountUnsafeRetr
 	return count, err
 }
 
+const expireWorkflowJobLease = `-- name: ExpireWorkflowJobLease :execrows
+UPDATE public.jobs
+SET lease_expires_at = $1::timestamptz, updated_at = $1::timestamptz
+WHERE id = $2 AND workspace_id = $3 AND status = 'processing'
+  AND claim_token = $4 AND lease_expires_at > $1::timestamptz
+`
+
+type ExpireWorkflowJobLeaseParams struct {
+	AtTime      pgtype.Timestamptz
+	ID          int64
+	WorkspaceID pgtype.UUID
+	ClaimToken  pgtype.UUID
+}
+
+// Graceful shutdown: the claim holder ends its own live lease now, so the
+// next reconciliation resumes the job at once instead of after the lease.
+func (q *Queries) ExpireWorkflowJobLease(ctx context.Context, arg ExpireWorkflowJobLeaseParams) (int64, error) {
+	result, err := q.db.Exec(ctx, expireWorkflowJobLease,
+		arg.AtTime,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.ClaimToken,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const findReadyExecutionStep = `-- name: FindReadyExecutionStep :one
 SELECT s.id, s.workspace_id, s.execution_id, s.step_key, s.position, s.kind, s.depends_on, s.state, s.attempts, s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_write_tokens, s.checkpoint, s.created_at, s.updated_at FROM public.execution_steps s
 WHERE s.workspace_id = $1 AND s.execution_id = $2

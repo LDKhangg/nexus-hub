@@ -62,13 +62,18 @@ func waitNotice(ctx context.Context, d time.Duration) error {
 		return nil
 	}
 }
-func (w *NoticeWorker) Run(ctx context.Context) error {
-	for ctx.Err() == nil {
-		if err := w.processNext(ctx); err != nil && ctx.Err() == nil {
+func (w *NoticeWorker) Run(ctx context.Context) error { return w.RunDrain(ctx, ctx) }
+
+// RunDrain claims notices until stop ends; a notice already claimed is
+// delivered and recorded with hard, so a send in flight at shutdown ends
+// with its result stored instead of an unknown outcome.
+func (w *NoticeWorker) RunDrain(stop, hard context.Context) error {
+	for stop.Err() == nil && hard.Err() == nil {
+		if err := w.processNext(hard); err != nil && hard.Err() == nil {
 			log.Print("notice worker: storage operation failed; pending work retained")
 		}
-		if err := w.wait(ctx, w.settings.PollInterval); err != nil {
-			if ctx.Err() != nil {
+		if err := w.wait(stop, w.settings.PollInterval); err != nil {
+			if stop.Err() != nil || hard.Err() != nil {
 				return nil
 			}
 			return err

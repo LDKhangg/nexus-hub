@@ -70,6 +70,17 @@ type JobStore interface {
 	FailJob(context.Context, JobResultRequest) error
 }
 
+// LeaseReleaser is an optional JobStore extension used on graceful
+// shutdown: the claim holder ends its own live lease so the next
+// reconciliation resumes the job at once. It never completes, retries or
+// fails the job; that stays the reconciler's decision.
+type LeaseReleaser interface {
+	ReleaseJobLease(ctx context.Context, jobID int64, workspaceID, claimToken string, at time.Time) error
+}
+
+// leaseReleaseTimeout bounds the lease release write on shutdown.
+const leaseReleaseTimeout = 2 * time.Second
+
 // StepError is a sanitized executor failure. Retryable must be explicit;
 // unknown errors fail closed so recovery cannot blindly repeat side effects.
 type StepError struct {
@@ -148,7 +159,14 @@ func NewWorker(store JobStore, registry *Registry, clock Clock, settings WorkerS
 
 // Run polls until ctx is cancelled. A per-job storage failure leaves the
 // lease for reconciliation and does not stop independent executions.
-func (w *Worker) Run(ctx context.Context) error {
+func (w *Worker) Run(ctx context.Context) error { return w.RunUntil(ctx, ctx) }
+
+// RunUntil claims new jobs until stop ends, and runs every claimed job with
+// hard, so a job step already in flight when stop ends may finish (graceful
+// shutdown drain). When hard ends too, an interrupted step releases its own
+// lease (LeaseReleaser) and the next start resumes it. RunUntil returns
+// after every in-flight step has returned.
+func (w *Worker) RunUntil(stop, hard context.Context) error {
 	if w == nil || w.store == nil || w.registry == nil {
 		return ErrInvalidInput
 	}
@@ -157,21 +175,23 @@ func (w *Worker) Run(ctx context.Context) error {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			w.loop(ctx)
+			w.loop(stop, hard)
 		}()
 	}
 	workers.Wait()
 	return nil
 }
 
-func (w *Worker) loop(ctx context.Context) {
-	for ctx.Err() == nil {
-		worked, _ := w.ProcessNext(ctx)
+func (w *Worker) loop(stop, hard context.Context) {
+	for stop.Err() == nil && hard.Err() == nil {
+		worked, _ := w.ProcessNext(hard)
 		if worked {
 			continue
 		}
 		select {
-		case <-ctx.Done():
+		case <-stop.Done():
+			return
+		case <-hard.Done():
 			return
 		case <-w.clock.After(w.settings.PollInterval):
 		}
@@ -232,6 +252,7 @@ func (w *Worker) execute(ctx context.Context, job *Job) error {
 	})
 	if executeErr != nil {
 		if ctx.Err() != nil {
+			w.releaseLease(job)
 			return ctx.Err()
 		}
 		// An executor's explicit uncertainty wins over the timer: the side
@@ -275,6 +296,19 @@ func (w *Worker) execute(ctx context.Context, job *Job) error {
 	}
 	request.Reason = ReasonStepSucceeded
 	return w.store.CompleteJob(ctx, request)
+}
+
+// releaseLease ends the lease of a job whose step was cut off by shutdown,
+// when the store supports it. A failure only means the lease expires on its
+// own.
+func (w *Worker) releaseLease(job *Job) {
+	releaser, ok := w.store.(LeaseReleaser)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), leaseReleaseTimeout)
+	defer cancel()
+	_ = releaser.ReleaseJobLease(ctx, job.ID, job.WorkspaceID, job.ClaimToken, w.clock.Now())
 }
 
 func (w *Worker) retryOrFail(ctx context.Context, job *Job, reason ReasonCode, checkpoint *Checkpoint, usage Usage) error {

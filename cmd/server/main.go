@@ -37,9 +37,15 @@ func main() {
 }
 
 const (
-	bodyLimit       = "1M"
-	shutdownTimeout = 10 * time.Second
-	secretCacheTTL  = 5 * time.Minute
+	bodyLimit      = "1M"
+	secretCacheTTL = 5 * time.Minute
+	// startupRecoveryTimeout bounds the recovery passes run before the hub
+	// serves; a pass cut off here is repeated by its own sweeper.
+	startupRecoveryTimeout = 30 * time.Second
+	// stopGrace is how long shutdown waits, after shutdown_timeout ended
+	// and in-flight work was cancelled, before it logs the workers that are
+	// still stopping.
+	stopGrace = 3 * time.Second
 )
 
 func run() error {
@@ -256,25 +262,84 @@ func run() error {
 	e.POST("/webhook/:source/:integrationID", handler.HandleWebhook)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runServices(ctx, e, services, s.ListenAddr, shutdownTimeout)
+	// Crash resume (REQ-3): every lease, wait and post a crash left behind
+	// is repaired once before the hub serves. Each service repeats its pass
+	// when it starts; all passes are idempotent.
+	recoverAtStartup(ctx, []recoveryPass{
+		{"workflow_reconcile", workflows.Recover},
+		{"worker_leases", func(ctx context.Context) error { _, err := workerStore.ExpireLeases(ctx); return err }},
+		{"worker_tasks", taskStore.SyncWorkerTasks},
+		{"behavior_approvals", func(ctx context.Context) error { _, err := engine.Sweep(ctx); return err }},
+		{"policy_gates", func(ctx context.Context) error { _, err := policyGates.Sweep(ctx); return err }},
+		{"clickup_drafts", clickUpDrafts.Sweep},
+	}, startupRecoveryTimeout)
+	return runServices(ctx, e, services, s.ListenAddr, s.ShutdownTimeout)
+}
+
+// recoveryPass is one named startup repair.
+type recoveryPass struct {
+	name string
+	run  func(context.Context) error
+}
+
+// recoverAtStartup runs each pass in order within timeout. A failed pass is
+// logged by name only (never record contents) and does not stop startup:
+// its sweeper retries it on its own period.
+func recoverAtStartup(ctx context.Context, passes []recoveryPass, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	started := time.Now()
+	failed := 0
+	for _, p := range passes {
+		if ctx.Err() != nil {
+			failed++
+			continue
+		}
+		if err := p.run(ctx); err != nil {
+			failed++
+			log.Printf("startup recovery: %s not completed; retried by its sweeper", p.name)
+		}
+	}
+	log.Printf("startup recovery: passes=%d failed=%d duration_ms=%d", len(passes), failed, time.Since(started).Milliseconds())
 }
 
 type serviceWorker interface{ Run(context.Context) error }
 
+// drainingService is a worker that can finish in-flight work on shutdown:
+// it stops claiming when stop ends and runs claimed work with hard, which
+// ends only when shutdown_timeout runs out.
+type drainingService interface {
+	RunDrain(stop, hard context.Context) error
+}
+
 // runServices owns cancellation: any worker or the server stopping shuts
 // everything down, and it waits for every DB user before returning.
+//
+// Shutdown order (REQ-4), all within shutdownTimeout: the HTTP server stops
+// accepting and lets in-flight requests finish (webhooks are stored before
+// their 2xx, so nothing acknowledged is lost); then every background loop
+// stops claiming new work; then in-flight job steps get the rest of the
+// timeout to finish. When it runs out, in-flight work is cancelled, and a
+// cut-off workflow step releases its own lease so the next start resumes
+// it. A shutdown by signal returns nil (exit 0).
 func runServices(ctx context.Context, e *echo.Echo, workers []serviceWorker, address string, shutdownTimeout time.Duration) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return errors.New("HTTP listener startup failed")
 	}
 	e.Listener = listener
-	workerCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	stopCtx, stopWorkers := context.WithCancel(ctx)
+	defer stopWorkers()
+	hardCtx, cancelInFlight := context.WithCancel(context.Background())
+	defer cancelInFlight()
 	workerDone := make(chan error, len(workers))
 	serverDone := make(chan error, 1)
 	for _, w := range workers {
-		go func() { workerDone <- w.Run(workerCtx) }()
+		if d, ok := w.(drainingService); ok {
+			go func() { workerDone <- d.RunDrain(stopCtx, hardCtx) }()
+			continue
+		}
+		go func() { workerDone <- w.Run(stopCtx) }()
 	}
 	go func() { serverDone <- e.Start(address) }()
 	var result error
@@ -289,15 +354,47 @@ func runServices(ctx context.Context, e *echo.Echo, workers []serviceWorker, add
 		stopped = 1
 		result = errors.New("worker stopped unexpectedly")
 	}
-	cancel()
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	started := time.Now()
+	deadline := started.Add(shutdownTimeout)
+	shutdownCtx, shutdownCancel := context.WithDeadline(context.Background(), deadline)
 	defer shutdownCancel()
 	if err := e.Shutdown(shutdownCtx); err != nil {
 		_ = e.Close()
 		result = errors.New("HTTP shutdown timed out")
 	}
-	for ; stopped < len(workers); stopped++ {
-		<-workerDone
+	stopWorkers()
+	timedOut := false
+	drainTimer := time.NewTimer(time.Until(deadline))
+	defer drainTimer.Stop()
+	for stopped < len(workers) {
+		select {
+		case <-workerDone:
+			stopped++
+		case <-drainTimer.C:
+			timedOut = true
+			cancelInFlight()
+			log.Printf("shutdown: timeout reached; in-flight work cancelled workers_running=%d", len(workers)-stopped)
+			stopped += waitWorkers(workerDone, len(workers)-stopped, stopGrace)
+		}
 	}
+	cancelInFlight()
+	log.Printf("shutdown: done duration_ms=%d timed_out=%t", time.Since(started).Milliseconds(), timedOut)
 	return result
+}
+
+// waitWorkers waits for n workers to stop, logging once (count only) when
+// some still run after grace; it returns n, because the caller must not
+// close the database while any worker uses it.
+func waitWorkers(done <-chan error, n int, grace time.Duration) int {
+	t := time.NewTimer(grace)
+	defer t.Stop()
+	for left := n; left > 0; {
+		select {
+		case <-done:
+			left--
+		case <-t.C:
+			log.Printf("shutdown: workers still stopping after grace workers_running=%d", left)
+		}
+	}
+	return n
 }

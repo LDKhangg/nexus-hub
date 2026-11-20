@@ -251,6 +251,14 @@ ORDER BY j.lease_expires_at, j.id
 FOR UPDATE OF j, e SKIP LOCKED
 LIMIT 100;
 
+-- name: ExpireWorkflowJobLease :execrows
+-- Graceful shutdown: the claim holder ends its own live lease now, so the
+-- next reconciliation resumes the job at once instead of after the lease.
+UPDATE public.jobs
+SET lease_expires_at = sqlc.arg(at_time)::timestamptz, updated_at = sqlc.arg(at_time)::timestamptz
+WHERE id = sqlc.arg(id) AND workspace_id = sqlc.arg(workspace_id) AND status = 'processing'
+  AND claim_token = sqlc.arg(claim_token) AND lease_expires_at > sqlc.arg(at_time)::timestamptz;
+
 -- name: ResetExpiredWorkflowJob :one
 UPDATE public.jobs
 SET status = 'pending', due_at = sqlc.arg(due_at), claim_token = NULL, lease_expires_at = NULL,

@@ -694,15 +694,21 @@ func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServi
 }
 
 // Run reconciles once, then runs the worker, the starter and the periodic
-// reconciler until ctx ends. On shutdown it stops claiming and starting;
-// a step cut off mid-attempt writes nothing more, and its lease simply
-// expires for the next reconciliation (no lease is released early).
-func (r *workflowRuntime) Run(ctx context.Context) error {
-	r.reconcile(ctx)
+// reconciler until ctx ends (no drain: see RunDrain).
+func (r *workflowRuntime) Run(ctx context.Context) error { return r.RunDrain(ctx, ctx) }
+
+// RunDrain reconciles once, then runs the worker, the starter and the
+// periodic reconciler until stop ends. On shutdown it stops claiming and
+// starting at once, while job steps already in flight keep running until
+// they return or hard ends. A step cut off by hard writes nothing more and
+// releases its own lease, so the next start's reconciliation resumes it at
+// once.
+func (r *workflowRuntime) RunDrain(stop, hard context.Context) error {
+	r.reconcile(stop)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = r.worker.Run(ctx)
+		_ = r.worker.RunUntil(stop, hard)
 	}()
 	start := time.NewTicker(r.interval)
 	defer start.Stop()
@@ -710,15 +716,22 @@ func (r *workflowRuntime) Run(ctx context.Context) error {
 	defer reconcile.Stop()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-stop.Done():
 			<-done
 			return nil
 		case <-start.C:
-			r.startCutOver(ctx)
+			r.startCutOver(stop)
 		case <-reconcile.C:
-			r.reconcile(ctx)
+			r.reconcile(stop)
 		}
 	}
+}
+
+// Recover runs the startup reconciliation pass (expired leases back to the
+// queue, missing wakeups re-armed, lost signals repaired) before the hub
+// serves; Run repeats it, which is idempotent.
+func (r *workflowRuntime) Recover(ctx context.Context) error {
+	return r.reconciler.Reconcile(ctx, time.Now())
 }
 
 // reconcile repairs expired leases, missing wakeups and lost signals. Only
