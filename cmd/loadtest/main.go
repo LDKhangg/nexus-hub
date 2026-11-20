@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -125,16 +126,17 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err := validateDatabaseURL(opts.databaseURL); err != nil {
+	poolConfig, err := parseValidatedDatabaseURL(opts.databaseURL)
+	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 	defer cancel()
-	if err := migrate(ctx, opts.databaseURL); err != nil {
+	if err := migrate(ctx, poolConfig.ConnConfig.ConnString()); err != nil {
 		return err
 	}
 
-	pool, err := pgxpool.New(ctx, opts.databaseURL)
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		return errors.New("database connection configuration failed")
 	}
@@ -201,22 +203,52 @@ func parseOptions() (options, error) {
 }
 
 func validateDatabaseURL(raw string) error {
+	_, err := parseValidatedDatabaseURL(raw)
+	return err
+}
+
+func parseValidatedDatabaseURL(raw string) (*pgxpool.Config, error) {
+	for _, entry := range os.Environ() {
+		name, value, _ := strings.Cut(entry, "=")
+		if !strings.HasPrefix(name, "PG") {
+			continue
+		}
+		if name == "PGPORT" {
+			port, err := strconv.Atoi(value)
+			if err != nil || port < 1 || port > 65535 {
+				return nil, errors.New("PGPORT must be numeric")
+			}
+			continue
+		}
+		return nil, errors.New("PG environment variables are not allowed")
+	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "postgres" && u.Scheme != "postgresql" {
-		return errors.New("database URL must use postgres or postgresql")
+		return nil, errors.New("database URL must use postgres or postgresql")
 	}
-	ip := net.ParseIP(u.Hostname())
+	if strings.Contains(u.Host, ",") {
+		return nil, errors.New("database URL must contain exactly one host")
+	}
+	for _, key := range []string{"host", "hostaddr", "dbname", "service", "servicefile", "passfile"} {
+		if _, present := u.Query()[key]; present {
+			return nil, errors.New("database URL contains a forbidden connection option")
+		}
+	}
+	config, err := pgxpool.ParseConfig(raw)
+	if err != nil {
+		return nil, errors.New("database connection configuration failed")
+	}
+	ip := net.ParseIP(config.ConnConfig.Host)
 	if ip == nil || !ip.IsLoopback() {
-		return errors.New("database host must be a loopback IP address")
+		return nil, errors.New("database host must be a loopback IP address")
 	}
-	database := strings.TrimPrefix(u.EscapedPath(), "/")
-	if decoded, decodeErr := url.PathUnescape(database); decodeErr == nil {
-		database = decoded
+	if len(config.ConnConfig.Fallbacks) != 0 {
+		return nil, errors.New("database connection fallbacks are not allowed")
 	}
-	if !strings.HasSuffix(database, "_loadtest") {
-		return errors.New("database name must end in _loadtest")
+	if !strings.HasSuffix(config.ConnConfig.Database, "_loadtest") {
+		return nil, errors.New("database name must end in _loadtest")
 	}
-	return nil
+	return config, nil
 }
 
 func migrate(ctx context.Context, databaseURL string) error {

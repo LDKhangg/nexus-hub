@@ -60,26 +60,35 @@ func retentionCommand(ctx context.Context, pool *pgxpool.Pool, args []string, ou
 		fmt.Fprintf(out, "policy_decisions_days=%d\n", rules.PolicyDecisionsDays)
 		fmt.Fprintf(out, "workflow_days=%d\n", rules.WorkflowDays)
 		fmt.Fprintf(out, "outbound_days=%d\n", rules.OutboundDays)
+		fmt.Fprintln(out, "candidates now (dry-run gives exact counts)")
 		writeRetentionCounts(out, counts)
 		return nil
 	}
 	if *dryRun {
-		counts, err := store.CountRetention(ctx, *workspaceID, rules, now)
+		result, err := store.SweepRetentionDryRun(ctx, *workspaceID, rules, now, 500)
 		if err != nil {
+			if errors.Is(err, storage.ErrRetentionBusy) {
+				return errors.New("busy, try again")
+			}
 			return errors.New("database operation failed")
 		}
-		writeRetentionCounts(out, counts)
+		writeRetentionResult(out, result)
 		return nil
 	}
 	result, err := store.SweepRetention(ctx, *workspaceID, rules, now, 500)
 	if err != nil {
 		return errors.New("database operation failed")
 	}
+	writeRetentionResult(out, result)
+	return nil
+}
+
+func writeRetentionResult(out io.Writer, result behavior.RetentionResult) {
 	writeRetentionCounts(out, result.Counts)
 	for _, issue := range result.Issues {
 		fmt.Fprintf(out, "%s_code=%s\n", issue.Table, issue.Code)
+		fmt.Fprintf(out, "%s_issue_count=%d\n", issue.Table, issue.Count)
 	}
-	return nil
 }
 
 func validateRetentionWorkspace(ctx context.Context, pool *pgxpool.Pool, workspaceID string) error {

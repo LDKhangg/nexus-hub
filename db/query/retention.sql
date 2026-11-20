@@ -98,6 +98,7 @@ WITH picked AS MATERIALIZED (
     WHERE e.state IN ('COMPLETED', 'FAILED', 'CANCELLED')
       AND e.finished_at < sqlc.arg(cutoff)
       AND (sqlc.narg(workspace_id)::uuid IS NULL OR e.workspace_id = sqlc.narg(workspace_id))
+      AND NOT (e.id = ANY(sqlc.arg(skip_ids)::bigint[]))
       AND NOT EXISTS (SELECT 1 FROM workflow_executions c WHERE c.parent_execution_id = e.id)
       AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.execution_id = e.id AND a.decision IS NULL)
       AND NOT EXISTS (SELECT 1 FROM workflow_waits w WHERE w.execution_id = e.id AND w.closed_at IS NULL)

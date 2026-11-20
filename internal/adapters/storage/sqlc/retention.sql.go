@@ -267,6 +267,7 @@ WITH picked AS MATERIALIZED (
     WHERE e.state IN ('COMPLETED', 'FAILED', 'CANCELLED')
       AND e.finished_at < $1
       AND ($2::uuid IS NULL OR e.workspace_id = $2)
+      AND NOT (e.id = ANY($3::bigint[]))
       AND NOT EXISTS (SELECT 1 FROM workflow_executions c WHERE c.parent_execution_id = e.id)
       AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.execution_id = e.id AND a.decision IS NULL)
       AND NOT EXISTS (SELECT 1 FROM workflow_waits w WHERE w.execution_id = e.id AND w.closed_at IS NULL)
@@ -297,7 +298,7 @@ WITH picked AS MATERIALIZED (
           WHERE w.execution_id = e.id AND w.state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
       )
     ORDER BY e.finished_at, e.id
-    LIMIT $3
+    LIMIT $4
     FOR UPDATE OF e SKIP LOCKED
 )
 SELECT id FROM picked
@@ -306,11 +307,17 @@ SELECT id FROM picked
 type PickRetentionWorkflowExecutionsParams struct {
 	Cutoff      pgtype.Timestamptz
 	WorkspaceID pgtype.UUID
+	SkipIds     []int64
 	BatchSize   int32
 }
 
 func (q *Queries) PickRetentionWorkflowExecutions(ctx context.Context, arg PickRetentionWorkflowExecutionsParams) ([]int64, error) {
-	rows, err := q.db.Query(ctx, pickRetentionWorkflowExecutions, arg.Cutoff, arg.WorkspaceID, arg.BatchSize)
+	rows, err := q.db.Query(ctx, pickRetentionWorkflowExecutions,
+		arg.Cutoff,
+		arg.WorkspaceID,
+		arg.SkipIds,
+		arg.BatchSize,
+	)
 	if err != nil {
 		return nil, err
 	}

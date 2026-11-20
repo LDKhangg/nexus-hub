@@ -24,6 +24,7 @@ type RetentionRules struct {
 type RetentionIssue struct {
 	Table string
 	Code  string
+	Count int64
 }
 
 // RetentionResult contains table counts and recoverable constraint failures.
@@ -108,6 +109,7 @@ func (r *Retention) runPass(ctx context.Context, now time.Time, batch int32) {
 	}
 	for _, issue := range result.Issues {
 		parts = append(parts, issue.Table+"_code="+issue.Code)
+		parts = append(parts, issue.Table+"_issue_count="+formatRetentionCount(issue.Count))
 	}
 	log.Print("retention: pass " + strings.Join(parts, " "))
 }
