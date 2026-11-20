@@ -883,6 +883,15 @@ type WorkerTelemetryHourly struct {
 	BusySecondsTotal     pgtype.Int8
 }
 
+// One Telegram alert per workflow execution and alert state (dedup); ids, state and time only.
+type WorkflowAlert struct {
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+	State       string
+	// When the alert was claimed; a row of an alert merged into the hourly summary (rate cap) is kept too.
+	SentAt pgtype.Timestamptz
+}
+
 type WorkflowExecution struct {
 	ID                int64
 	WorkspaceID       pgtype.UUID

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
+	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -149,4 +150,65 @@ func (s *OpsStore) LLMCostForDay(ctx context.Context, workspaceID string, day ti
 		return 0, err
 	}
 	return s.q.SumLLMCostForDay(ctx, sqlc.SumLLMCostForDayParams{WorkspaceID: ws, Day: utcDay(day)})
+}
+
+var _ behavior.WorkflowAlertStore = (*OpsStore)(nil)
+
+// ListAlertCandidates returns workflow executions in an alert state that
+// have no alert row yet, oldest first (Phase 12 REQ-10).
+func (s *OpsStore) ListAlertCandidates(ctx context.Context, q behavior.AlertQuery) ([]behavior.WorkflowAlert, error) {
+	limit := q.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.q.ListWorkflowAlertCandidates(ctx, sqlc.ListWorkflowAlertCandidatesParams{
+		RunningBefore: ts(q.RunningBefore), QueuedBefore: ts(q.QueuedBefore),
+		ApprovalBefore: ts(q.ApprovalBefore), FailedSince: ts(q.FailedSince), RowLimit: int32(limit),
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]behavior.WorkflowAlert, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, behavior.WorkflowAlert{
+			WorkspaceID: uuidString(r.WorkspaceID), ExecutionID: r.ExecutionID, State: behavior.AlertState(r.AlertState),
+			BehaviorName: r.BehaviorName, Since: r.SinceAt.Time, ErrorCode: r.ErrorCode,
+		})
+	}
+	return out, nil
+}
+
+// ClaimAlert inserts the dedup row of (execution, state); claimed is false
+// when the alert was claimed before.
+func (s *OpsStore) ClaimAlert(ctx context.Context, a behavior.WorkflowAlert, at time.Time) (bool, error) {
+	ws, err := parseDBID(a.WorkspaceID)
+	if err != nil {
+		return false, err
+	}
+	n, err := s.q.ClaimWorkflowAlert(ctx, sqlc.ClaimWorkflowAlertParams{WorkspaceID: ws, ExecutionID: a.ExecutionID, State: string(a.State), SentAt: ts(at)})
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+// ReleaseAlert deletes the dedup row of an alert whose send failed.
+func (s *OpsStore) ReleaseAlert(ctx context.Context, a behavior.WorkflowAlert) error {
+	ws, err := parseDBID(a.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	_, err = s.q.ReleaseWorkflowAlert(ctx, sqlc.ReleaseWorkflowAlertParams{WorkspaceID: ws, ExecutionID: a.ExecutionID, State: string(a.State)})
+	return err
+}
+
+// OpenAlertCount counts open workflow alerts, hub-wide when workspaceID is
+// "": stuck or overdue alerts of executions that have not ended, and failed
+// alerts sent since failedSince.
+func (s *OpsStore) OpenAlertCount(ctx context.Context, workspaceID string, failedSince time.Time) (int64, error) {
+	ws, err := optionalWorkspace(workspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return s.q.CountOpenWorkflowAlerts(ctx, sqlc.CountOpenWorkflowAlertsParams{WorkspaceID: ws, FailedSince: ts(failedSince)})
 }

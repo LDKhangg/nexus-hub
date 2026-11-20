@@ -79,6 +79,9 @@ type Settings struct {
 	WorkspaceMaxConcurrent          int64         // executions of one workspace running a step at once; 0 = off; owner work and resumes exempt
 	LLMDailyBudgetUSD               float64       // model spend per UTC day; 0 = off
 	MetricsAddr                     string        // loopback host:port of the /metrics listener; empty = off
+	AlertsEnabled                   bool          // Telegram alerts for stuck and failed workflows (Phase 12 REQ-10)
+	AlertStuckRunningMinutes        int64         // a processing job unchanged this long alerts "stuck running"
+	AlertStuckQueuedMinutes         int64         // a pending job due this long alerts "stuck queued"
 }
 
 // Store reads every stored setting.
@@ -195,6 +198,9 @@ var specs = map[string]spec{
 	"workspace_max_concurrent_executions": {kind: kInt, def: int64(4), min: 0, max: 64, set: func(s *Settings, v any) { s.WorkspaceMaxConcurrent = v.(int64) }},
 	"llm_daily_budget_usd":                {kind: kFloat, def: 0.0, min: 0, max: 1_000_000, set: func(s *Settings, v any) { s.LLMDailyBudgetUSD = v.(float64) }},
 	"metrics_addr":                        {kind: kLoopbackAddr, def: "127.0.0.1:9090", set: func(s *Settings, v any) { s.MetricsAddr = v.(string) }},
+	"alerts_enabled":                      {kind: kBool, def: true, set: func(s *Settings, v any) { s.AlertsEnabled = v.(bool) }},
+	"alert_stuck_running_minutes":         {kind: kInt, def: int64(15), min: 1, max: 1440, set: func(s *Settings, v any) { s.AlertStuckRunningMinutes = v.(int64) }},
+	"alert_stuck_queued_minutes":          {kind: kInt, def: int64(30), min: 1, max: 1440, set: func(s *Settings, v any) { s.AlertStuckQueuedMinutes = v.(int64) }},
 	"telegram_mode":                       {kind: kEnum, def: TelegramModeAuto, enum: []string{TelegramModeAuto, TelegramModeWebhook, TelegramModePoll}, set: func(s *Settings, v any) { s.TelegramMode = v.(string) }},
 }
 

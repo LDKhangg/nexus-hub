@@ -33,6 +33,14 @@ const (
 	SourceOther    = "other"
 )
 
+// Alert states of nexushub_alerts_sent_total (Phase 12 REQ-10).
+const (
+	AlertStuckRunning    = "stuck_running"
+	AlertStuckQueued     = "stuck_queued"
+	AlertApprovalOverdue = "approval_overdue"
+	AlertFailed          = "failed"
+)
+
 // other replaces a label value outside its closed set.
 const other = "other"
 
@@ -78,6 +86,8 @@ type Hub struct {
 	reg       *prometheus.Registry
 	errors    *prometheus.CounterVec
 	latency   *prometheus.HistogramVec
+	alerts    *prometheus.CounterVec
+	suppress  prometheus.Counter
 	codes     map[string]bool
 	providers map[string]bool
 	models    map[string]bool
@@ -108,8 +118,16 @@ func New(o Options) *Hub {
 			Help:    "Webhook handler latency by source.",
 			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
 		}, []string{"source"}),
+		alerts: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "nexushub_alerts_sent_total",
+			Help: "Telegram workflow alerts sent, by alert state.",
+		}, []string{"state"}),
+		suppress: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "nexushub_alerts_suppressed_total",
+			Help: "Workflow alerts merged into the hourly summary by the rate cap.",
+		}),
 	}
-	h.reg.MustRegister(h.errors, h.latency)
+	h.reg.MustRegister(h.errors, h.latency, h.alerts, h.suppress)
 	if o.Snapshot != nil {
 		timeout := o.ScrapeTimeout
 		if timeout <= 0 {
@@ -157,6 +175,28 @@ func (h *Hub) WebhookLatency(source string, d time.Duration) {
 		source = SourceOther
 	}
 	h.latency.WithLabelValues(source).Observe(d.Seconds())
+}
+
+// AlertSent counts one sent workflow alert of state (closed set). A nil
+// Hub counts nothing.
+func (h *Hub) AlertSent(state string) {
+	if h == nil {
+		return
+	}
+	switch state {
+	case AlertStuckRunning, AlertStuckQueued, AlertApprovalOverdue, AlertFailed:
+	default:
+		state = other
+	}
+	h.alerts.WithLabelValues(state).Inc()
+}
+
+// AlertSuppressed counts one alert merged into the hourly summary.
+func (h *Hub) AlertSuppressed() {
+	if h == nil {
+		return
+	}
+	h.suppress.Inc()
 }
 
 // HTTPStatusCode is the closed code of a rejected webhook status.

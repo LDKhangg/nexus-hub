@@ -179,7 +179,24 @@ func run() error {
 		// stored result of an ended /task or /plan execution.
 		reports = &behavior.ExecutionReports{}
 	)
-	workflows, err := buildWorkflowRuntime(pool, s, ag, behaviors, runs, engine, ops.stepFailureObserver(), func(reg *workflow.Registry, store *storage.WorkflowStore) error {
+	// Phase 12 REQ-10: stuck and failed workflow alerts to the General
+	// topic. A step failed for good asks for an early scan; the database
+	// scan stays the source of truth.
+	alerts := &behavior.WorkflowAlerts{
+		Store: ops.store, Chats: ownerChats{integrations: integrations, ownerChatID: s.OwnerTelegramChatID},
+		Messenger: messenger, Metrics: ops.hub, Enabled: s.AlertsEnabled,
+		StuckRunning: time.Duration(s.AlertStuckRunningMinutes) * time.Minute,
+		StuckQueued:  time.Duration(s.AlertStuckQueuedMinutes) * time.Minute,
+		SendTimeout:  s.NoticeRequestTimeout,
+	}
+	stepObserver := ops.stepFailureObserver()
+	onStepFailure := func(reason workflow.ReasonCode, final bool) {
+		stepObserver(reason, final)
+		if final {
+			alerts.Kick()
+		}
+	}
+	workflows, err := buildWorkflowRuntime(pool, s, ag, behaviors, runs, engine, onStepFailure, func(reg *workflow.Registry, store *storage.WorkflowStore) error {
 		var err error
 		if taskStore, err = storage.NewWorkerTaskStore(pool, workerStore, store); err != nil {
 			return err
@@ -247,7 +264,7 @@ func run() error {
 	}
 	notices.SetStatusObserver(lifecycle.StatusChanged)
 	topics.OnTaskTopicOpen(lifecycle.TopicReopened)
-	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows, lifecycle, &behavior.WorkerSweeper{Store: workerStore}, workerNotifier, &behavior.WorkerTaskSweeper{Store: taskStore}, clickUpDrafts, policyGates}
+	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows, lifecycle, &behavior.WorkerSweeper{Store: workerStore}, workerNotifier, &behavior.WorkerTaskSweeper{Store: taskStore}, clickUpDrafts, policyGates, alerts}
 	// Telegram updates arrive by webhook, or by long polling when the hub
 	// has no public URL (telegram_mode, see settings.TelegramPolling). Both
 	// paths end in the same handler.

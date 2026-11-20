@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage"
+	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/settings"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
@@ -27,7 +28,8 @@ var statusStates = []workflow.State{
 
 // statusCommand prints the /metrics numbers as text (Phase 12 REQ-9):
 // executions by state, queue depth and oldest due age, worker devices and
-// the newest heartbeat age, and today's LLM tokens and estimated cost.
+// the newest heartbeat age, open workflow alerts (a count), and today's
+// LLM tokens and estimated cost.
 // Counts, states, ages and codes only; never secrets or content.
 func statusCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.Writer) error {
 	f := commandFlags("status")
@@ -53,6 +55,10 @@ func statusCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out i
 	}
 	now := time.Now().UTC()
 	snap, err := store.Snapshot(ctx, *ws, now)
+	if err != nil {
+		return errors.New("database operation failed")
+	}
+	openAlerts, err := store.OpenAlertCount(ctx, *ws, now.Add(-behavior.AlertFailedLookback))
 	if err != nil {
 		return errors.New("database operation failed")
 	}
@@ -95,6 +101,8 @@ func statusCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out i
 	} else {
 		p("  newest_heartbeat_age_s %d", int64(snap.NewestHeartbeatAge/time.Second))
 	}
+	p("alerts:")
+	p("  open                   %d", openAlerts)
 	p("llm today (%s, UTC; cost is an estimate):", snap.Day.Format("2006-01-02"))
 	usage := append([]storage.LLMUsage(nil), snap.LLMUsage...)
 	sort.Slice(usage, func(i, j int) bool {
