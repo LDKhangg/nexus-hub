@@ -18,7 +18,13 @@ type Factory struct {
 	resolver SecretResolver
 	httpc    *http.Client
 	cli      domain.LLMProvider // the CLI provider, nil when unavailable
+	meter    *Meter             // nil: calls are not metered
 }
+
+// SetMeter makes every client this factory returns count its calls into
+// the spend ledger and enforce the daily budget (Phase 12). Call it once
+// at startup, before Client is used.
+func (f *Factory) SetMeter(m *Meter) { f.meter = m }
 
 // NewFactory prepares the configured provider. tmpRoot is the parent of
 // the CLI working directories ("" for the system temp directory). A CLI
@@ -66,8 +72,16 @@ func (f *Factory) Client(ctx context.Context, workspaceID string) (*Client, erro
 		if f.cli == nil {
 			return nil, ErrLLMUnconfigured
 		}
-		return &Client{providers: map[ProviderType]domain.LLMProvider{f.provider: f.cli}, defaultProvider: f.provider}, nil
+		p := f.meter.Wrap(f.cli, workspaceID, f.provider, f.s.ActorModel)
+		return &Client{providers: map[ProviderType]domain.LLMProvider{f.provider: p}, defaultProvider: f.provider}, nil
 	default:
-		return NewClientFromSecret(ctx, f.resolver, workspaceID, f.s, f.httpc)
+		c, err := NewClientFromSecret(ctx, f.resolver, workspaceID, f.s, f.httpc)
+		if err != nil || f.meter == nil {
+			return c, err
+		}
+		for pt, p := range c.providers {
+			c.providers[pt] = f.meter.Wrap(p, workspaceID, pt, f.s.ActorModel)
+		}
+		return c, nil
 	}
 }

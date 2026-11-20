@@ -73,15 +73,18 @@ const (
 // Reason codes of orchestrated executions (decision rows and step
 // failures).
 const (
-	ReasonMissingEvidence     = "missing_evidence"
-	ReasonNoExecutor          = "no_executor"
-	ReasonNoRunnableTask      = "no_runnable_task"
-	ReasonTaskSlotsExhausted  = "task_slots_exhausted"
-	ReasonApprovalRejected    = "approval_rejected"
-	ReasonApprovalExpired     = "approval_expired"
-	ReasonOrchestratorFailed  = "orchestrator_failed"
-	ReasonInvalidInputCode    = "invalid_input"
-	ReasonLLMError            = "llm_error"
+	ReasonMissingEvidence    = "missing_evidence"
+	ReasonNoExecutor         = "no_executor"
+	ReasonNoRunnableTask     = "no_runnable_task"
+	ReasonTaskSlotsExhausted = "task_slots_exhausted"
+	ReasonApprovalRejected   = "approval_rejected"
+	ReasonApprovalExpired    = "approval_expired"
+	ReasonOrchestratorFailed = "orchestrator_failed"
+	ReasonInvalidInputCode   = "invalid_input"
+	ReasonLLMError           = "llm_error"
+	// ReasonLLMBudgetExceeded: llm_daily_budget_usd is spent for the UTC
+	// day (domain.LLMCodeBudgetExceeded); the plan fails without a call.
+	ReasonLLMBudgetExceeded   = "llm_budget_exceeded"
 	ReasonStorageUnavailable  = "storage_unavailable"
 	ReasonInstructionPending  = "instruction_pending"
 	ReasonRouteMissing        = "orchestrator_route_missing"
@@ -105,7 +108,7 @@ func KnownWorkflowReasons() []workflow.ReasonCode {
 		ReasonPlanningBudgetExceeded, ReasonInvalidOutput, ReasonMissingEvidence, ReasonNoExecutor,
 		ReasonNoRunnableTask, ReasonTaskSlotsExhausted, ReasonApprovalRejected, ReasonApprovalExpired,
 		ReasonOrchestratorFailed, ReasonInvalidInputCode, ReasonLLMError, ReasonStorageUnavailable,
-		ReasonInstructionPending, ReasonRouteMissing,
+		ReasonInstructionPending, ReasonRouteMissing, ReasonLLMBudgetExceeded,
 	} {
 		out = append(out, workflow.ReasonCode(r))
 	}

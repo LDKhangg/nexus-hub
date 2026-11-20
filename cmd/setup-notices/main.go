@@ -59,7 +59,7 @@ func commandFlags(name string) *flag.FlagSet {
 
 func runCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.Writer, lookup func(string) (string, bool)) error {
 	if len(args) == 0 {
-		return errors.New("usage: setup-notices init|bind-webhook|inspect|retry-failed|master-key|secret|migrate-secrets|settings|enable-agent|disable-agent|github-account|github-repo|github-check|behavior|telegram|trace|runs|profile|memory|llm|source|contact|report-prefs|report-template|workflow|assistant|worker|policy")
+		return errors.New("usage: setup-notices init|bind-webhook|inspect|retry-failed|master-key|secret|migrate-secrets|settings|enable-agent|disable-agent|github-account|github-repo|github-check|behavior|telegram|trace|runs|profile|memory|llm|source|contact|report-prefs|report-template|workflow|execution|status|assistant|worker|policy")
 	}
 	switch args[0] {
 	case "init":
@@ -90,6 +90,10 @@ func runCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.W
 		return assistantCommand(ctx, pool, args[1:], out, lookup)
 	case "workflow":
 		return workflowCommand(ctx, pool, args[1:], out)
+	case "execution":
+		return executionCommand(ctx, pool, args[1:], out)
+	case "status":
+		return statusCommand(ctx, pool, args[1:], out)
 	case "worker":
 		return workerCommand(ctx, pool, args[1:], out)
 	case "trace":

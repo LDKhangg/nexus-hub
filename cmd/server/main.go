@@ -18,6 +18,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/LDKhangg/nexus-hub/internal/config"
 	httpdelivery "github.com/LDKhangg/nexus-hub/internal/delivery/http"
+	"github.com/LDKhangg/nexus-hub/internal/metrics"
 	"github.com/LDKhangg/nexus-hub/internal/orchestrator"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/reporting"
@@ -69,12 +70,11 @@ func run() error {
 	if s.AllowDangerous {
 		log.Print("setting allow_dangerous is deprecated and has no effect; the policy rule set decides dangerous tools (nh policy)")
 	}
-	if s.LLMDailyBudgetUSD > 0 {
-		// Phase 12 Ruling: the hub has no hub-wide model spend ledger yet
-		// (only orchestrator plans and CLI providers report a cost), so the
-		// budget is stored and validated but not enforced. Say so instead of
-		// implying a guard that does not exist.
-		log.Print("setting llm_daily_budget_usd is set but not enforced yet: no hub-wide model spend ledger")
+	// Observability (Phase 12 B1): metrics, the LLM spend ledger and the
+	// llm_daily_budget_usd guard.
+	ops, err := buildOps(pool, s)
+	if err != nil {
+		return err
 	}
 	credentials, err := storage.NewCredentialStore(pool)
 	if err != nil {
@@ -101,14 +101,14 @@ func run() error {
 	}
 	workerSettings := relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout}
 	sender := telegram.NewClient(netguard.Client(s.NoticeRequestTimeout, netguard.DefaultHosts), resolver)
-	worker := relay.NewNoticeWorker(notices, sender, workerSettings)
+	worker := relay.NewNoticeWorker(meteredNoticeStore{NoticeDeliveryStore: notices, hub: ops.hub}, sender, workerSettings)
 	behaviors, err := storage.NewBehaviorStore(pool)
 	if err != nil {
 		return errors.New("behavior store startup failed")
 	}
 	// memory_search reads the workspace's decision memory; it is a read
 	// tool of the shared registry like any other.
-	ag, err := buildAgent(pool, s, resolver, redactor, sender, behavior.NewMemorySearchTool(behaviors))
+	ag, err := buildAgent(pool, s, resolver, redactor, sender, ops, behavior.NewMemorySearchTool(behaviors))
 	if err != nil {
 		return err
 	}
@@ -179,7 +179,7 @@ func run() error {
 		// stored result of an ended /task or /plan execution.
 		reports = &behavior.ExecutionReports{}
 	)
-	workflows, err := buildWorkflowRuntime(pool, s, ag, behaviors, runs, engine, func(reg *workflow.Registry, store *storage.WorkflowStore) error {
+	workflows, err := buildWorkflowRuntime(pool, s, ag, behaviors, runs, engine, ops.stepFailureObserver(), func(reg *workflow.Registry, store *storage.WorkflowStore) error {
 		var err error
 		if taskStore, err = storage.NewWorkerTaskStore(pool, workerStore, store); err != nil {
 			return err
@@ -265,8 +265,13 @@ func run() error {
 	e.Use(middleware.BodyLimit(bodyLimit))
 	e.Server.ReadHeaderTimeout = 5 * time.Second
 	httpdelivery.NewWorkerHandler(workerStore, workerStore).WithLeases(workerStore, &behavior.LocalTaskInstructions{Routes: taskStore, Reader: ag.conversations}).Register(e)
-	e.POST("/webhook/telegram/:integrationID", telegramHandler.Handle)
-	e.POST("/webhook/:source/:integrationID", handler.HandleWebhook)
+	e.POST("/webhook/telegram/:integrationID", telegramHandler.Handle, webhookMetrics(ops.hub, metrics.SourceTelegram))
+	e.POST("/webhook/:source/:integrationID", handler.HandleWebhook, webhookMetrics(ops.hub, ""))
+	// /metrics is never on the public server: its own loopback listener
+	// (metrics_addr) stops with the background workers.
+	if m := listenMetrics(s.MetricsAddr, ops.hub); m != nil {
+		services = append(services, m)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	// Crash resume (REQ-3): every lease, wait and post a crash left behind

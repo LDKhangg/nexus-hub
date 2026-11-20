@@ -134,6 +134,10 @@ func (r *Registry) executor(kind string) (StepExecutor, bool) {
 type WorkerSettings struct {
 	Workers      int
 	PollInterval time.Duration
+	// OnStepFailure, when set, is told of each step attempt that ends in a
+	// retry (final false) or a failure (final true), with the normalized
+	// reason code only (Phase 12 metrics). It must not block.
+	OnStepFailure func(reason ReasonCode, final bool)
 }
 
 // Worker claims and executes durable jobs.
@@ -329,6 +333,9 @@ func (w *Worker) retryOrFail(ctx context.Context, job *Job, reason ReasonCode, c
 		return w.fail(ctx, job, ReasonAttemptsExhausted, checkpoint, usage)
 	}
 	now := w.clock.Now()
+	if w.settings.OnStepFailure != nil {
+		w.settings.OnStepFailure(normalizedReason(reason, ReasonStepRetry), false)
+	}
 	return w.store.RetryJob(ctx, JobResultRequest{
 		JobCheckpointRequest: JobCheckpointRequest{JobID: job.ID, WorkspaceID: job.WorkspaceID,
 			ExecutionID: job.ExecutionID, StepKey: job.StepKey, ExpectedAttempt: job.Attempts,
@@ -338,6 +345,9 @@ func (w *Worker) retryOrFail(ctx context.Context, job *Job, reason ReasonCode, c
 }
 
 func (w *Worker) fail(ctx context.Context, job *Job, reason ReasonCode, checkpoint *Checkpoint, usage Usage) error {
+	if w.settings.OnStepFailure != nil {
+		w.settings.OnStepFailure(normalizedReason(reason, ReasonNonRetryable), true)
+	}
 	return w.store.FailJob(ctx, JobResultRequest{JobCheckpointRequest: JobCheckpointRequest{
 		JobID: job.ID, WorkspaceID: job.WorkspaceID, ExecutionID: job.ExecutionID,
 		StepKey: job.StepKey, ExpectedAttempt: job.Attempts, ClaimToken: job.ClaimToken,

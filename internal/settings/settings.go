@@ -78,6 +78,7 @@ type Settings struct {
 	QueueMaxPending                 int64         // queued workflow jobs above which new non-urgent executions are deferred
 	WorkspaceMaxConcurrent          int64         // executions of one workspace running a step at once; 0 = off; owner work and resumes exempt
 	LLMDailyBudgetUSD               float64       // model spend per UTC day; 0 = off
+	MetricsAddr                     string        // loopback host:port of the /metrics listener; empty = off
 }
 
 // Store reads every stored setting.
@@ -105,6 +106,7 @@ const (
 	kStatusList
 	kFloat
 	kTopicName
+	kLoopbackAddr
 )
 
 type spec struct {
@@ -192,6 +194,7 @@ var specs = map[string]spec{
 	"queue_max_pending":                   {kind: kInt, def: int64(500), min: 1, max: 1_000_000, set: func(s *Settings, v any) { s.QueueMaxPending = v.(int64) }},
 	"workspace_max_concurrent_executions": {kind: kInt, def: int64(4), min: 0, max: 64, set: func(s *Settings, v any) { s.WorkspaceMaxConcurrent = v.(int64) }},
 	"llm_daily_budget_usd":                {kind: kFloat, def: 0.0, min: 0, max: 1_000_000, set: func(s *Settings, v any) { s.LLMDailyBudgetUSD = v.(float64) }},
+	"metrics_addr":                        {kind: kLoopbackAddr, def: "127.0.0.1:9090", set: func(s *Settings, v any) { s.MetricsAddr = v.(string) }},
 	"telegram_mode":                       {kind: kEnum, def: TelegramModeAuto, enum: []string{TelegramModeAuto, TelegramModeWebhook, TelegramModePoll}, set: func(s *Settings, v any) { s.TelegramMode = v.(string) }},
 }
 
@@ -419,6 +422,10 @@ func parse(key string, raw json.RawMessage) (any, error) {
 		if _, port, err := net.SplitHostPort(str); err != nil || port == "" {
 			return nil, bad
 		}
+	case kLoopbackAddr:
+		if str != "" && !ValidLoopbackAddr(str) {
+			return nil, bad
+		}
 	case kDigits:
 		if str != "" && !digitsRe.MatchString(str) {
 			return nil, bad
@@ -449,6 +456,25 @@ func parse(key string, raw json.RawMessage) (any, error) {
 		}
 	}
 	return str, nil
+}
+
+// ValidLoopbackAddr accepts host:port whose host is a loopback IP literal
+// (127.0.0.0/8 or ::1) or "localhost", with a port 1-65535. The metrics
+// listener is never bound to a public or wildcard address.
+func ValidLoopbackAddr(str string) bool {
+	host, port, err := net.SplitHostPort(str)
+	if err != nil || port == "" {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // validTopicName accepts a fixed Telegram topic name: 1-64 bytes of valid

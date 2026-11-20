@@ -124,7 +124,7 @@ func buildToolsWithPeople(s settings.Settings, resolver *secrets.Resolver, redac
 	return tools.NewRegistry(all...)
 }
 
-func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, sender *telegram.Client, extra ...tools.Tool) (agentServices, error) {
+func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, sender *telegram.Client, ops opsServices, extra ...tools.Tool) (agentServices, error) {
 	directory, err := storage.NewPeopleRepository(pool)
 	if err != nil {
 		return agentServices{}, errors.New("people directory startup failed")
@@ -159,6 +159,9 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 	if err != nil {
 		return agentServices{}, errors.New("llm provider startup failed")
 	}
+	// Every model call is counted in the spend ledger and checked against
+	// llm_daily_budget_usd (Phase 12).
+	factory.SetMeter(ops.meter)
 	log.Printf("llm provider: %s", factory.Provider())
 	if !factory.Ready() {
 		log.Printf("llm provider %s: binary not usable; LLM work falls back to notices (llm_unconfigured)", factory.Provider())
@@ -205,7 +208,7 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
 		Policy: policyEngine,
 	})
-	worker := relay.NewActionWorker(actions, sender, relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout}, conversations)
+	worker := relay.NewActionWorker(meteredActionStore{ActionStore: actions, hub: ops.hub}, sender, relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout}, conversations)
 	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, investigators: investigators, people: directory, store: store, conversations: conversations, policy: policyEngine, policyStore: policyStore}, nil
 }
 
@@ -651,7 +654,7 @@ type workflowRuntime struct {
 
 // buildWorkflowRuntime registers the behavior and agent step executors
 // (behavior approvals become durable waits) and builds the runtime.
-func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServices, behaviors *storage.BehaviorStore, runs *behavior.RunWorker, engine *behavior.Engine, extra func(*workflow.Registry, *storage.WorkflowStore) error) (*workflowRuntime, error) {
+func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServices, behaviors *storage.BehaviorStore, runs *behavior.RunWorker, engine *behavior.Engine, onStepFailure func(workflow.ReasonCode, bool), extra func(*workflow.Registry, *storage.WorkflowStore) error) (*workflowRuntime, error) {
 	store, err := storage.NewWorkflowStore(pool)
 	if err != nil {
 		return nil, errors.New("workflow store startup failed")
@@ -690,6 +693,7 @@ func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServi
 	store.SetWorkspaceMaxConcurrent(int(s.WorkspaceMaxConcurrent))
 	worker := workflow.NewWorker(store, reg, nil, workflow.WorkerSettings{
 		Workers: int(s.BehaviorWorkers) + 1, PollInterval: s.BehaviorPollInterval,
+		OnStepFailure: onStepFailure,
 	})
 	return &workflowRuntime{
 		store: store, commands: workflow.NewEngine(store), agents: agents, worker: worker, reconciler: workflow.NewReconciler(store), orch: ag.orchestrator,

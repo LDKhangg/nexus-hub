@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/LDKhangg/nexus-hub/internal/domain"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
 )
 
@@ -448,6 +449,9 @@ func (r *stepRun) planError(err error) (workflow.StepResult, error) {
 		return r.failDecision(ReasonInvalidOutput)
 	case errors.Is(err, ErrInvalidInput):
 		return r.failDecision(ReasonInvalidInputCode)
+	case isBudgetExceeded(err):
+		// The daily model budget is spent: a retry would be refused too.
+		return r.failDecision(ReasonLLMBudgetExceeded)
 	case r.ctx.Err() == nil && r.sc.Attempt >= r.sc.Definition.Retry.MaxAttempts:
 		// The last attempt: end in a reported FAIL instead of a silent one.
 		return r.failDecision(ReasonLLMError)
@@ -1517,7 +1521,13 @@ func (r *stepRun) evaluateNoTask() (workflow.StepResult, error) {
 var fixedFailReasons = []string{
 	ReasonPlanningBudgetExceeded, ReasonInvalidOutput, ReasonMissingEvidence, ReasonNoExecutor,
 	ReasonNoRunnableTask, ReasonTaskSlotsExhausted, ReasonApprovalRejected, ReasonApprovalExpired,
-	ReasonInvalidInputCode, ReasonLLMError,
+	ReasonInvalidInputCode, ReasonLLMError, ReasonLLMBudgetExceeded,
+}
+
+// isBudgetExceeded reports a provider refusal by llm_daily_budget_usd.
+func isBudgetExceeded(err error) bool {
+	le, ok := domain.AsLLMError(err)
+	return ok && le.Code == domain.LLMCodeBudgetExceeded
 }
 
 func (r *stepRun) reportStep() (workflow.StepResult, error) {

@@ -422,6 +422,20 @@ type Job struct {
 	ContinuesAttempt bool
 }
 
+// Workspace-scoped daily LLM token and estimated cost ledger; counts only, never content.
+type LlmUsageDaily struct {
+	WorkspaceID pgtype.UUID
+	Day         pgtype.Date
+	Provider    string
+	Model       string
+	// All prompt tokens of the day, cache reads and writes included.
+	InputTokens  int64
+	OutputTokens int64
+	// Estimate from the hub price table (internal/adapters/llm/pricing.go); 0 for unknown models and subscription CLI providers.
+	CostUsd   float64
+	UpdatedAt pgtype.Timestamptz
+}
+
 type MessageLog struct {
 	ID       int64
 	ThreadID pgtype.UUID

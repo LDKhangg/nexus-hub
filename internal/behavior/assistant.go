@@ -71,6 +71,7 @@ const (
 	msgAssistantDone          = "Đã làm."
 	msgAssistantNotDone       = "Chưa làm được."
 	msgAssistantOverloaded    = "Mình đang bận hoặc trả lời quá lâu, thử lại sau nhé."
+	msgAssistantBudget        = "Đã hết ngân sách AI của hôm nay (llm_daily_budget_usd). Các lệnh không dùng AI vẫn chạy; AI hoạt động lại từ 0h UTC hoặc khi tăng ngân sách."
 	msgAssistantWorking       = "Đang xử lý…"
 	msgAssistantRefused       = "Mình không thể trả lời yêu cầu này."
 	msgAssistantCut           = "\n\n(Câu trả lời bị cắt vì quá dài.)"
@@ -84,6 +85,7 @@ var (
 	errAssistantBusy    = errors.New("assistant: model busy")
 	errAssistantModel   = errors.New("assistant: model error")
 	errAssistantRefused = errors.New("assistant: refused")
+	errAssistantBudget  = errors.New("assistant: daily budget spent")
 )
 
 // RecentRunLister lists a workspace's recent runs (the `nh runs` store).
@@ -538,6 +540,9 @@ func assistantErr(ctx context.Context, err error) error {
 	if errors.Is(err, domain.ErrLLMRefused) {
 		return errAssistantRefused
 	}
+	if le, ok := domain.AsLLMError(err); ok && le.Code == domain.LLMCodeBudgetExceeded {
+		return errAssistantBudget
+	}
 	if ctx.Err() != nil || assistantBusyErr(err) {
 		return errAssistantBusy
 	}
@@ -720,6 +725,8 @@ func (w *InboxWorker) assistantJob(ctx context.Context, job assistantJob) outcom
 		return w.reply(ctx, to, msgAssistantOverloaded, "assistant_busy")
 	case errors.Is(err, errAssistantRefused):
 		return w.reply(ctx, to, msgAssistantRefused, "assistant_refused")
+	case errors.Is(err, errAssistantBudget):
+		return w.reply(ctx, to, msgAssistantBudget, "assistant_llm_budget_exceeded")
 	case err != nil:
 		return w.reply(ctx, to, msgFailed, "assistant_model_error")
 	}
