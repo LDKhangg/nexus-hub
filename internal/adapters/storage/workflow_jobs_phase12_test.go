@@ -335,7 +335,10 @@ func TestPhase12WorkspaceCapExemptions(t *testing.T) {
 	orch := e.start(workspaceA, v.ID, "p12-exempt-5", chainDef("a"))
 	mustExec(t, e.ctx, e.pool, `UPDATE workflow_executions SET source_kind='local_task' WHERE id=$1`, local.ID)
 	mustExec(t, e.ctx, e.pool, `UPDATE workflow_executions SET source_kind='orchestrated_task' WHERE id=$1`, orch.ID)
-	mustExec(t, e.ctx, e.pool, `UPDATE jobs SET continues_attempt=true WHERE execution_id=$1`, resume.ID)
+	// A real resume job continues an attempt already counted (>= 1) on both
+	// the job and the step, which the result fence requires.
+	mustExec(t, e.ctx, e.pool, `UPDATE jobs SET continues_attempt=true, attempts=1 WHERE execution_id=$1`, resume.ID)
+	mustExec(t, e.ctx, e.pool, `UPDATE execution_steps SET attempts=1 WHERE execution_id=$1`, resume.ID)
 	e.store.SetWorkspaceMaxConcurrent(1)
 	var urgent []*workflow.Job
 	got := map[int64]bool{}
