@@ -44,6 +44,17 @@ const (
 // other replaces a label value outside its closed set.
 const other = "other"
 
+// RetentionTables is the closed table label set of retention deletion metrics.
+var RetentionTables = []string{
+	"message_logs", "tool_runs", "policy_decisions", "workflow_executions",
+	"notification_outbox", "outbound_actions", "workflow_signals", "workflow_waits",
+	"workflow_alerts", "worker_events", "agent_batch_results", "orchestrator_plan_tasks",
+	"jobs", "execution_events", "worker_jobs", "agent_jobs", "conversation_messages",
+	"conversation_workflows", "resource_bindings", "workflow_instructions", "worker_task_routes",
+	"orchestrator_decisions", "orchestrator_routes", "orchestrator_plans", "clickup_drafts",
+	"approvals", "execution_steps",
+}
+
 var codeShape = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 // Snapshot is the database view read on each scrape.
@@ -89,6 +100,8 @@ type Hub struct {
 	alerts    *prometheus.CounterVec
 	suppress  prometheus.Counter
 	alertFail prometheus.Counter
+	retention *prometheus.CounterVec
+	tables    map[string]bool
 	codes     map[string]bool
 	providers map[string]bool
 	models    map[string]bool
@@ -110,6 +123,7 @@ func New(o Options) *Hub {
 		codes:     set(o.Codes),
 		providers: set(o.Providers),
 		models:    set(o.Models),
+		tables:    set(RetentionTables),
 		errors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "nexushub_errors_total",
 			Help: "Errors by kind and safe code: workflow step retries and failures, webhook rejects, delivery failures, LLM budget refusals.",
@@ -131,8 +145,12 @@ func New(o Options) *Hub {
 			Name: "nexushub_alerts_failed_total",
 			Help: "Workflow alerts whose send attempts ran out (never sent).",
 		}),
+		retention: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "nexushub_retention_deleted_total",
+			Help: "Rows deleted by retention, by a closed table label.",
+		}, []string{"table"}),
 	}
-	h.reg.MustRegister(h.errors, h.latency, h.alerts, h.suppress, h.alertFail)
+	h.reg.MustRegister(h.errors, h.latency, h.alerts, h.suppress, h.alertFail, h.retention)
 	if o.Snapshot != nil {
 		timeout := o.ScrapeTimeout
 		if timeout <= 0 {
@@ -141,6 +159,17 @@ func New(o Options) *Hub {
 		h.reg.MustRegister(&collector{h: h, snapshot: o.Snapshot, timeout: timeout, states: append([]string(nil), o.States...)})
 	}
 	return h
+}
+
+// RetentionDeleted adds deleted rows for a closed table label.
+func (h *Hub) RetentionDeleted(table string, n int64) {
+	if h == nil || n <= 0 {
+		return
+	}
+	if !h.tables[table] {
+		table = other
+	}
+	h.retention.WithLabelValues(table).Add(float64(n))
 }
 
 // Handler serves the text exposition format.

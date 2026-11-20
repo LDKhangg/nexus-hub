@@ -82,6 +82,12 @@ type Settings struct {
 	AlertsEnabled                   bool          // Telegram alerts for stuck and failed workflows (Phase 12 REQ-10)
 	AlertStuckRunningMinutes        int64         // a processing job unchanged this long alerts "stuck running"
 	AlertStuckQueuedMinutes         int64         // a pending job due this long alerts "stuck queued"
+	RetentionEnabled                bool          // hourly bounded deletion of expired operational records
+	RetentionMessageLogsDays        int64         // 0 keeps message logs forever
+	RetentionToolRunsDays           int64         // 0 keeps tool runs forever
+	RetentionPolicyDecisionsDays    int64         // 0 keeps policy decisions forever
+	RetentionWorkflowDays           int64         // 0 keeps workflow executions forever
+	RetentionOutboundDays           int64         // 0 keeps outbound records forever
 }
 
 // Store reads every stored setting.
@@ -201,6 +207,12 @@ var specs = map[string]spec{
 	"alerts_enabled":                      {kind: kBool, def: true, set: func(s *Settings, v any) { s.AlertsEnabled = v.(bool) }},
 	"alert_stuck_running_minutes":         {kind: kInt, def: int64(15), min: 1, max: 1440, set: func(s *Settings, v any) { s.AlertStuckRunningMinutes = v.(int64) }},
 	"alert_stuck_queued_minutes":          {kind: kInt, def: int64(30), min: 1, max: 1440, set: func(s *Settings, v any) { s.AlertStuckQueuedMinutes = v.(int64) }},
+	"retention_enabled":                   {kind: kBool, def: true, set: func(s *Settings, v any) { s.RetentionEnabled = v.(bool) }},
+	"retention_message_logs_days":         {kind: kInt, def: int64(30), min: 0, max: 3650, set: func(s *Settings, v any) { s.RetentionMessageLogsDays = v.(int64) }},
+	"retention_tool_runs_days":            {kind: kInt, def: int64(90), min: 0, max: 3650, set: func(s *Settings, v any) { s.RetentionToolRunsDays = v.(int64) }},
+	"retention_policy_decisions_days":     {kind: kInt, def: int64(180), min: 0, max: 3650, set: func(s *Settings, v any) { s.RetentionPolicyDecisionsDays = v.(int64) }},
+	"retention_workflow_days":             {kind: kInt, def: int64(90), min: 0, max: 3650, set: func(s *Settings, v any) { s.RetentionWorkflowDays = v.(int64) }},
+	"retention_outbound_days":             {kind: kInt, def: int64(30), min: 0, max: 3650, set: func(s *Settings, v any) { s.RetentionOutboundDays = v.(int64) }},
 	"telegram_mode":                       {kind: kEnum, def: TelegramModeAuto, enum: []string{TelegramModeAuto, TelegramModeWebhook, TelegramModePoll}, set: func(s *Settings, v any) { s.TelegramMode = v.(string) }},
 }
 

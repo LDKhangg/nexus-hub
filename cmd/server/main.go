@@ -189,6 +189,18 @@ func run() error {
 		StuckQueued:  time.Duration(s.AlertStuckQueuedMinutes) * time.Minute,
 		SendTimeout:  s.NoticeRequestTimeout,
 	}
+	retentionStore, err := storage.NewRetentionStore(pool)
+	if err != nil {
+		return errors.New("retention store startup failed")
+	}
+	retention := &behavior.Retention{
+		Store: retentionStore, Metrics: ops.hub, Enabled: s.RetentionEnabled,
+		Rules: behavior.RetentionRules{
+			MessageLogsDays: s.RetentionMessageLogsDays, ToolRunsDays: s.RetentionToolRunsDays,
+			PolicyDecisionsDays: s.RetentionPolicyDecisionsDays, WorkflowDays: s.RetentionWorkflowDays,
+			OutboundDays: s.RetentionOutboundDays,
+		},
+	}
 	stepObserver := ops.stepFailureObserver()
 	onStepFailure := func(reason workflow.ReasonCode, final bool) {
 		stepObserver(reason, final)
@@ -264,7 +276,7 @@ func run() error {
 	}
 	notices.SetStatusObserver(lifecycle.StatusChanged)
 	topics.OnTaskTopicOpen(lifecycle.TopicReopened)
-	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows, lifecycle, &behavior.WorkerSweeper{Store: workerStore}, workerNotifier, &behavior.WorkerTaskSweeper{Store: taskStore}, clickUpDrafts, policyGates, alerts}
+	services := []serviceWorker{worker, ag.orchestrator, ag.actions, inbox, runs, engine, chatPoller, workflows, lifecycle, &behavior.WorkerSweeper{Store: workerStore}, workerNotifier, &behavior.WorkerTaskSweeper{Store: taskStore}, clickUpDrafts, policyGates, alerts, retention}
 	// Telegram updates arrive by webhook, or by long polling when the hub
 	// has no public URL (telegram_mode, see settings.TelegramPolling). Both
 	// paths end in the same handler.
