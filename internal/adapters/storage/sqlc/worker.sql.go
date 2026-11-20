@@ -271,6 +271,70 @@ func (q *Queries) ExpireWorkerLeases(ctx context.Context, now pgtype.Timestamptz
 	return items, nil
 }
 
+const failStaleInterruptedWorkerJobs = `-- name: FailStaleInterruptedWorkerJobs :many
+UPDATE public.worker_jobs j
+SET state = 'FAILED', result = jsonb_build_object('status', 'failed', 'reason_code', 'lease_expired'),
+    interrupted_at = NULL, finished_at = $1::timestamptz, updated_at = $1::timestamptz
+WHERE j.id IN (SELECT s.id FROM public.worker_jobs s
+               WHERE s.state = 'INTERRUPTED' AND s.interrupted_at < $2::timestamptz
+               ORDER BY s.interrupted_at, s.id
+               LIMIT $3::int
+               FOR UPDATE SKIP LOCKED)
+  AND j.state = 'INTERRUPTED'
+RETURNING j.id, j.workspace_id, j.execution_id, j.step_id, j.required_capabilities, j.state, j.device_id, j.lease_token_hash, j.lease_expires_at, j.attempt, j.result, j.idempotency_key, j.payload, j.progress, j.progress_seq, j.leased_at, j.interrupted_at, j.created_at, j.updated_at, j.finished_at
+`
+
+type FailStaleInterruptedWorkerJobsParams struct {
+	Now     pgtype.Timestamptz
+	Cutoff  pgtype.Timestamptz
+	MaxRows int32
+}
+
+// An interrupted job whose device did not resume it within the resume
+// window ends FAILED with the fixed reason lease_expired (Phase 12 REQ-5):
+// it never stays interrupted forever. The owner may still retry it within
+// the retry limit. Bounded per pass.
+func (q *Queries) FailStaleInterruptedWorkerJobs(ctx context.Context, arg FailStaleInterruptedWorkerJobsParams) ([]WorkerJob, error) {
+	rows, err := q.db.Query(ctx, failStaleInterruptedWorkerJobs, arg.Now, arg.Cutoff, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []WorkerJob
+	for rows.Next() {
+		var i WorkerJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.ExecutionID,
+			&i.StepID,
+			&i.RequiredCapabilities,
+			&i.State,
+			&i.DeviceID,
+			&i.LeaseTokenHash,
+			&i.LeaseExpiresAt,
+			&i.Attempt,
+			&i.Result,
+			&i.IdempotencyKey,
+			&i.Payload,
+			&i.Progress,
+			&i.ProgressSeq,
+			&i.LeasedAt,
+			&i.InterruptedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const finishWorkerJob = `-- name: FinishWorkerJob :one
 UPDATE public.worker_jobs
 SET state = $1, result = $2, idempotency_key = $3,

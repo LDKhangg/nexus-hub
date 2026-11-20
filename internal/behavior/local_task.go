@@ -185,6 +185,14 @@ type WorkerJobControl interface {
 // execution already ended. It wraps ErrConflict.
 var ErrWorkerExecutionEnded = fmt.Errorf("%w: workflow execution ended", ErrConflict)
 
+// ErrWorkerRetryLimit: the job could be retried but it already used its
+// WorkerMaxAttempts leases (Phase 12 REQ-5). It wraps ErrConflict.
+var ErrWorkerRetryLimit = fmt.Errorf("%w: worker job retry limit reached", ErrConflict)
+
+// msgWorkerRetryLimit is the owner-facing text for a Retry refused at the
+// retry limit.
+var msgWorkerRetryLimit = fmt.Sprintf("Việc này đã chạy %d lần, hết lượt thử lại. Hãy gửi /task mới.", WorkerMaxAttempts)
+
 // msgWorkerExecutionEnded is the owner-facing text for a Retry refused
 // because the workflow already ended.
 const msgWorkerExecutionEnded = "Quy trình của việc này đã kết thúc nên không thể thử lại. Hãy gửi /task mới."

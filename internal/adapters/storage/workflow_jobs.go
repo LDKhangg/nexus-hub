@@ -57,7 +57,7 @@ func (s *WorkflowStore) ClaimJob(ctx context.Context, at time.Time) (*workflow.J
 	}
 	defer tx.Rollback(ctx)
 	q := sqlc.New(tx)
-	candidate, err := q.SelectDueWorkflowJob(ctx, ts(at))
+	candidate, err := q.SelectDueWorkflowJob(ctx, sqlc.SelectDueWorkflowJobParams{AtTime: ts(at), MaxConcurrent: s.maxConcurrent.Load()})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

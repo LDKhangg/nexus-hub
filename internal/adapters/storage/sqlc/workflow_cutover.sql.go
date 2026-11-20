@@ -570,6 +570,7 @@ const selectStartableBehaviorRun = `-- name: SelectStartableBehaviorRun :one
 SELECT r.id, r.workspace_id, r.behavior_id, r.behavior_version_id, r.version, r.trigger_kind, r.trigger, r.subject, r.revision, r.status, r.correlation_id, r.attempts, r.run_at, r.locked_until, r.claim_token, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.steps, r.error_code, r.snapshot, r.undone_at, r.started_at, r.finished_at, r.created_at, r.updated_at, r.context_snapshot, r.run_actions, r.workflow_attempt_deadline FROM public.behavior_runs r
 WHERE r.workspace_id = $1 AND r.status = 'pending' AND r.claim_token IS NULL
   AND r.run_at <= $2::timestamptz
+  AND (NOT $3::bool OR r.trigger_kind = 'telegram.command')
   AND NOT EXISTS (SELECT 1 FROM public.workflow_executions e
                   WHERE e.workspace_id = r.workspace_id AND e.legacy_run_id = r.id)
 ORDER BY r.run_at, r.id
@@ -579,12 +580,15 @@ FOR UPDATE OF r SKIP LOCKED LIMIT 1
 type SelectStartableBehaviorRunParams struct {
 	WorkspaceID pgtype.UUID
 	AtTime      pgtype.Timestamptz
+	UrgentOnly  bool
 }
 
 // The oldest due pending run of the workspace no execution owns yet (a
-// run created by a trigger path after the cutover).
+// run created by a trigger path after the cutover). With urgent_only (queue
+// backpressure, Phase 12 REQ-7) only a run of the owner's Telegram command
+// is startable; the others stay pending until the queue drains.
 func (q *Queries) SelectStartableBehaviorRun(ctx context.Context, arg SelectStartableBehaviorRunParams) (BehaviorRun, error) {
-	row := q.db.QueryRow(ctx, selectStartableBehaviorRun, arg.WorkspaceID, arg.AtTime)
+	row := q.db.QueryRow(ctx, selectStartableBehaviorRun, arg.WorkspaceID, arg.AtTime, arg.UrgentOnly)
 	var i BehaviorRun
 	err := row.Scan(
 		&i.ID,

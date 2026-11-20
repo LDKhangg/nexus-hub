@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -641,6 +642,11 @@ type workflowRuntime struct {
 	orch       *agent.Orchestrator
 	pipeline   agent.PipelineSettings
 	interval   time.Duration
+	// queueMaxPending is queue_max_pending (Phase 12 REQ-7): at or above it
+	// the starter defers new non-urgent executions. backpressured is the
+	// current state, used only by the starter goroutine to log changes.
+	queueMaxPending int64
+	backpressured   bool
 }
 
 // buildWorkflowRuntime registers the behavior and agent step executors
@@ -679,6 +685,9 @@ func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServi
 	}
 	// The behavior run executors plus one for the comment pipeline, which
 	// the legacy agent worker ran on its own.
+	// The per-workspace concurrency cap (Phase 12 REQ-7) is enforced at
+	// claim time; resumes and the owner's executions are exempt.
+	store.SetWorkspaceMaxConcurrent(int(s.WorkspaceMaxConcurrent))
 	worker := workflow.NewWorker(store, reg, nil, workflow.WorkerSettings{
 		Workers: int(s.BehaviorWorkers) + 1, PollInterval: s.BehaviorPollInterval,
 	})
@@ -689,7 +698,8 @@ func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServi
 			MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
 			DebounceWindow: s.DebounceWindow, DebounceMaxWait: s.DebounceMaxWait,
 		},
-		interval: s.BehaviorPollInterval,
+		interval:        s.BehaviorPollInterval,
+		queueMaxPending: s.QueueMaxPending,
 	}, nil
 }
 
@@ -751,21 +761,69 @@ func (r *workflowRuntime) startCutOver(ctx context.Context) {
 		}
 		return
 	}
+	headroom := r.startHeadroom(ctx)
 	for _, ws := range workspaces {
 		if ctx.Err() != nil {
 			return
 		}
 		now := time.Now()
-		if _, err := r.store.StartPendingBehaviorRuns(ctx, ws, now, workflowStartBatch); err != nil && ctx.Err() == nil {
-			log.Printf("workflow starter: workspace %s behavior runs not started", ws)
-		}
-		if _, err := r.agents.StartDueBatches(ctx, ws, now, r.pipeline, workflowStartBatch); err != nil && ctx.Err() == nil {
-			log.Printf("workflow starter: workspace %s agent batches not started", ws)
+		if headroom <= 0 {
+			// Backpressure: only the owner's Telegram commands start. Every
+			// other run and agent batch stays stored and pending (its
+			// webhook was already answered) until the queue drains.
+			if _, err := r.store.StartPendingUrgentBehaviorRuns(ctx, ws, now, workflowStartBatch); err != nil && ctx.Err() == nil {
+				log.Printf("workflow starter: workspace %s owner command runs not started", ws)
+			}
+		} else {
+			limit := min(workflowStartBatch, headroom)
+			n, err := r.store.StartPendingBehaviorRuns(ctx, ws, now, limit)
+			if err != nil && ctx.Err() == nil {
+				log.Printf("workflow starter: workspace %s behavior runs not started", ws)
+			}
+			headroom -= n
+			if headroom > 0 {
+				m, err := r.agents.StartDueBatches(ctx, ws, now, r.pipeline, min(workflowStartBatch, headroom))
+				if err != nil && ctx.Err() == nil {
+					log.Printf("workflow starter: workspace %s agent batches not started", ws)
+				}
+				headroom -= m
+			}
 		}
 		if _, err := r.orch.ReleaseOrphanBatches(ctx, r.agents, ws, workflowStartBatch); err != nil && ctx.Err() == nil {
 			log.Printf("workflow starter: workspace %s orphan agent batches not released", ws)
 		}
 	}
+}
+
+// startHeadroom returns how many new non-urgent executions this starter
+// pass may create: queue_max_pending minus the jobs waiting for a claim
+// hub-wide, or 0 under backpressure (Phase 12 REQ-7). It logs each change
+// of the backpressure state with counts only. A failed count does not
+// block starts (the hub behaves as before the cap existed).
+func (r *workflowRuntime) startHeadroom(ctx context.Context) int {
+	if r.queueMaxPending <= 0 {
+		return math.MaxInt32
+	}
+	pending, err := r.store.CountPendingWork(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Print("workflow starter: queued job count unavailable; starting without backpressure")
+		}
+		return workflowStartBatch
+	}
+	over := pending >= r.queueMaxPending
+	if over != r.backpressured {
+		r.backpressured = over
+		if over {
+			log.Printf("workflow starter: backpressure on: %d queued jobs, queue_max_pending %d; new non-urgent executions deferred", pending, r.queueMaxPending)
+		} else {
+			log.Printf("workflow starter: backpressure off: %d queued jobs, queue_max_pending %d", pending, r.queueMaxPending)
+		}
+	}
+	if over {
+		return 0
+	}
+	return int(r.queueMaxPending - pending)
 }
 
 // --- orchestrated tasks (Phase 7b) ---

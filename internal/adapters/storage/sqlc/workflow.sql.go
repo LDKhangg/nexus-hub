@@ -101,6 +101,19 @@ func (q *Queries) CopyRetryExecutionSteps(ctx context.Context, arg CopyRetryExec
 	return err
 }
 
+const countPendingWorkflowJobs = `-- name: CountPendingWorkflowJobs :one
+SELECT count(*)::bigint FROM public.jobs WHERE status = 'pending'
+`
+
+// Queued work hub-wide: jobs waiting for a claim (Phase 12 REQ-7
+// backpressure). Served by jobs_due_idx.
+func (q *Queries) CountPendingWorkflowJobs(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countPendingWorkflowJobs)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const countUnfinishedExecutionSteps = `-- name: CountUnfinishedExecutionSteps :one
 SELECT COUNT(*) FROM public.execution_steps
 WHERE workspace_id = $1 AND execution_id = $2
@@ -1305,15 +1318,31 @@ WHERE j.status = 'pending' AND j.due_at <= $1::timestamptz
   AND (j.attempts < j.max_attempts OR j.continues_attempt)
   AND e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','WAITING_FOR_WORKER','COMPLETED','FAILED','CANCELLED')
   AND (e.deadline_at IS NULL OR e.deadline_at > $1::timestamptz)
+  -- Per-workspace concurrency cap (Phase 12 REQ-7): a job is claimable only
+  -- while its workspace holds fewer live claims than max_concurrent. A cap
+  -- of 0 or less is off. A resume job (an owner decision being applied) and
+  -- the owner's own executions (local_task, orchestrated_task) are urgent
+  -- and never held back. The cap is soft: concurrent claimers may overshoot
+  -- it by at most the number of claimers.
+  AND ($2::int <= 0 OR j.continues_attempt
+       OR e.source_kind IN ('local_task', 'orchestrated_task')
+       OR (SELECT count(*) FROM public.jobs r
+           WHERE r.workspace_id = j.workspace_id AND r.status = 'processing'
+             AND r.lease_expires_at > $1::timestamptz) < $2::int)
 ORDER BY CASE WHEN j.status = 'processing' THEN 0 ELSE 1 END, j.due_at, j.id
 FOR UPDATE OF j, e SKIP LOCKED
 LIMIT 1
 `
 
+type SelectDueWorkflowJobParams struct {
+	AtTime        pgtype.Timestamptz
+	MaxConcurrent int32
+}
+
 // Lock the job and its execution together without waiting, so a claim never
 // holds a job while blocking on an execution (lock order: execution, job).
-func (q *Queries) SelectDueWorkflowJob(ctx context.Context, atTime pgtype.Timestamptz) (Job, error) {
-	row := q.db.QueryRow(ctx, selectDueWorkflowJob, atTime)
+func (q *Queries) SelectDueWorkflowJob(ctx context.Context, arg SelectDueWorkflowJobParams) (Job, error) {
+	row := q.db.QueryRow(ctx, selectDueWorkflowJob, arg.AtTime, arg.MaxConcurrent)
 	var i Job
 	err := row.Scan(
 		&i.ID,

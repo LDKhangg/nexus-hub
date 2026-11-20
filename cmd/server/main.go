@@ -69,6 +69,13 @@ func run() error {
 	if s.AllowDangerous {
 		log.Print("setting allow_dangerous is deprecated and has no effect; the policy rule set decides dangerous tools (nh policy)")
 	}
+	if s.LLMDailyBudgetUSD > 0 {
+		// Phase 12 Ruling: the hub has no hub-wide model spend ledger yet
+		// (only orchestrator plans and CLI providers report a cost), so the
+		// budget is stored and validated but not enforced. Say so instead of
+		// implying a guard that does not exist.
+		log.Print("setting llm_daily_budget_usd is set but not enforced yet: no hub-wide model spend ledger")
+	}
 	credentials, err := storage.NewCredentialStore(pool)
 	if err != nil {
 		return errors.New("credential store startup failed")

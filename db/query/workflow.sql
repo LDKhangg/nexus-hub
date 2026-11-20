@@ -141,6 +141,17 @@ WHERE j.status = 'pending' AND j.due_at <= sqlc.arg(at_time)::timestamptz
   AND (j.attempts < j.max_attempts OR j.continues_attempt)
   AND e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','WAITING_FOR_WORKER','COMPLETED','FAILED','CANCELLED')
   AND (e.deadline_at IS NULL OR e.deadline_at > sqlc.arg(at_time)::timestamptz)
+  -- Per-workspace concurrency cap (Phase 12 REQ-7): a job is claimable only
+  -- while its workspace holds fewer live claims than max_concurrent. A cap
+  -- of 0 or less is off. A resume job (an owner decision being applied) and
+  -- the owner's own executions (local_task, orchestrated_task) are urgent
+  -- and never held back. The cap is soft: concurrent claimers may overshoot
+  -- it by at most the number of claimers.
+  AND (sqlc.arg(max_concurrent)::int <= 0 OR j.continues_attempt
+       OR e.source_kind IN ('local_task', 'orchestrated_task')
+       OR (SELECT count(*) FROM public.jobs r
+           WHERE r.workspace_id = j.workspace_id AND r.status = 'processing'
+             AND r.lease_expires_at > sqlc.arg(at_time)::timestamptz) < sqlc.arg(max_concurrent)::int)
 ORDER BY CASE WHEN j.status = 'processing' THEN 0 ELSE 1 END, j.due_at, j.id
 -- Lock the job and its execution together without waiting, so a claim never
 -- holds a job while blocking on an execution (lock order: execution, job).
@@ -302,3 +313,8 @@ SELECT * FROM public.jobs
 WHERE workspace_id = sqlc.arg(workspace_id) AND status = 'dead_letter'
 ORDER BY updated_at DESC, id DESC
 LIMIT sqlc.arg(row_limit);
+
+-- name: CountPendingWorkflowJobs :one
+-- Queued work hub-wide: jobs waiting for a claim (Phase 12 REQ-7
+-- backpressure). Served by jobs_due_idx.
+SELECT count(*)::bigint FROM public.jobs WHERE status = 'pending';

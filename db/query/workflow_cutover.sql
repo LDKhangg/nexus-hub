@@ -105,10 +105,13 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND workflow_execution_id IS NULL
 
 -- name: SelectStartableBehaviorRun :one
 -- The oldest due pending run of the workspace no execution owns yet (a
--- run created by a trigger path after the cutover).
+-- run created by a trigger path after the cutover). With urgent_only (queue
+-- backpressure, Phase 12 REQ-7) only a run of the owner's Telegram command
+-- is startable; the others stay pending until the queue drains.
 SELECT r.* FROM public.behavior_runs r
 WHERE r.workspace_id = sqlc.arg(workspace_id) AND r.status = 'pending' AND r.claim_token IS NULL
   AND r.run_at <= sqlc.arg(at_time)::timestamptz
+  AND (NOT sqlc.arg(urgent_only)::bool OR r.trigger_kind = 'telegram.command')
   AND NOT EXISTS (SELECT 1 FROM public.workflow_executions e
                   WHERE e.workspace_id = r.workspace_id AND e.legacy_run_id = r.id)
 ORDER BY r.run_at, r.id
