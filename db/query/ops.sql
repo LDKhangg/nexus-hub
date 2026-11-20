@@ -55,3 +55,22 @@ WHERE day = sqlc.arg(day)
   AND (sqlc.narg(workspace_id)::uuid IS NULL OR workspace_id = sqlc.narg(workspace_id)::uuid)
 GROUP BY provider, model
 ORDER BY provider, model;
+
+-- name: OpsFailedExecutionReasons :many
+-- Executions that FAILED since a time, by reason code ('' when none),
+-- hub-wide or for one workspace.
+SELECT COALESCE(reason_code, '')::text AS reason_code, count(*)::bigint AS n
+FROM public.workflow_executions
+WHERE state = 'FAILED' AND finished_at >= sqlc.arg(since)::timestamptz
+  AND (sqlc.narg(workspace_id)::uuid IS NULL OR workspace_id = sqlc.narg(workspace_id)::uuid)
+GROUP BY 1
+ORDER BY 1;
+
+-- name: OpsDeadLetterReasons :many
+-- Dead-letter workflow jobs by reason code, hub-wide or for one workspace.
+SELECT COALESCE(dead_letter_reason, '')::text AS reason_code, count(*)::bigint AS n
+FROM public.jobs
+WHERE status = 'dead_letter'
+  AND (sqlc.narg(workspace_id)::uuid IS NULL OR workspace_id = sqlc.narg(workspace_id)::uuid)
+GROUP BY 1
+ORDER BY 1;

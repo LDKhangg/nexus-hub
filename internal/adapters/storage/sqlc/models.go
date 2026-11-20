@@ -888,8 +888,24 @@ type WorkflowAlert struct {
 	WorkspaceID pgtype.UUID
 	ExecutionID int64
 	State       string
-	// When the alert was claimed; a row of an alert merged into the hourly summary (rate cap) is kept too.
+	// When the alert was delivered; NULL unless status is sent.
 	SentAt pgtype.Timestamptz
+	// sent, pending (send not yet delivered), failed (attempts exhausted) or suppressed (hourly cap).
+	Status string
+	// Send attempts made, including a timed-out one.
+	Attempts int32
+	// When a pending alert is tried (again); NULL unless pending.
+	NextAttemptAt pgtype.Timestamptz
+	// Safe code of the last failed send attempt.
+	LastErrorCode pgtype.Text
+	// When the alert state began (for the age in the alert line).
+	SinceAt pgtype.Timestamptz
+	// Safe error code of the execution shown in the alert line.
+	ErrorCode pgtype.Text
+	// When the alert was claimed.
+	CreatedAt pgtype.Timestamptz
+	// When a suppressed alert was counted in a merged-alerts summary.
+	SummarisedAt pgtype.Timestamptz
 }
 
 type WorkflowExecution struct {

@@ -12,31 +12,59 @@ import (
 )
 
 const claimWorkflowAlert = `-- name: ClaimWorkflowAlert :execrows
-INSERT INTO public.workflow_alerts (workspace_id, execution_id, state, sent_at)
-VALUES ($1, $2, $3, $4)
+INSERT INTO public.workflow_alerts (workspace_id, execution_id, state, status, next_attempt_at, since_at, error_code, created_at)
+VALUES ($1, $2, $3, $4,
+        CASE WHEN $4::text = 'pending' THEN $5::timestamptz END,
+        $6::timestamptz, $7::text, $8)
 ON CONFLICT (workspace_id, execution_id, state) DO NOTHING
 `
 
 type ClaimWorkflowAlertParams struct {
-	WorkspaceID pgtype.UUID
-	ExecutionID int64
-	State       string
-	SentAt      pgtype.Timestamptz
+	WorkspaceID   pgtype.UUID
+	ExecutionID   int64
+	State         string
+	Status        string
+	NextAttemptAt pgtype.Timestamptz
+	SinceAt       pgtype.Timestamptz
+	ErrorCode     pgtype.Text
+	CreatedAt     pgtype.Timestamptz
 }
 
-// Claims the one alert of (execution, state); 0 rows when it was claimed
-// before (dedup), so the caller sends nothing.
+// Claims the one alert of (execution, state) as pending (or suppressed by
+// the hourly cap); 0 rows when it was claimed before (dedup), so the
+// caller sends nothing. A pending claim is due again at next_attempt_at,
+// so a crash before the send is retried.
 func (q *Queries) ClaimWorkflowAlert(ctx context.Context, arg ClaimWorkflowAlertParams) (int64, error) {
 	result, err := q.db.Exec(ctx, claimWorkflowAlert,
 		arg.WorkspaceID,
 		arg.ExecutionID,
 		arg.State,
-		arg.SentAt,
+		arg.Status,
+		arg.NextAttemptAt,
+		arg.SinceAt,
+		arg.ErrorCode,
+		arg.CreatedAt,
 	)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const countFailedWorkflowAlerts = `-- name: CountFailedWorkflowAlerts :one
+SELECT count(*)::bigint AS n
+FROM public.workflow_alerts
+WHERE status = 'failed'
+  AND ($1::uuid IS NULL OR workspace_id = $1::uuid)
+`
+
+// Alerts whose send attempts are exhausted (status failed), hub-wide or
+// for one workspace.
+func (q *Queries) CountFailedWorkflowAlerts(ctx context.Context, workspaceID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countFailedWorkflowAlerts, workspaceID)
+	var n int64
+	err := row.Scan(&n)
+	return n, err
 }
 
 const countOpenWorkflowAlerts = `-- name: CountOpenWorkflowAlerts :one
@@ -45,7 +73,7 @@ FROM public.workflow_alerts wa
 JOIN public.workflow_executions e ON e.workspace_id = wa.workspace_id AND e.id = wa.execution_id
 WHERE ($1::uuid IS NULL OR wa.workspace_id = $1::uuid)
   AND ((wa.state <> 'failed' AND e.state NOT IN ('COMPLETED','FAILED','CANCELLED'))
-       OR (wa.state = 'failed' AND wa.sent_at >= $2::timestamptz))
+       OR (wa.state = 'failed' AND wa.created_at >= $2::timestamptz))
 `
 
 type CountOpenWorkflowAlertsParams struct {
@@ -54,12 +82,120 @@ type CountOpenWorkflowAlertsParams struct {
 }
 
 // Open alerts: a stuck or overdue alert whose execution has not ended, or
-// a failed alert sent since failed_since. Hub-wide or for one workspace.
+// a failed alert claimed since failed_since. Hub-wide or for one workspace.
 func (q *Queries) CountOpenWorkflowAlerts(ctx context.Context, arg CountOpenWorkflowAlertsParams) (int64, error) {
 	row := q.db.QueryRow(ctx, countOpenWorkflowAlerts, arg.WorkspaceID, arg.FailedSince)
 	var n int64
 	err := row.Scan(&n)
 	return n, err
+}
+
+const countWorkflowAlertsSentSince = `-- name: CountWorkflowAlertsSentSince :one
+SELECT count(*)::bigint AS n
+FROM public.workflow_alerts
+WHERE status = 'sent' AND sent_at >= $1::timestamptz
+`
+
+// Alerts delivered since a time, hub-wide (the hourly rate cap).
+func (q *Queries) CountWorkflowAlertsSentSince(ctx context.Context, since pgtype.Timestamptz) (int64, error) {
+	row := q.db.QueryRow(ctx, countWorkflowAlertsSentSince, since)
+	var n int64
+	err := row.Scan(&n)
+	return n, err
+}
+
+const listDueWorkflowAlertRetries = `-- name: ListDueWorkflowAlertRetries :many
+SELECT wa.workspace_id, wa.execution_id, wa.state, b.name AS behavior_name,
+       COALESCE(wa.since_at, wa.created_at)::timestamptz AS since_at,
+       COALESCE(wa.error_code, '')::text AS error_code, wa.attempts
+FROM public.workflow_alerts wa
+JOIN public.workflow_executions x ON x.workspace_id = wa.workspace_id AND x.id = wa.execution_id
+JOIN public.behavior_versions v ON v.workspace_id = x.workspace_id AND v.id = x.behavior_version_id
+JOIN public.behaviors b ON b.workspace_id = v.workspace_id AND b.id = v.behavior_id
+WHERE wa.status = 'pending' AND wa.next_attempt_at <= $1::timestamptz
+ORDER BY wa.next_attempt_at, wa.created_at, wa.execution_id, wa.state
+LIMIT $2
+`
+
+type ListDueWorkflowAlertRetriesParams struct {
+	DueAt    pgtype.Timestamptz
+	RowLimit int32
+}
+
+type ListDueWorkflowAlertRetriesRow struct {
+	WorkspaceID  pgtype.UUID
+	ExecutionID  int64
+	State        string
+	BehaviorName string
+	SinceAt      pgtype.Timestamptz
+	ErrorCode    string
+	Attempts     int32
+}
+
+// Pending alerts due for a (re)try, oldest first, with what the alert
+// line shows.
+func (q *Queries) ListDueWorkflowAlertRetries(ctx context.Context, arg ListDueWorkflowAlertRetriesParams) ([]ListDueWorkflowAlertRetriesRow, error) {
+	rows, err := q.db.Query(ctx, listDueWorkflowAlertRetries, arg.DueAt, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListDueWorkflowAlertRetriesRow
+	for rows.Next() {
+		var i ListDueWorkflowAlertRetriesRow
+		if err := rows.Scan(
+			&i.WorkspaceID,
+			&i.ExecutionID,
+			&i.State,
+			&i.BehaviorName,
+			&i.SinceAt,
+			&i.ErrorCode,
+			&i.Attempts,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUnsummarisedWorkflowAlerts = `-- name: ListUnsummarisedWorkflowAlerts :many
+SELECT workspace_id, count(*)::bigint AS n, min(created_at)::timestamptz AS oldest_at
+FROM public.workflow_alerts
+WHERE status = 'suppressed' AND summarised_at IS NULL AND created_at < $1::timestamptz
+GROUP BY workspace_id
+ORDER BY workspace_id
+`
+
+type ListUnsummarisedWorkflowAlertsRow struct {
+	WorkspaceID pgtype.UUID
+	N           int64
+	OldestAt    pgtype.Timestamptz
+}
+
+// Per workspace: suppressed alerts claimed before a time and not yet
+// counted in a summary, with the oldest claim time.
+func (q *Queries) ListUnsummarisedWorkflowAlerts(ctx context.Context, before pgtype.Timestamptz) ([]ListUnsummarisedWorkflowAlertsRow, error) {
+	rows, err := q.db.Query(ctx, listUnsummarisedWorkflowAlerts, before)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUnsummarisedWorkflowAlertsRow
+	for rows.Next() {
+		var i ListUnsummarisedWorkflowAlertsRow
+		if err := rows.Scan(&i.WorkspaceID, &i.N, &i.OldestAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listWorkflowAlertCandidates = `-- name: ListWorkflowAlertCandidates :many
@@ -169,6 +305,94 @@ func (q *Queries) ListWorkflowAlertCandidates(ctx context.Context, arg ListWorkf
 	return items, nil
 }
 
+const markWorkflowAlertAttemptFailed = `-- name: MarkWorkflowAlertAttemptFailed :execrows
+UPDATE public.workflow_alerts
+SET attempts = attempts + 1,
+    status = CASE WHEN $1::timestamptz IS NULL THEN 'failed' ELSE 'pending' END,
+    next_attempt_at = $1::timestamptz,
+    last_error_code = $2
+WHERE workspace_id = $3 AND execution_id = $4 AND state = $5
+  AND status = 'pending' AND attempts = $6
+`
+
+type MarkWorkflowAlertAttemptFailedParams struct {
+	NextAttemptAt pgtype.Timestamptz
+	LastErrorCode pgtype.Text
+	WorkspaceID   pgtype.UUID
+	ExecutionID   int64
+	State         string
+	PrevAttempts  int32
+}
+
+// Counts one failed send attempt of a pending alert made after
+// prev_attempts attempts: the alert is due again at next_attempt_at, or
+// is failed for good when next_attempt_at is NULL.
+func (q *Queries) MarkWorkflowAlertAttemptFailed(ctx context.Context, arg MarkWorkflowAlertAttemptFailedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markWorkflowAlertAttemptFailed,
+		arg.NextAttemptAt,
+		arg.LastErrorCode,
+		arg.WorkspaceID,
+		arg.ExecutionID,
+		arg.State,
+		arg.PrevAttempts,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const markWorkflowAlertSent = `-- name: MarkWorkflowAlertSent :execrows
+UPDATE public.workflow_alerts
+SET status = 'sent', sent_at = $1, attempts = attempts + 1,
+    next_attempt_at = NULL, last_error_code = NULL
+WHERE workspace_id = $2 AND execution_id = $3 AND state = $4
+  AND status = 'pending'
+`
+
+type MarkWorkflowAlertSentParams struct {
+	SentAt      pgtype.Timestamptz
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+	State       string
+}
+
+// Marks a pending alert delivered.
+func (q *Queries) MarkWorkflowAlertSent(ctx context.Context, arg MarkWorkflowAlertSentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markWorkflowAlertSent,
+		arg.SentAt,
+		arg.WorkspaceID,
+		arg.ExecutionID,
+		arg.State,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const markWorkflowAlertsSummarised = `-- name: MarkWorkflowAlertsSummarised :execrows
+UPDATE public.workflow_alerts
+SET summarised_at = $1
+WHERE workspace_id = $2 AND status = 'suppressed' AND summarised_at IS NULL
+  AND created_at < $3::timestamptz
+`
+
+type MarkWorkflowAlertsSummarisedParams struct {
+	SummarisedAt pgtype.Timestamptz
+	WorkspaceID  pgtype.UUID
+	Before       pgtype.Timestamptz
+}
+
+// Marks a workspace's suppressed alerts claimed before a time summarised.
+func (q *Queries) MarkWorkflowAlertsSummarised(ctx context.Context, arg MarkWorkflowAlertsSummarisedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markWorkflowAlertsSummarised, arg.SummarisedAt, arg.WorkspaceID, arg.Before)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const releaseWorkflowAlert = `-- name: ReleaseWorkflowAlert :execrows
 DELETE FROM public.workflow_alerts
 WHERE workspace_id = $1 AND execution_id = $2 AND state = $3
@@ -180,7 +404,7 @@ type ReleaseWorkflowAlertParams struct {
 	State       string
 }
 
-// Deletes a claim whose send failed, so the next tick retries it.
+// Deletes an alert row (operator recovery); the next scan may alert again.
 func (q *Queries) ReleaseWorkflowAlert(ctx context.Context, arg ReleaseWorkflowAlertParams) (int64, error) {
 	result, err := q.db.Exec(ctx, releaseWorkflowAlert, arg.WorkspaceID, arg.ExecutionID, arg.State)
 	if err != nil {

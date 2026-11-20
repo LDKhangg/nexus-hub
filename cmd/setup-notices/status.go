@@ -28,8 +28,10 @@ var statusStates = []workflow.State{
 
 // statusCommand prints the /metrics numbers as text (Phase 12 REQ-9):
 // executions by state, queue depth and oldest due age, worker devices and
-// the newest heartbeat age, open workflow alerts (a count), and today's
-// LLM tokens and estimated cost.
+// the newest heartbeat age, open and failed workflow alerts (counts),
+// errors by kind (executions FAILED in the last 24 h by reason code and
+// dead-letter jobs by reason code), and today's LLM tokens and estimated
+// cost.
 // Counts, states, ages and codes only; never secrets or content.
 func statusCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.Writer) error {
 	f := commandFlags("status")
@@ -59,6 +61,10 @@ func statusCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out i
 		return errors.New("database operation failed")
 	}
 	openAlerts, err := store.OpenAlertCount(ctx, *ws, now.Add(-behavior.AlertFailedLookback))
+	if err != nil {
+		return errors.New("database operation failed")
+	}
+	errs, err := store.Errors(ctx, *ws, now.Add(-behavior.AlertFailedLookback))
 	if err != nil {
 		return errors.New("database operation failed")
 	}
@@ -103,6 +109,12 @@ func statusCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out i
 	}
 	p("alerts:")
 	p("  open                   %d", openAlerts)
+	p("  failed                 %d", errs.FailedAlerts)
+	p("errors:")
+	p("  failed_executions_24h:")
+	printCodeCounts(p, errs.FailedExecutions)
+	p("  dead_letter_jobs:")
+	printCodeCounts(p, errs.DeadLetterJobs)
 	p("llm today (%s, UTC; cost is an estimate):", snap.Day.Format("2006-01-02"))
 	usage := append([]storage.LLMUsage(nil), snap.LLMUsage...)
 	sort.Slice(usage, func(i, j int) bool {
@@ -126,6 +138,44 @@ func statusCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out i
 		p("  daily_budget_usd=off")
 	}
 	return nil
+}
+
+// printCodeCounts prints one line per safe code; an empty or unsafe code
+// prints as "none" or "other".
+func printCodeCounts(p func(string, ...any), rows []storage.CodeCount) {
+	if len(rows) == 0 {
+		p("    none")
+		return
+	}
+	merged := map[string]int64{}
+	for _, r := range rows {
+		merged[statusCode(r.Code)] += r.N
+	}
+	keys := make([]string, 0, len(merged))
+	for k := range merged {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		p("    %-20s %d", k, merged[k])
+	}
+}
+
+// statusCode passes a reason code of the stored safe shape; "" is "none"
+// and anything else is "other".
+func statusCode(c string) string {
+	if c == "" {
+		return "none"
+	}
+	if len(c) > 64 || c[0] < 'a' || c[0] > 'z' {
+		return "other"
+	}
+	for _, r := range c {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_') {
+			return "other"
+		}
+	}
+	return c
 }
 
 func usd(v float64) string { return strconv.FormatFloat(v, 'f', 4, 64) }

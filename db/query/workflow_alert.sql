@@ -53,23 +53,91 @@ ORDER BY c.since_at, c.execution_id, c.alert_state
 LIMIT sqlc.arg(row_limit);
 
 -- name: ClaimWorkflowAlert :execrows
--- Claims the one alert of (execution, state); 0 rows when it was claimed
--- before (dedup), so the caller sends nothing.
-INSERT INTO public.workflow_alerts (workspace_id, execution_id, state, sent_at)
-VALUES (sqlc.arg(workspace_id), sqlc.arg(execution_id), sqlc.arg(state), sqlc.arg(sent_at))
+-- Claims the one alert of (execution, state) as pending (or suppressed by
+-- the hourly cap); 0 rows when it was claimed before (dedup), so the
+-- caller sends nothing. A pending claim is due again at next_attempt_at,
+-- so a crash before the send is retried.
+INSERT INTO public.workflow_alerts (workspace_id, execution_id, state, status, next_attempt_at, since_at, error_code, created_at)
+VALUES (sqlc.arg(workspace_id), sqlc.arg(execution_id), sqlc.arg(state), sqlc.arg(status),
+        CASE WHEN sqlc.arg(status)::text = 'pending' THEN sqlc.arg(next_attempt_at)::timestamptz END,
+        sqlc.narg(since_at)::timestamptz, sqlc.narg(error_code)::text, sqlc.arg(created_at))
 ON CONFLICT (workspace_id, execution_id, state) DO NOTHING;
 
+-- name: MarkWorkflowAlertSent :execrows
+-- Marks a pending alert delivered.
+UPDATE public.workflow_alerts
+SET status = 'sent', sent_at = sqlc.arg(sent_at), attempts = attempts + 1,
+    next_attempt_at = NULL, last_error_code = NULL
+WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id) AND state = sqlc.arg(state)
+  AND status = 'pending';
+
+-- name: MarkWorkflowAlertAttemptFailed :execrows
+-- Counts one failed send attempt of a pending alert made after
+-- prev_attempts attempts: the alert is due again at next_attempt_at, or
+-- is failed for good when next_attempt_at is NULL.
+UPDATE public.workflow_alerts
+SET attempts = attempts + 1,
+    status = CASE WHEN sqlc.narg(next_attempt_at)::timestamptz IS NULL THEN 'failed' ELSE 'pending' END,
+    next_attempt_at = sqlc.narg(next_attempt_at)::timestamptz,
+    last_error_code = sqlc.arg(last_error_code)
+WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id) AND state = sqlc.arg(state)
+  AND status = 'pending' AND attempts = sqlc.arg(prev_attempts);
+
+-- name: ListDueWorkflowAlertRetries :many
+-- Pending alerts due for a (re)try, oldest first, with what the alert
+-- line shows.
+SELECT wa.workspace_id, wa.execution_id, wa.state, b.name AS behavior_name,
+       COALESCE(wa.since_at, wa.created_at)::timestamptz AS since_at,
+       COALESCE(wa.error_code, '')::text AS error_code, wa.attempts
+FROM public.workflow_alerts wa
+JOIN public.workflow_executions x ON x.workspace_id = wa.workspace_id AND x.id = wa.execution_id
+JOIN public.behavior_versions v ON v.workspace_id = x.workspace_id AND v.id = x.behavior_version_id
+JOIN public.behaviors b ON b.workspace_id = v.workspace_id AND b.id = v.behavior_id
+WHERE wa.status = 'pending' AND wa.next_attempt_at <= sqlc.arg(due_at)::timestamptz
+ORDER BY wa.next_attempt_at, wa.created_at, wa.execution_id, wa.state
+LIMIT sqlc.arg(row_limit);
+
+-- name: CountWorkflowAlertsSentSince :one
+-- Alerts delivered since a time, hub-wide (the hourly rate cap).
+SELECT count(*)::bigint AS n
+FROM public.workflow_alerts
+WHERE status = 'sent' AND sent_at >= sqlc.arg(since)::timestamptz;
+
+-- name: ListUnsummarisedWorkflowAlerts :many
+-- Per workspace: suppressed alerts claimed before a time and not yet
+-- counted in a summary, with the oldest claim time.
+SELECT workspace_id, count(*)::bigint AS n, min(created_at)::timestamptz AS oldest_at
+FROM public.workflow_alerts
+WHERE status = 'suppressed' AND summarised_at IS NULL AND created_at < sqlc.arg(before)::timestamptz
+GROUP BY workspace_id
+ORDER BY workspace_id;
+
+-- name: MarkWorkflowAlertsSummarised :execrows
+-- Marks a workspace's suppressed alerts claimed before a time summarised.
+UPDATE public.workflow_alerts
+SET summarised_at = sqlc.arg(summarised_at)
+WHERE workspace_id = sqlc.arg(workspace_id) AND status = 'suppressed' AND summarised_at IS NULL
+  AND created_at < sqlc.arg(before)::timestamptz;
+
 -- name: ReleaseWorkflowAlert :execrows
--- Deletes a claim whose send failed, so the next tick retries it.
+-- Deletes an alert row (operator recovery); the next scan may alert again.
 DELETE FROM public.workflow_alerts
 WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id) AND state = sqlc.arg(state);
 
 -- name: CountOpenWorkflowAlerts :one
 -- Open alerts: a stuck or overdue alert whose execution has not ended, or
--- a failed alert sent since failed_since. Hub-wide or for one workspace.
+-- a failed alert claimed since failed_since. Hub-wide or for one workspace.
 SELECT count(*)::bigint AS n
 FROM public.workflow_alerts wa
 JOIN public.workflow_executions e ON e.workspace_id = wa.workspace_id AND e.id = wa.execution_id
 WHERE (sqlc.narg(workspace_id)::uuid IS NULL OR wa.workspace_id = sqlc.narg(workspace_id)::uuid)
   AND ((wa.state <> 'failed' AND e.state NOT IN ('COMPLETED','FAILED','CANCELLED'))
-       OR (wa.state = 'failed' AND wa.sent_at >= sqlc.arg(failed_since)::timestamptz));
+       OR (wa.state = 'failed' AND wa.created_at >= sqlc.arg(failed_since)::timestamptz));
+
+-- name: CountFailedWorkflowAlerts :one
+-- Alerts whose send attempts are exhausted (status failed), hub-wide or
+-- for one workspace.
+SELECT count(*)::bigint AS n
+FROM public.workflow_alerts
+WHERE status = 'failed'
+  AND (sqlc.narg(workspace_id)::uuid IS NULL OR workspace_id = sqlc.narg(workspace_id)::uuid);

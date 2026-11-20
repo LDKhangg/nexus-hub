@@ -88,6 +88,7 @@ type Hub struct {
 	latency   *prometheus.HistogramVec
 	alerts    *prometheus.CounterVec
 	suppress  prometheus.Counter
+	alertFail prometheus.Counter
 	codes     map[string]bool
 	providers map[string]bool
 	models    map[string]bool
@@ -126,8 +127,12 @@ func New(o Options) *Hub {
 			Name: "nexushub_alerts_suppressed_total",
 			Help: "Workflow alerts merged into the hourly summary by the rate cap.",
 		}),
+		alertFail: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "nexushub_alerts_failed_total",
+			Help: "Workflow alerts whose send attempts ran out (never sent).",
+		}),
 	}
-	h.reg.MustRegister(h.errors, h.latency, h.alerts, h.suppress)
+	h.reg.MustRegister(h.errors, h.latency, h.alerts, h.suppress, h.alertFail)
 	if o.Snapshot != nil {
 		timeout := o.ScrapeTimeout
 		if timeout <= 0 {
@@ -197,6 +202,14 @@ func (h *Hub) AlertSuppressed() {
 		return
 	}
 	h.suppress.Inc()
+}
+
+// AlertFailed counts one alert whose send attempts ran out.
+func (h *Hub) AlertFailed() {
+	if h == nil {
+		return
+	}
+	h.alertFail.Inc()
 }
 
 // HTTPStatusCode is the closed code of a rejected webhook status.

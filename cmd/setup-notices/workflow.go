@@ -122,9 +122,11 @@ func workflowJobStatus(s string) string {
 	return "unknown"
 }
 
+// workflowWaitKind passes a workflow_waits.wait_kind (closed set of
+// migration 00019: approval, input) and the older approval kinds.
 func workflowWaitKind(k string) string {
 	switch k {
-	case "item_answer", "post_draft", "confirm_action":
+	case "approval", "input", "item_answer", "post_draft", "confirm_action":
 		return k
 	default:
 		return "unknown"

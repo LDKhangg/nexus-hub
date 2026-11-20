@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"regexp"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
@@ -178,21 +179,128 @@ func (s *OpsStore) ListAlertCandidates(ctx context.Context, q behavior.AlertQuer
 	return out, nil
 }
 
-// ClaimAlert inserts the dedup row of (execution, state); claimed is false
-// when the alert was claimed before.
+// ClaimAlert inserts the pending row of (execution, state), due again at
+// at+AlertClaimLease; claimed is false when the alert was claimed before.
 func (s *OpsStore) ClaimAlert(ctx context.Context, a behavior.WorkflowAlert, at time.Time) (bool, error) {
+	return s.claimAlert(ctx, a, "pending", at)
+}
+
+// SuppressAlert inserts the row of (execution, state) as suppressed by the
+// hourly cap; claimed is false when the alert was claimed before.
+func (s *OpsStore) SuppressAlert(ctx context.Context, a behavior.WorkflowAlert, at time.Time) (bool, error) {
+	return s.claimAlert(ctx, a, "suppressed", at)
+}
+
+func (s *OpsStore) claimAlert(ctx context.Context, a behavior.WorkflowAlert, status string, at time.Time) (bool, error) {
 	ws, err := parseDBID(a.WorkspaceID)
 	if err != nil {
 		return false, err
 	}
-	n, err := s.q.ClaimWorkflowAlert(ctx, sqlc.ClaimWorkflowAlertParams{WorkspaceID: ws, ExecutionID: a.ExecutionID, State: string(a.State), SentAt: ts(at)})
+	var since pgtype.Timestamptz
+	if !a.Since.IsZero() {
+		since = ts(a.Since)
+	}
+	var code pgtype.Text
+	if alertCodeShape.MatchString(a.ErrorCode) {
+		code = pgtype.Text{String: a.ErrorCode, Valid: true}
+	}
+	n, err := s.q.ClaimWorkflowAlert(ctx, sqlc.ClaimWorkflowAlertParams{
+		WorkspaceID: ws, ExecutionID: a.ExecutionID, State: string(a.State), Status: status,
+		NextAttemptAt: ts(at.Add(behavior.AlertClaimLease)), SinceAt: since, ErrorCode: code, CreatedAt: ts(at),
+	})
 	if err != nil {
 		return false, err
 	}
 	return n == 1, nil
 }
 
-// ReleaseAlert deletes the dedup row of an alert whose send failed.
+var alertCodeShape = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
+// MarkAlertSent marks a pending alert delivered at at.
+func (s *OpsStore) MarkAlertSent(ctx context.Context, a behavior.WorkflowAlert, at time.Time) error {
+	ws, err := parseDBID(a.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	_, err = s.q.MarkWorkflowAlertSent(ctx, sqlc.MarkWorkflowAlertSentParams{WorkspaceID: ws, ExecutionID: a.ExecutionID, State: string(a.State), SentAt: ts(at)})
+	return err
+}
+
+// MarkAlertAttemptFailed counts one failed attempt of a pending alert made
+// after a.Attempts attempts: due again at next, or failed when next is
+// zero. A row already moved on (another attempt recorded) is left as is.
+func (s *OpsStore) MarkAlertAttemptFailed(ctx context.Context, a behavior.WorkflowAlert, code string, next time.Time) error {
+	ws, err := parseDBID(a.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	if !alertCodeShape.MatchString(code) {
+		code = "send_failed"
+	}
+	var nextAt pgtype.Timestamptz
+	if !next.IsZero() {
+		nextAt = ts(next)
+	}
+	_, err = s.q.MarkWorkflowAlertAttemptFailed(ctx, sqlc.MarkWorkflowAlertAttemptFailedParams{
+		NextAttemptAt: nextAt, LastErrorCode: pgtype.Text{String: code, Valid: true},
+		WorkspaceID: ws, ExecutionID: a.ExecutionID, State: string(a.State), PrevAttempts: int32(a.Attempts),
+	})
+	return err
+}
+
+// ListAlertRetries returns pending alerts due at or before due, oldest
+// first, at most limit (1..100).
+func (s *OpsStore) ListAlertRetries(ctx context.Context, due time.Time, limit int) ([]behavior.WorkflowAlert, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	rows, err := s.q.ListDueWorkflowAlertRetries(ctx, sqlc.ListDueWorkflowAlertRetriesParams{DueAt: ts(due), RowLimit: int32(limit)})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]behavior.WorkflowAlert, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, behavior.WorkflowAlert{
+			WorkspaceID: uuidString(r.WorkspaceID), ExecutionID: r.ExecutionID, State: behavior.AlertState(r.State),
+			BehaviorName: r.BehaviorName, Since: r.SinceAt.Time, ErrorCode: r.ErrorCode, Attempts: int(r.Attempts),
+		})
+	}
+	return out, nil
+}
+
+// CountAlertsSentSince counts alerts delivered since since, hub-wide.
+func (s *OpsStore) CountAlertsSentSince(ctx context.Context, since time.Time) (int, error) {
+	n, err := s.q.CountWorkflowAlertsSentSince(ctx, ts(since))
+	return int(n), err
+}
+
+// ListAlertSummaries returns, per workspace, the suppressed alerts claimed
+// before before and not yet summarised.
+func (s *OpsStore) ListAlertSummaries(ctx context.Context, before time.Time) ([]behavior.AlertSummary, error) {
+	rows, err := s.q.ListUnsummarisedWorkflowAlerts(ctx, ts(before))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]behavior.AlertSummary, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, behavior.AlertSummary{WorkspaceID: uuidString(r.WorkspaceID), Count: int(r.N), OldestAt: r.OldestAt.Time})
+	}
+	return out, nil
+}
+
+// MarkAlertsSummarised marks a workspace's suppressed alerts claimed
+// before before as summarised at at.
+func (s *OpsStore) MarkAlertsSummarised(ctx context.Context, workspaceID string, before, at time.Time) error {
+	ws, err := parseDBID(workspaceID)
+	if err != nil {
+		return err
+	}
+	_, err = s.q.MarkWorkflowAlertsSummarised(ctx, sqlc.MarkWorkflowAlertsSummarisedParams{SummarisedAt: ts(at), WorkspaceID: ws, Before: ts(before)})
+	return err
+}
+
+// ReleaseAlert deletes the row of an alert (operator recovery); the next
+// scan may alert again. The watcher never calls it.
 func (s *OpsStore) ReleaseAlert(ctx context.Context, a behavior.WorkflowAlert) error {
 	ws, err := parseDBID(a.WorkspaceID)
 	if err != nil {
@@ -204,11 +312,55 @@ func (s *OpsStore) ReleaseAlert(ctx context.Context, a behavior.WorkflowAlert) e
 
 // OpenAlertCount counts open workflow alerts, hub-wide when workspaceID is
 // "": stuck or overdue alerts of executions that have not ended, and failed
-// alerts sent since failedSince.
+// alerts claimed since failedSince.
 func (s *OpsStore) OpenAlertCount(ctx context.Context, workspaceID string, failedSince time.Time) (int64, error) {
 	ws, err := optionalWorkspace(workspaceID)
 	if err != nil {
 		return 0, err
 	}
 	return s.q.CountOpenWorkflowAlerts(ctx, sqlc.CountOpenWorkflowAlertsParams{WorkspaceID: ws, FailedSince: ts(failedSince)})
+}
+
+// CodeCount is one safe code and its count.
+type CodeCount struct {
+	Code string
+	N    int64
+}
+
+// OpsErrors is the error view of nh status: codes and counts only.
+type OpsErrors struct {
+	// FailedExecutions counts executions FAILED since the given time by
+	// reason code ("" when none).
+	FailedExecutions []CodeCount
+	// DeadLetterJobs counts dead-letter workflow jobs by reason code.
+	DeadLetterJobs []CodeCount
+	// FailedAlerts counts alerts whose send attempts ran out.
+	FailedAlerts int64
+}
+
+// Errors reads the error view, hub-wide when workspaceID is "".
+func (s *OpsStore) Errors(ctx context.Context, workspaceID string, failedSince time.Time) (OpsErrors, error) {
+	ws, err := optionalWorkspace(workspaceID)
+	if err != nil {
+		return OpsErrors{}, err
+	}
+	var out OpsErrors
+	failed, err := s.q.OpsFailedExecutionReasons(ctx, sqlc.OpsFailedExecutionReasonsParams{Since: ts(failedSince), WorkspaceID: ws})
+	if err != nil {
+		return OpsErrors{}, err
+	}
+	for _, r := range failed {
+		out.FailedExecutions = append(out.FailedExecutions, CodeCount{Code: r.ReasonCode, N: r.N})
+	}
+	dead, err := s.q.OpsDeadLetterReasons(ctx, ws)
+	if err != nil {
+		return OpsErrors{}, err
+	}
+	for _, r := range dead {
+		out.DeadLetterJobs = append(out.DeadLetterJobs, CodeCount{Code: r.ReasonCode, N: r.N})
+	}
+	if out.FailedAlerts, err = s.q.CountFailedWorkflowAlerts(ctx, ws); err != nil {
+		return OpsErrors{}, err
+	}
+	return out, nil
 }

@@ -2,6 +2,7 @@ package behavior
 
 import (
 	"context"
+	"errors"
 	"log"
 	"regexp"
 	"sync"
@@ -35,10 +36,37 @@ const (
 	alertWindow              = time.Hour
 	alertApprovalGrace       = 5 * time.Minute
 	alertScanLimit           = 100
+	alertRetryLimit          = 20
 	alertKickDelay           = 5 * time.Second
 	alertDefaultSendTimeout  = 10 * time.Second
-	alertReleaseTimeout      = 5 * time.Second
+	alertMarkTimeout         = 5 * time.Second
 )
+
+// AlertMaxAttempts bounds the send attempts of one alert; after the last
+// failed attempt the alert is failed and never sent again.
+const AlertMaxAttempts = 5
+
+// AlertClaimLease is when a freshly claimed (pending) alert is due again
+// if the process stops before its first send finishes.
+const AlertClaimLease = time.Minute
+
+// alertBackoff is the wait after the n-th failed attempt (1-based).
+var alertBackoff = []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, time.Hour}
+
+// AlertRetryDelay is the wait after the attempts-th failed send attempt;
+// ok is false when the alert has no attempt left.
+func AlertRetryDelay(attempts int) (time.Duration, bool) {
+	if attempts >= AlertMaxAttempts {
+		return 0, false
+	}
+	if attempts < 1 {
+		attempts = 1
+	}
+	if attempts > len(alertBackoff) {
+		return alertBackoff[len(alertBackoff)-1], true
+	}
+	return alertBackoff[attempts-1], true
+}
 
 // AlertFailedLookback bounds the failed executions that alert (and the
 // failed alerts nh status counts as open): a first start never alerts
@@ -57,6 +85,8 @@ type WorkflowAlert struct {
 	// or the finish (failed).
 	Since     time.Time
 	ErrorCode string
+	// Attempts is the send attempts already made (a retry; 0 when new).
+	Attempts int
 }
 
 // AlertQuery bounds one candidate scan.
@@ -68,16 +98,42 @@ type AlertQuery struct {
 	Limit          int
 }
 
-// WorkflowAlertStore reads alert candidates and keeps the dedup rows.
+// AlertSummary is one workspace's suppressed alerts not yet summarised.
+type AlertSummary struct {
+	WorkspaceID string
+	Count       int
+	OldestAt    time.Time
+}
+
+// WorkflowAlertStore reads alert candidates and keeps the alert rows: one
+// per (execution, alert state), for the alert's whole life.
 type WorkflowAlertStore interface {
 	// ListAlertCandidates returns executions in an alert state that have
-	// no alert row yet, oldest first.
+	// no alert row yet (any status), oldest first.
 	ListAlertCandidates(ctx context.Context, q AlertQuery) ([]WorkflowAlert, error)
-	// ClaimAlert inserts the dedup row of (execution, state); claimed is
-	// false when the row already existed.
+	// ClaimAlert inserts the pending row of (execution, state), due again
+	// at at+AlertClaimLease; claimed is false when the row already existed.
 	ClaimAlert(ctx context.Context, a WorkflowAlert, at time.Time) (claimed bool, err error)
-	// ReleaseAlert deletes the dedup row of a failed send.
-	ReleaseAlert(ctx context.Context, a WorkflowAlert) error
+	// SuppressAlert inserts the row of (execution, state) as suppressed by
+	// the hourly cap; claimed is false when the row already existed.
+	SuppressAlert(ctx context.Context, a WorkflowAlert, at time.Time) (claimed bool, err error)
+	// MarkAlertSent marks a pending alert delivered at at.
+	MarkAlertSent(ctx context.Context, a WorkflowAlert, at time.Time) error
+	// MarkAlertAttemptFailed counts one failed attempt of a pending alert
+	// made after a.Attempts attempts, with a safe code: the alert is due
+	// again at next, or failed for good when next is zero.
+	MarkAlertAttemptFailed(ctx context.Context, a WorkflowAlert, code string, next time.Time) error
+	// ListAlertRetries returns pending alerts due at or before due,
+	// oldest first, at most limit.
+	ListAlertRetries(ctx context.Context, due time.Time, limit int) ([]WorkflowAlert, error)
+	// CountAlertsSentSince counts alerts delivered since since, hub-wide.
+	CountAlertsSentSince(ctx context.Context, since time.Time) (int, error)
+	// ListAlertSummaries returns, per workspace, the suppressed alerts
+	// claimed before before and not yet summarised.
+	ListAlertSummaries(ctx context.Context, before time.Time) ([]AlertSummary, error)
+	// MarkAlertsSummarised marks a workspace's suppressed alerts claimed
+	// before before as summarised at at.
+	MarkAlertsSummarised(ctx context.Context, workspaceID string, before, at time.Time) error
 }
 
 // AlertMetrics counts sent and suppressed alerts (metrics.Hub).
@@ -86,7 +142,15 @@ type AlertMetrics interface {
 	AlertSuppressed()
 }
 
-// WorkflowAlerts is the alert watcher service.
+// alertFailureMetrics is the optional count of alerts whose attempts ran
+// out (metrics.Hub).
+type alertFailureMetrics interface {
+	AlertFailed()
+}
+
+// WorkflowAlerts is the alert watcher service. Every number that decides
+// what is sent (dedup, attempts, the hourly cap, merged alerts) lives in
+// the database, so a restart keeps it.
 type WorkflowAlerts struct {
 	Store     WorkflowAlertStore
 	Chats     ChatResolver
@@ -101,21 +165,12 @@ type WorkflowAlerts struct {
 	SendTimeout  time.Duration // default 10 s
 	Now          func() time.Time
 
-	mu          sync.Mutex
-	kick        chan struct{}
-	windowStart time.Time
-	sent        int
-	suppressed  map[string]int // workspace -> merged in this window
-	summaries   map[string]int // workspace -> merged, summary not yet sent
-	retryAfter  map[alertKey]time.Time
-	// summaryRetry is when a failed summary send may be tried again.
+	mu   sync.Mutex
+	kick chan struct{}
+	// summaryRetry and summaryFails pace a failing summary send (backoff
+	// only; the merged alerts stay in the database until summarised).
 	summaryRetry time.Time
-}
-
-type alertKey struct {
-	workspaceID string
-	executionID int64
-	state       AlertState
+	summaryFails int
 }
 
 func (w *WorkflowAlerts) now() time.Time {
@@ -130,12 +185,6 @@ func (w *WorkflowAlerts) interval() time.Duration {
 		return w.Interval
 	}
 	return DefaultAlertInterval
-}
-
-// retryDelay is how long a failed send waits: 90% of the tick, so the
-// next tick retries it but an early (kicked) scan never does.
-func (w *WorkflowAlerts) retryDelay() time.Duration {
-	return w.interval() * 9 / 10
 }
 
 func (w *WorkflowAlerts) kickCh() chan struct{} {
@@ -198,15 +247,42 @@ func (w *WorkflowAlerts) Run(ctx context.Context) error {
 	}
 }
 
-// Scan runs one pass: it rolls the rate window (sending due summaries)
-// and alerts every new candidate.
+// Scan runs one pass: it sends due summaries of merged alerts, retries
+// due pending alerts (a small batch of its own, so failing alerts never
+// starve new ones), then claims and alerts every new candidate.
 func (w *WorkflowAlerts) Scan(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
 	now := w.now()
-	w.roll(now)
 	w.sendSummaries(ctx, now)
+	sent, err := w.Store.CountAlertsSentSince(ctx, now.Add(-alertWindow))
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Print("workflow alerts: rate window read failed")
+		}
+		return
+	}
+	limit := w.hourlyCap()
+	retries, err := w.Store.ListAlertRetries(ctx, now, alertRetryLimit)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Print("workflow alerts: retry scan failed")
+		}
+	}
+	for _, a := range retries {
+		if ctx.Err() != nil {
+			return
+		}
+		// Over the cap a due retry waits for room in the window; it is
+		// not merged, since its claim was made under the cap.
+		if sent >= limit {
+			break
+		}
+		if w.attempt(ctx, a, now) {
+			sent++
+		}
+	}
 	running, queued := w.StuckRunning, w.StuckQueued
 	if running <= 0 {
 		running = DefaultAlertStuckRunning
@@ -231,36 +307,8 @@ func (w *WorkflowAlerts) Scan(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		w.handle(ctx, a, now)
-	}
-}
-
-// roll starts a new rate window when the current one ended and moves its
-// merged counts to the summaries to send.
-func (w *WorkflowAlerts) roll(now time.Time) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.windowStart.IsZero() {
-		w.windowStart = now
-		return
-	}
-	if now.Sub(w.windowStart) < alertWindow {
-		return
-	}
-	for ws, n := range w.suppressed {
-		if n > 0 {
-			if w.summaries == nil {
-				w.summaries = map[string]int{}
-			}
-			w.summaries[ws] += n
-		}
-	}
-	w.suppressed = nil
-	w.sent = 0
-	w.windowStart = now
-	for k, at := range w.retryAfter {
-		if !now.Before(at) {
-			delete(w.retryAfter, k)
+		if w.handle(ctx, a, now, sent >= limit) {
+			sent++
 		}
 	}
 }
@@ -272,99 +320,146 @@ func (w *WorkflowAlerts) hourlyCap() int {
 	return DefaultAlertHourlyCap
 }
 
-func (w *WorkflowAlerts) handle(ctx context.Context, a WorkflowAlert, now time.Time) {
-	key := alertKey{workspaceID: a.WorkspaceID, executionID: a.ExecutionID, state: a.State}
-	w.mu.Lock()
-	if at, ok := w.retryAfter[key]; ok && now.Before(at) {
-		w.mu.Unlock()
-		return
+// handle claims a new candidate (suppressed when over the cap) and sends
+// it; it reports whether the alert was delivered.
+func (w *WorkflowAlerts) handle(ctx context.Context, a WorkflowAlert, now time.Time, overCap bool) bool {
+	a.Attempts = 0
+	if overCap {
+		claimed, err := w.Store.SuppressAlert(ctx, a, now)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("workflow alerts: claim failed state=%s", a.State)
+			}
+			return false
+		}
+		if !claimed {
+			return false
+		}
+		if w.Metrics != nil {
+			w.Metrics.AlertSuppressed()
+		}
+		log.Printf("workflow alerts: suppressed by hourly cap state=%s execution_id=%d", a.State, a.ExecutionID)
+		return false
 	}
-	overCap := w.sent >= w.hourlyCap()
-	w.mu.Unlock()
 	claimed, err := w.Store.ClaimAlert(ctx, a, now)
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Printf("workflow alerts: claim failed state=%s", a.State)
 		}
-		return
+		return false
 	}
 	if !claimed {
-		return
+		return false
 	}
-	if overCap {
-		w.mu.Lock()
-		if w.suppressed == nil {
-			w.suppressed = map[string]int{}
-		}
-		w.suppressed[a.WorkspaceID]++
-		w.mu.Unlock()
-		if w.Metrics != nil {
-			w.Metrics.AlertSuppressed()
-		}
-		log.Printf("workflow alerts: suppressed by hourly cap state=%s execution_id=%d", a.State, a.ExecutionID)
-		return
-	}
-	if err := w.send(ctx, a.WorkspaceID, alertText(a, now)); err != nil {
-		w.release(a)
-		w.mu.Lock()
-		if w.retryAfter == nil {
-			w.retryAfter = map[alertKey]time.Time{}
-		}
-		w.retryAfter[key] = now.Add(w.retryDelay())
-		w.mu.Unlock()
-		log.Printf("workflow alerts: send failed; retried next tick state=%s execution_id=%d", a.State, a.ExecutionID)
-		return
-	}
-	w.mu.Lock()
-	w.sent++
-	delete(w.retryAfter, key)
-	w.mu.Unlock()
-	if w.Metrics != nil {
-		w.Metrics.AlertSent(string(a.State))
-	}
-	log.Printf("workflow alerts: sent state=%s execution_id=%d", a.State, a.ExecutionID)
+	return w.attempt(ctx, a, now)
 }
 
-// release deletes the claim of a failed send, also while shutting down.
-func (w *WorkflowAlerts) release(a WorkflowAlert) {
-	rctx, cancel := context.WithTimeout(context.Background(), alertReleaseTimeout)
+// attempt sends a pending alert once and records the result: sent, or one
+// more failed attempt (a timeout counts: delivery is at least once, bounded
+// by AlertMaxAttempts). A send cut short by shutdown records nothing; the
+// alert stays pending and is tried after the restart.
+func (w *WorkflowAlerts) attempt(ctx context.Context, a WorkflowAlert, now time.Time) bool {
+	sendErr := w.send(ctx, a.WorkspaceID, alertText(a, now))
+	if sendErr != nil && ctx.Err() != nil {
+		return false
+	}
+	mctx, cancel := context.WithTimeout(context.Background(), alertMarkTimeout)
 	defer cancel()
-	if err := w.Store.ReleaseAlert(rctx, a); err != nil {
-		log.Printf("workflow alerts: release failed; alert not retried state=%s execution_id=%d", a.State, a.ExecutionID)
+	if sendErr == nil {
+		if err := w.Store.MarkAlertSent(mctx, a, now); err != nil {
+			log.Printf("workflow alerts: sent; mark failed state=%s execution_id=%d", a.State, a.ExecutionID)
+		}
+		if w.Metrics != nil {
+			w.Metrics.AlertSent(string(a.State))
+		}
+		log.Printf("workflow alerts: sent state=%s execution_id=%d", a.State, a.ExecutionID)
+		return true
+	}
+	code := alertSendErrorCode(sendErr)
+	attempts := a.Attempts + 1
+	var next time.Time
+	if d, ok := AlertRetryDelay(attempts); ok {
+		next = now.Add(d)
+	}
+	if err := w.Store.MarkAlertAttemptFailed(mctx, a, code, next); err != nil {
+		log.Printf("workflow alerts: send failed; attempt not recorded state=%s execution_id=%d", a.State, a.ExecutionID)
+		return false
+	}
+	if next.IsZero() {
+		if m, ok := w.Metrics.(alertFailureMetrics); ok {
+			m.AlertFailed()
+		}
+		log.Printf("workflow alerts: send failed for good state=%s execution_id=%d attempts=%d code=%s", a.State, a.ExecutionID, attempts, code)
+		return false
+	}
+	log.Printf("workflow alerts: send failed; retried later state=%s execution_id=%d attempts=%d code=%s", a.State, a.ExecutionID, attempts, code)
+	return false
+}
+
+// alertSendErrorCode is the closed code of a failed send.
+func alertSendErrorCode(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "send_timeout"
+	case errors.Is(err, errAlertNoChat):
+		return "chat_unavailable"
+	default:
+		return "send_failed"
 	}
 }
+
+var errAlertNoChat = errors.New("workflow alerts: owner chat unavailable")
 
 // sendSummaries sends one line per workspace with alerts merged by the
-// cap in an ended window; a failed send is kept for the next tick.
+// cap, once the oldest of them is a rate window old; the merged alerts
+// are marked summarised only after a delivered send.
 func (w *WorkflowAlerts) sendSummaries(ctx context.Context, now time.Time) {
 	w.mu.Lock()
-	if now.Before(w.summaryRetry) {
-		w.mu.Unlock()
+	wait := now.Before(w.summaryRetry)
+	w.mu.Unlock()
+	if wait {
 		return
 	}
-	pending := make(map[string]int, len(w.summaries))
-	for ws, n := range w.summaries {
-		pending[ws] = n
+	list, err := w.Store.ListAlertSummaries(ctx, now)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Print("workflow alerts: summary read failed")
+		}
+		return
 	}
-	w.mu.Unlock()
-	for ws, n := range pending {
+	for _, s := range list {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := w.send(ctx, ws, alertSummaryText(n, w.hourlyCap())); err != nil {
-			log.Print("workflow alerts: summary send failed; retried next tick")
-			w.mu.Lock()
-			w.summaryRetry = now.Add(w.retryDelay())
-			w.mu.Unlock()
+		if s.Count <= 0 || now.Sub(s.OldestAt) < alertWindow {
 			continue
 		}
-		w.mu.Lock()
-		w.summaries[ws] -= n
-		if w.summaries[ws] <= 0 {
-			delete(w.summaries, ws)
+		if err := w.send(ctx, s.WorkspaceID, alertSummaryText(s.Count, w.hourlyCap())); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			w.mu.Lock()
+			w.summaryFails++
+			d, ok := AlertRetryDelay(w.summaryFails)
+			if !ok {
+				d = alertBackoff[len(alertBackoff)-1]
+			}
+			w.summaryRetry = now.Add(d)
+			w.mu.Unlock()
+			log.Printf("workflow alerts: summary send failed; retried later code=%s", alertSendErrorCode(err))
+			return
 		}
+		w.mu.Lock()
+		w.summaryFails = 0
 		w.mu.Unlock()
-		log.Printf("workflow alerts: summary sent suppressed=%d", n)
+		mctx, cancel := context.WithTimeout(context.Background(), alertMarkTimeout)
+		err := w.Store.MarkAlertsSummarised(mctx, s.WorkspaceID, now, now)
+		cancel()
+		if err != nil {
+			log.Print("workflow alerts: summary sent; mark failed")
+			continue
+		}
+		log.Printf("workflow alerts: summary sent suppressed=%d", s.Count)
 	}
 }
 
@@ -379,7 +474,10 @@ func (w *WorkflowAlerts) send(ctx context.Context, workspaceID, text string) err
 	defer cancel()
 	chat, err := w.Chats.OwnerChat(sctx, workspaceID, TriggerData{})
 	if err != nil {
-		return err
+		if errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		return errAlertNoChat
 	}
 	chat.ThreadID = 0
 	_, err = w.Messenger.SendMessage(sctx, chat, OutMessage{Text: text})

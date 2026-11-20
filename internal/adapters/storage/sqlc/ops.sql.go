@@ -64,6 +64,41 @@ func (q *Queries) ListLLMUsageForDay(ctx context.Context, arg ListLLMUsageForDay
 	return items, nil
 }
 
+const opsDeadLetterReasons = `-- name: OpsDeadLetterReasons :many
+SELECT COALESCE(dead_letter_reason, '')::text AS reason_code, count(*)::bigint AS n
+FROM public.jobs
+WHERE status = 'dead_letter'
+  AND ($1::uuid IS NULL OR workspace_id = $1::uuid)
+GROUP BY 1
+ORDER BY 1
+`
+
+type OpsDeadLetterReasonsRow struct {
+	ReasonCode string
+	N          int64
+}
+
+// Dead-letter workflow jobs by reason code, hub-wide or for one workspace.
+func (q *Queries) OpsDeadLetterReasons(ctx context.Context, workspaceID pgtype.UUID) ([]OpsDeadLetterReasonsRow, error) {
+	rows, err := q.db.Query(ctx, opsDeadLetterReasons, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OpsDeadLetterReasonsRow
+	for rows.Next() {
+		var i OpsDeadLetterReasonsRow
+		if err := rows.Scan(&i.ReasonCode, &i.N); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const opsExecutionStateCounts = `-- name: OpsExecutionStateCounts :many
 
 SELECT state, count(*)::bigint AS n
@@ -90,6 +125,47 @@ func (q *Queries) OpsExecutionStateCounts(ctx context.Context, workspaceID pgtyp
 	for rows.Next() {
 		var i OpsExecutionStateCountsRow
 		if err := rows.Scan(&i.State, &i.N); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const opsFailedExecutionReasons = `-- name: OpsFailedExecutionReasons :many
+SELECT COALESCE(reason_code, '')::text AS reason_code, count(*)::bigint AS n
+FROM public.workflow_executions
+WHERE state = 'FAILED' AND finished_at >= $1::timestamptz
+  AND ($2::uuid IS NULL OR workspace_id = $2::uuid)
+GROUP BY 1
+ORDER BY 1
+`
+
+type OpsFailedExecutionReasonsParams struct {
+	Since       pgtype.Timestamptz
+	WorkspaceID pgtype.UUID
+}
+
+type OpsFailedExecutionReasonsRow struct {
+	ReasonCode string
+	N          int64
+}
+
+// Executions that FAILED since a time, by reason code (” when none),
+// hub-wide or for one workspace.
+func (q *Queries) OpsFailedExecutionReasons(ctx context.Context, arg OpsFailedExecutionReasonsParams) ([]OpsFailedExecutionReasonsRow, error) {
+	rows, err := q.db.Query(ctx, opsFailedExecutionReasons, arg.Since, arg.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OpsFailedExecutionReasonsRow
+	for rows.Next() {
+		var i OpsFailedExecutionReasonsRow
+		if err := rows.Scan(&i.ReasonCode, &i.N); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
