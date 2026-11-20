@@ -2,6 +2,7 @@ package storage
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -298,24 +299,32 @@ func TestPhase12WorkspaceCapIsPerWorkspace(t *testing.T) {
 	if per[workspaceA] != 2 {
 		t.Fatalf("TC-33: expired leases did not free slots: A claimed %d, want 2", per[workspaceA])
 	}
+}
 
-	// Cap off: 0 and negative values.
+// TC-33 (REQ-7): 0 and negative values turn the cap off. One env per case:
+// each env holds the test schema lock until cleanup.
+func TestPhase12WorkspaceCapOff(t *testing.T) {
 	for _, n := range []int{0, -3} {
-		e2 := newWFEnv(t)
-		v2 := e2.enabledVersion(workspaceA, "p12-capoff")
-		for i := 0; i < 6; i++ {
-			e2.start(workspaceA, v2.ID, "p12-capoff-"+uuid.NewString(), chainDef("a"))
-		}
-		e2.store.SetWorkspaceMaxConcurrent(n)
-		per, _ := claimAll(t, e2, e2.base)
-		if per[workspaceA] != 6 {
-			t.Fatalf("TC-33: cap %d claimed %d of 6", n, per[workspaceA])
-		}
+		n := n
+		t.Run(fmt.Sprintf("cap_%d", n), func(t *testing.T) {
+			e := newWFEnv(t)
+			v := e.enabledVersion(workspaceA, "p12-capoff")
+			for i := 0; i < 6; i++ {
+				e.start(workspaceA, v.ID, "p12-capoff-"+uuid.NewString(), chainDef("a"))
+			}
+			e.store.SetWorkspaceMaxConcurrent(n)
+			per, _ := claimAll(t, e, e.base)
+			if per[workspaceA] != 6 {
+				t.Fatalf("TC-33: cap %d claimed %d of 6", n, per[workspaceA])
+			}
+		})
 	}
 }
 
-// TC-33 (REQ-7): resume jobs and the owner's own executions are never held
-// back by a full workspace.
+// TC-33 (REQ-7): resume jobs and the owner's own executions are claimed
+// first and never held back by a full workspace. They still count as live
+// claims, so with cap 1 no normal job starts while their leases are live;
+// once they finish, normal jobs follow in FIFO order.
 func TestPhase12WorkspaceCapExemptions(t *testing.T) {
 	e := newWFEnv(t)
 	v := e.enabledVersion(workspaceA, "p12-exempt")
@@ -328,18 +337,34 @@ func TestPhase12WorkspaceCapExemptions(t *testing.T) {
 	mustExec(t, e.ctx, e.pool, `UPDATE workflow_executions SET source_kind='orchestrated_task' WHERE id=$1`, orch.ID)
 	mustExec(t, e.ctx, e.pool, `UPDATE jobs SET continues_attempt=true WHERE execution_id=$1`, resume.ID)
 	e.store.SetWorkspaceMaxConcurrent(1)
-	_, execs := claimAll(t, e, e.base)
+	var urgent []*workflow.Job
 	got := map[int64]bool{}
-	for _, id := range execs {
-		got[id] = true
-	}
-	if !got[normal1.ID] || got[normal2.ID] {
-		t.Fatalf("TC-33: normal executions claimed = %v, want only the first", got)
+	for i := 0; i < 3; i++ {
+		j := e.claim(e.base)
+		urgent = append(urgent, j)
+		got[j.ExecutionID] = true
 	}
 	for name, id := range map[string]int64{"local_task": local.ID, "resume": resume.ID, "orchestrated_task": orch.ID} {
 		if !got[id] {
-			t.Fatalf("TC-33: exempt %s was held back by the cap", name)
+			t.Fatalf("TC-33: exempt %s was held back by the cap (claimed %v)", name, got)
 		}
+	}
+	if j, err := e.store.ClaimJob(e.ctx, e.base); err != nil || j != nil {
+		t.Fatalf("TC-33: normal job claimed while urgent leases are live: %#v %v", j, err)
+	}
+	for _, j := range urgent {
+		e.complete(j, e.base, nil, workflow.Usage{})
+	}
+	first := e.claim(e.base)
+	if first.ExecutionID != normal1.ID {
+		t.Fatalf("TC-33: first normal claim is execution %d, want %d (FIFO)", first.ExecutionID, normal1.ID)
+	}
+	if j, err := e.store.ClaimJob(e.ctx, e.base); err != nil || j != nil {
+		t.Fatalf("TC-33: second normal job claimed beyond cap 1: %#v %v", j, err)
+	}
+	e.complete(first, e.base, nil, workflow.Usage{})
+	if second := e.claim(e.base); second.ExecutionID != normal2.ID {
+		t.Fatalf("TC-33: second normal claim is execution %d, want %d", second.ExecutionID, normal2.ID)
 	}
 }
 

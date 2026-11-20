@@ -17,9 +17,17 @@ import (
 func (e *wfEnv) waitingRun(ws, subject string, def *workflow.Definition, kinds ...behavior.ApprovalKind) (bRun, *workflow.Job, []behavior.Approval) {
 	e.t.Helper()
 	br := e.runExecution(ws, "approvals", subject, def)
-	job := e.claim(e.base)
-	if job.ExecutionID != br.ex.ID {
-		e.t.Fatalf("claimed execution %d, want %d", job.ExecutionID, br.ex.ID)
+	// Urgent resume jobs of earlier executions are claimed first; claim
+	// (and leave leased) other executions' jobs until this one's job comes.
+	var job *workflow.Job
+	for i := 0; i < 20 && job == nil; i++ {
+		j := e.claim(e.base)
+		if j.ExecutionID == br.ex.ID {
+			job = j
+		}
+	}
+	if job == nil {
+		e.t.Fatalf("job of execution %d was not claimable", br.ex.ID)
 	}
 	var approvals []behavior.Approval
 	for i, k := range kinds {
