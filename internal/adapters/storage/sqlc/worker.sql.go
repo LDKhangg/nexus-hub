@@ -272,15 +272,18 @@ func (q *Queries) ExpireWorkerLeases(ctx context.Context, now pgtype.Timestamptz
 }
 
 const failStaleInterruptedWorkerJobs = `-- name: FailStaleInterruptedWorkerJobs :many
+WITH picked AS MATERIALIZED (
+    SELECT s.id FROM public.worker_jobs s
+    WHERE s.state = 'INTERRUPTED' AND s.interrupted_at < $2::timestamptz
+    ORDER BY s.interrupted_at, s.id
+    LIMIT $3::int
+    FOR UPDATE SKIP LOCKED
+)
 UPDATE public.worker_jobs j
 SET state = 'FAILED', result = jsonb_build_object('status', 'failed', 'reason_code', 'lease_expired'),
     interrupted_at = NULL, finished_at = $1::timestamptz, updated_at = $1::timestamptz
-WHERE j.id IN (SELECT s.id FROM public.worker_jobs s
-               WHERE s.state = 'INTERRUPTED' AND s.interrupted_at < $2::timestamptz
-               ORDER BY s.interrupted_at, s.id
-               LIMIT $3::int
-               FOR UPDATE SKIP LOCKED)
-  AND j.state = 'INTERRUPTED'
+FROM picked
+WHERE j.id = picked.id AND j.state = 'INTERRUPTED'
 RETURNING j.id, j.workspace_id, j.execution_id, j.step_id, j.required_capabilities, j.state, j.device_id, j.lease_token_hash, j.lease_expires_at, j.attempt, j.result, j.idempotency_key, j.payload, j.progress, j.progress_seq, j.leased_at, j.interrupted_at, j.created_at, j.updated_at, j.finished_at
 `
 
@@ -294,6 +297,9 @@ type FailStaleInterruptedWorkerJobsParams struct {
 // window ends FAILED with the fixed reason lease_expired (Phase 12 REQ-5):
 // it never stays interrupted forever. The owner may still retry it within
 // the retry limit. Bounded per pass.
+// The picked set is a MATERIALIZED CTE so the LIMIT is applied once: an
+// IN (SELECT ... LIMIT ... SKIP LOCKED) subquery may be re-evaluated and
+// fail more rows than max_rows.
 func (q *Queries) FailStaleInterruptedWorkerJobs(ctx context.Context, arg FailStaleInterruptedWorkerJobsParams) ([]WorkerJob, error) {
 	rows, err := q.db.Query(ctx, failStaleInterruptedWorkerJobs, arg.Now, arg.Cutoff, arg.MaxRows)
 	if err != nil {

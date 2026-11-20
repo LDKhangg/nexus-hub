@@ -3,6 +3,7 @@
 package settings
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -75,7 +76,7 @@ type Settings struct {
 	OrchestratorMaxTokens           int64         // model tokens per orchestrated execution
 	OrchestratorMaxWallMinutes      int64         // wall minutes per orchestrated execution
 	QueueMaxPending                 int64         // queued workflow jobs above which new non-urgent executions are deferred
-	WorkspaceMaxConcurrent          int64         // executions of one workspace running a step at once; owner work and resumes exempt
+	WorkspaceMaxConcurrent          int64         // executions of one workspace running a step at once; 0 = off; owner work and resumes exempt
 	LLMDailyBudgetUSD               float64       // model spend per UTC day; 0 = off
 }
 
@@ -187,9 +188,9 @@ var specs = map[string]spec{
 	"message_link_retention_days":         {kind: kInt, def: int64(30), min: 1, max: 3650, set: func(s *Settings, v any) { s.MessageLinkRetentionDays = v.(int64) }},
 	"clickup_draft_expiry_hours":          {kind: kInt, def: int64(24), min: 1, max: 168, set: func(s *Settings, v any) { s.ClickUpDraftExpiryHours = v.(int64) }},
 	"telegram_command_topic":              {kind: kTopicName, def: "", set: func(s *Settings, v any) { s.TelegramCommandTopic = v.(string) }},
-	"shutdown_timeout":                    {kind: kDuration, def: 25 * time.Second, min: 1, max: 120, set: func(s *Settings, v any) { s.ShutdownTimeout = v.(time.Duration) }},
+	"shutdown_timeout":                    {kind: kDuration, def: 25 * time.Second, min: 1, max: 80, set: func(s *Settings, v any) { s.ShutdownTimeout = v.(time.Duration) }},
 	"queue_max_pending":                   {kind: kInt, def: int64(500), min: 1, max: 1_000_000, set: func(s *Settings, v any) { s.QueueMaxPending = v.(int64) }},
-	"workspace_max_concurrent_executions": {kind: kInt, def: int64(4), min: 1, max: 64, set: func(s *Settings, v any) { s.WorkspaceMaxConcurrent = v.(int64) }},
+	"workspace_max_concurrent_executions": {kind: kInt, def: int64(4), min: 0, max: 64, set: func(s *Settings, v any) { s.WorkspaceMaxConcurrent = v.(int64) }},
 	"llm_daily_budget_usd":                {kind: kFloat, def: 0.0, min: 0, max: 1_000_000, set: func(s *Settings, v any) { s.LLMDailyBudgetUSD = v.(float64) }},
 	"telegram_mode":                       {kind: kEnum, def: TelegramModeAuto, enum: []string{TelegramModeAuto, TelegramModeWebhook, TelegramModePoll}, set: func(s *Settings, v any) { s.TelegramMode = v.(string) }},
 }
@@ -354,6 +355,11 @@ func parse(key string, raw json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("settings: unknown key %q", key)
 	}
 	bad := fmt.Errorf("settings: invalid value for %s", key)
+	// JSON null decodes to the zero value without an error; a number or a
+	// duration must be given explicitly.
+	if (sp.kind == kInt || sp.kind == kFloat || sp.kind == kDuration) && string(bytes.TrimSpace(raw)) == "null" {
+		return nil, bad
+	}
 	switch sp.kind {
 	case kBool:
 		var b bool

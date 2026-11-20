@@ -249,6 +249,8 @@ EnvironmentFile=%h/.config/nexus-hub/env
 ExecStart=%h/.local/bin/nexus-server
 Restart=on-failure
 RestartSec=5s
+KillMode=mixed
+TimeoutStopSec=100
 
 [Install]
 WantedBy=default.target
@@ -878,6 +880,25 @@ nothing more, and its lease expires. At startup the reconciler requeues it.
 It continues from its last checkpoint, never from the beginning. Waiting
 executions stay waiting. A button pressed while the hub was down arrives when
 it starts (Telegram keeps updates for 24 hours) and wakes the step.
+
+### Shutdown (Phase 12)
+
+On SIGTERM the hub stops claiming and lets in-flight HTTP requests and job
+steps finish for up to `shutdown_timeout`. A step still running then is cut
+off, its lease is released, and the next start resumes it.
+
+| Setting | Default | Range | Meaning |
+|---|---|---|---|
+| `shutdown_timeout` | `25s` | `1s`..`80s` | drain bound for HTTP requests and in-flight steps |
+
+Both systemd units and the user unit above set `KillMode=mixed` and `TimeoutStopSec=100`. SIGTERM
+goes to the hub process only, so git and CLI children of a draining step keep
+running and the step records their real outcome. Keep `TimeoutStopSec`
+above `shutdown_timeout` plus a few seconds. Never set `KillMode=control-group`
+(the systemd default) on a hub unit: systemd would SIGTERM the children too,
+and a step could record a child's exit 143 as a normal result. A custom unit
+or a manual `kill` of a child has the same risk; stop the hub, not its
+children.
 
 ## Conversations and control (Phase 6)
 

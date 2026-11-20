@@ -152,7 +152,19 @@ WHERE j.status = 'pending' AND j.due_at <= sqlc.arg(at_time)::timestamptz
        OR (SELECT count(*) FROM public.jobs r
            WHERE r.workspace_id = j.workspace_id AND r.status = 'processing'
              AND r.lease_expires_at > sqlc.arg(at_time)::timestamptz) < sqlc.arg(max_concurrent)::int)
-ORDER BY CASE WHEN j.status = 'processing' THEN 0 ELSE 1 END, j.due_at, j.id
+-- Urgent first (Phase 12 REQ-7): a resume job, the owner's own executions
+-- and executions started from an owner Telegram command run before the
+-- backlog; FIFO by due_at within each class. The command check is a primary
+-- key lookup of the execution's legacy run.
+ORDER BY CASE WHEN j.status = 'processing' THEN 0 ELSE 1 END,
+         CASE WHEN j.continues_attempt
+                   OR e.source_kind IN ('local_task', 'orchestrated_task')
+                   OR (e.legacy_run_id IS NOT NULL AND EXISTS (
+                         SELECT 1 FROM public.behavior_runs br
+                         WHERE br.id = e.legacy_run_id AND br.workspace_id = e.workspace_id
+                           AND br.trigger_kind = 'telegram.command'))
+              THEN 0 ELSE 1 END,
+         j.due_at, j.id
 -- Lock the job and its execution together without waiting, so a claim never
 -- holds a job while blocking on an execution (lock order: execution, job).
 FOR UPDATE OF j, e SKIP LOCKED

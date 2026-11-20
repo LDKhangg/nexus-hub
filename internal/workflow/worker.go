@@ -251,17 +251,25 @@ func (w *Worker) execute(ctx context.Context, job *Job) error {
 		ClaimToken: job.ClaimToken, JobID: job.ID, Attempt: job.Attempts, Checkpoint: job.Step.Checkpoint,
 	})
 	if executeErr != nil {
-		if ctx.Err() != nil {
-			w.releaseLease(job)
-			return ctx.Err()
-		}
-		// An executor's explicit uncertainty wins over the timer: the side
-		// effect may have happened, so the step must never be retried
-		// automatically or through a manual retry child.
+		// An executor's explicit uncertainty wins over the timer and over
+		// shutdown: the side effect may have happened, so the step must never
+		// be retried automatically, through a resume or a manual retry child.
 		var stepErr *StepError
 		isStepErr := errors.As(executeErr, &stepErr)
 		if isStepErr && stepErr.Uncertain {
+			if ctx.Err() != nil {
+				failCtx, cancelFail := context.WithTimeout(context.WithoutCancel(ctx), leaseReleaseTimeout)
+				defer cancelFail()
+				if err := w.fail(failCtx, job, ReasonSideEffectUncertain, result.Checkpoint, result.Usage); err != nil {
+					return err
+				}
+				return ctx.Err()
+			}
 			return w.fail(ctx, job, ReasonSideEffectUncertain, result.Checkpoint, result.Usage)
+		}
+		if ctx.Err() != nil {
+			w.releaseLease(job)
+			return ctx.Err()
 		}
 		select {
 		case <-timedOut:

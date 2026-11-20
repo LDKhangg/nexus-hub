@@ -16,6 +16,11 @@ LoadCredential=master.key:/etc/nexus-hub/master.key
 Environment=NEXUS_MASTER_KEY_FILE=%d/master.key
 Restart=on-failure
 RestartSec=5s
+# Phase 12 graceful shutdown: SIGTERM only the hub process so a draining
+# step's git/CLI children are not killed under it; shutdown_timeout (max
+# 80s) plus the stop grace stays below TimeoutStopSec.
+KillMode=mixed
+TimeoutStopSec=100
 
 NoNewPrivileges=yes
 ProtectSystem=strict
