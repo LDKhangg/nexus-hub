@@ -173,7 +173,7 @@ func TestPhase12InterruptedOver24hFailsOnce(t *testing.T) {
 	}
 }
 
-// TC-26 (REQ-5, abuse of volume): 150 stale interrupted jobs are failed 100
+// TC-26 (REQ-5, abuse of volume): 139 stale interrupted jobs are failed 100
 // per pass; a young interrupted job, a succeeded job and a cancelled job are
 // never touched; each failed job is announced once.
 func TestPhase12StaleInterruptedSweepIsBoundedAndSelective(t *testing.T) {
@@ -190,7 +190,7 @@ func TestPhase12StaleInterruptedSweepIsBoundedAndSelective(t *testing.T) {
 		mustExec(t, e.ctx, e.pool, `UPDATE worker_jobs SET state=$2, device_id=$3, interrupted_at=$4 WHERE id=$1`, j.ID, state, d.ID, interruptedAt)
 		return j.ID
 	}
-	const stale = 150
+	const stale = 139
 	for i := 0; i < stale; i++ {
 		mk(behavior.WorkerJobInterrupted, 25*time.Hour)
 	}
@@ -207,8 +207,9 @@ func TestPhase12StaleInterruptedSweepIsBoundedAndSelective(t *testing.T) {
 	if _, err := e.s.ExpireLeases(e.ctx); err != nil {
 		t.Fatal(err)
 	}
+	// D-A-1: exactly the batch bound per pass (139 -> 100, then 39).
 	if n := count(behavior.WorkerJobFailed); n != 100 {
-		t.Fatalf("TC-26: first pass failed %d jobs, want the batch bound 100", n)
+		t.Fatalf("TC-26/D-A-1: first pass failed %d jobs, want exactly 100", n)
 	}
 	if _, err := e.s.ExpireLeases(e.ctx); err != nil {
 		t.Fatal(err)
@@ -236,34 +237,38 @@ func TestPhase12StaleInterruptedSweepIsBoundedAndSelective(t *testing.T) {
 	}
 }
 
-// TC-27 (REQ-5): cancelling is unchanged: a cancelled job stays cancelled
-// through the 24 h sweep, and a running job cancels through CANCELLING.
+// TC-27 (REQ-5): cancelling is unchanged: a running job cancels through
+// CANCELLING, and neither it nor a cancelled interrupted job is touched by the
+// 24 h sweep. One DB env only (a second one waits on the schema lock).
 func TestPhase12CancelUnchangedByExpiry(t *testing.T) {
 	e := newW7(t)
 	_, jj, _ := interrupted(t, e)
 	if got, err := e.s.CancelJob(e.ctx, workspaceA, jj.ID); err != nil || got.State != behavior.WorkerJobCancelled {
 		t.Fatalf("TC-27: cancel interrupted: %+v %v", got.State, err)
 	}
+	d2, _ := e.enroll(t, workspaceA, "laptop-2")
+	j := e.job(t, workspaceA, nil, "")
+	l := e.mustLease(t, d2)
+	if l.Job.ID != j.ID {
+		t.Fatalf("TC-27: device 2 leased %s, want %s", l.Job.ID, j.ID)
+	}
+	if got, err := e.s.CancelJob(e.ctx, workspaceA, j.ID); err != nil || got.State != behavior.WorkerJobCancelling {
+		t.Fatalf("TC-27: cancel running: %+v %v", got.State, err)
+	}
+	e.advance(11 * time.Minute)
+	if n, err := e.s.ExpireLeases(e.ctx); err != nil || n != 1 {
+		t.Fatalf("TC-27: expire cancelling = %d %v", n, err)
+	}
+	if st := e.jobState(t, j.ID); st != behavior.WorkerJobCancelled {
+		t.Fatalf("TC-27: cancelling job became %s", st)
+	}
 	e.advance(48 * time.Hour)
 	if _, err := e.s.ExpireLeases(e.ctx); err != nil {
 		t.Fatal(err)
 	}
-	if st := e.jobState(t, jj.ID); st != behavior.WorkerJobCancelled {
-		t.Fatalf("TC-27: cancelled job became %s", st)
-	}
-
-	e2 := newW7(t)
-	d, _ := e2.enroll(t, workspaceA, "laptop")
-	j := e2.job(t, workspaceA, nil, "")
-	e2.mustLease(t, d)
-	if got, err := e2.s.CancelJob(e2.ctx, workspaceA, j.ID); err != nil || got.State != behavior.WorkerJobCancelling {
-		t.Fatalf("TC-27: cancel running: %+v %v", got.State, err)
-	}
-	e2.advance(11 * time.Minute)
-	if n, err := e2.s.ExpireLeases(e2.ctx); err != nil || n != 1 {
-		t.Fatalf("TC-27: expire cancelling = %d %v", n, err)
-	}
-	if st := e2.jobState(t, j.ID); st != behavior.WorkerJobCancelled {
-		t.Fatalf("TC-27: cancelling job became %s", st)
+	for _, id := range []string{jj.ID, j.ID} {
+		if st := e.jobState(t, id); st != behavior.WorkerJobCancelled {
+			t.Fatalf("TC-27: cancelled job %s became %s", id, st)
+		}
 	}
 }

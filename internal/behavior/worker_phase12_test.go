@@ -3,13 +3,30 @@ package behavior
 import (
 	"strings"
 	"testing"
+	"time"
 )
+
+// phase12InterruptedButtons is b3Buttons for an interrupted job: the
+// interrupted notice (not the finished one) carries Retry and Cancel.
+func phase12InterruptedButtons(t *testing.T) *b3ButtonEnv {
+	t.Helper()
+	n := b3Notifier(&fakeWorkerAdmin{}, nil)
+	job := b3Job(WorkerJobInterrupted)
+	n.change(WorkerChangeInterrupted, job)
+	if len(n.m.sent) != 1 || len(n.m.sent[0].Buttons) != 1 {
+		t.Fatalf("no buttons: %v", n.m.texts())
+	}
+	e := &b3ButtonEnv{n: n, m: n.m, jobs: &b3Jobs{job: job, found: true}, queued: &b3Queued{}, buttons: n.m.sent[0].Buttons, msgID: 701}
+	e.w = NewInboxWorker(InboxDeps{Messenger: n.m, Approvals: n.ap, WorkerJobs: e.jobs, WorkerNotifier: e.queued}, InboxSettings{})
+	e.w.now = func() time.Time { return *n.clock }
+	return e
+}
 
 // TC-25 (REQ-5): a Retry button pressed at the retry limit says so in
 // Vietnamese, closes nothing (Cancel still works), tells the topic nothing,
 // and a second press (double tap) gets the same answer.
 func TestPhase12RetryButtonAtLimitKeepsButtonsOpen(t *testing.T) {
-	e := b3Buttons(t, WorkerJobInterrupted)
+	e := phase12InterruptedButtons(t)
 	e.jobs.retryErr = ErrWorkerRetryLimit
 	for i := 1; i <= 2; i++ {
 		out := e.press(0, b1Chat)

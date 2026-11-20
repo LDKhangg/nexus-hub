@@ -243,3 +243,55 @@ func TestWorker_ParallelExecutionsDoNotShareStateOrDeadlock(t *testing.T) {
 		}
 	}
 }
+
+// R-A-3 (REQ-4): a step that reports an uncertain side effect while the hard
+// shutdown cut is happening is failed with side_effect_uncertain; its lease
+// is not released, so the reconciler can never replay it.
+func TestWorkerRunUntil_UncertainStepOnHardCutFailsAndKeepsLease(t *testing.T) {
+	def := defaultDefinition(t)
+	job := testJob(11, 1, def)
+	store := &releasingStore{fakeJobStore: newFakeJobStore(job)}
+	started := make(chan struct{}, 1)
+	exec := execFunc(func(ctx context.Context, _ workflow.StepContext) (workflow.StepResult, error) {
+		started <- struct{}{}
+		<-ctx.Done()
+		return workflow.StepResult{}, &workflow.StepError{Code: "merge_unknown", Uncertain: true}
+	})
+	w := phase12Worker(t, store, 1, exec)
+	stop, stopCancel := context.WithCancel(context.Background())
+	hard, hardCancel := context.WithCancel(context.Background())
+	defer stopCancel()
+	done := make(chan error, 1)
+	go func() { done <- w.RunUntil(stop, hard) }()
+	<-started
+	hardCancel()
+	waitDone(t, done, "RunUntil")
+	c := onlyCall(t, store.fakeJobStore, 11)
+	if c.method != "fail" || c.req.Reason != workflow.ReasonSideEffectUncertain {
+		t.Fatalf("R-A-3: queue write %#v, want fail side_effect_uncertain", c)
+	}
+	if r := store.released(); len(r) != 0 {
+		t.Fatalf("R-A-3: an uncertain step released its lease: %#v", r)
+	}
+}
+
+// R-A-3 (REQ-4): a plain (certain) cancellation on the same cut still
+// releases the lease and writes nothing, so the uncertain case is the only
+// difference.
+func TestWorkerRunUntil_CertainCancelStillReleasesLease(t *testing.T) {
+	def := defaultDefinition(t)
+	store := &releasingStore{fakeJobStore: newFakeJobStore(testJob(12, 1, def))}
+	started := make(chan struct{}, 1)
+	w := phase12Worker(t, store, 1, blockingExec(started))
+	stop, stopCancel := context.WithCancel(context.Background())
+	hard, hardCancel := context.WithCancel(context.Background())
+	defer stopCancel()
+	done := make(chan error, 1)
+	go func() { done <- w.RunUntil(stop, hard) }()
+	<-started
+	hardCancel()
+	waitDone(t, done, "RunUntil")
+	if len(store.released()) != 1 || len(store.callsFor(12)) != 0 {
+		t.Fatalf("releases %v writes %v", store.released(), store.callsFor(12))
+	}
+}
