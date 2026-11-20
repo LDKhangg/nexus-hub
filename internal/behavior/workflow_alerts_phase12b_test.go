@@ -761,7 +761,11 @@ func TestPhase12bFixBExistingRowOfAnyStatusSkipsCandidate(t *testing.T) {
 		if status == "sent" {
 			sent = clk.t.Add(-2 * time.Hour)
 		}
-		st.seed(c, status, 1, next, sent, clk.t.Add(-2*time.Hour))
+		created := clk.t.Add(-2 * time.Hour)
+		if status == "suppressed" {
+			created = clk.t.Add(-10 * time.Minute) // inside the hour: no summary is due yet
+		}
+		st.seed(c, status, 1, next, sent, created)
 	}
 	st.cands = cands
 	msg := &alt12bMessenger{}

@@ -224,8 +224,8 @@ func TestPhase12bStatusAndTimeline(t *testing.T) {
 				t.Errorf("output leaks %q:\n%s", bad, out)
 			}
 		}
-		if strings.Contains(out, "not_a_known_code") || !strings.Contains(out, "last_error=unknown") {
-			t.Errorf("unsafe error code must print as unknown:\n%s", out)
+		if !strings.Contains(out, "last_error=not_a_known_code") {
+			t.Errorf("a safe-shaped code prints as stored (jobs.last_error_code blocks unsafe shapes):\n%s", out)
 		}
 		for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n")[1:] {
 			if !p12bTimeLine.MatchString(l) {
