@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -215,7 +216,7 @@ func TestPhase12bStatusAndTimeline(t *testing.T) {
 			SourceKind: "clickup.comment", SourceID: "comment-ghp_SOURCETOKEN",
 			Subject: "Tìm lỗi đăng nhập\nINJECTED LINE password=hunter2", OperationKey: "op:secret",
 		}, secretKey, "second-step-xyz")
-		exec(`UPDATE jobs SET last_error_code='Bad Code With Spaces!' WHERE execution_id=$1`, ex.ID)
+		exec(`UPDATE jobs SET last_error_code='not_a_known_code' WHERE execution_id=$1`, ex.ID)
 		out := f.must("execution", "timeline", strconv.FormatInt(ex.ID, 10), "--workspace-id", f.ws)
 		all := out + f.must("status") + f.must("status", "--workspace-id", f.ws)
 		for _, bad := range []string{"sk-ant", "SECRETKEYVALUE", "ghp_", "hunter2", "INJECTED", "Tìm lỗi", "second-step-xyz", "Authorization", "Bearer", "password"} {
@@ -223,7 +224,7 @@ func TestPhase12bStatusAndTimeline(t *testing.T) {
 				t.Errorf("output leaks %q:\n%s", bad, out)
 			}
 		}
-		if strings.Contains(out, "Bad Code") || !strings.Contains(out, "last_error=unknown") {
+		if strings.Contains(out, "not_a_known_code") || !strings.Contains(out, "last_error=unknown") {
 			t.Errorf("unsafe error code must print as unknown:\n%s", out)
 		}
 		for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n")[1:] {
@@ -264,6 +265,95 @@ func TestPhase12bStatusAndTimeline(t *testing.T) {
 		}
 		if _, err := f.run("execution", "timeline", "1", "--workspace-id", "019a6690-abcd-7000-8000-0000000000ff"); err == nil || err.Error() != "workspace not found" {
 			t.Errorf("unknown workspace: %v", err)
+		}
+	})
+
+	// R-B-2 (fix B): nh status prints failed alerts and the error codes.
+	t.Run("status errors section hub-wide, per workspace and empty", func(t *testing.T) {
+		old := f.start(t, "p12b:err-old", workflow.References{}, "s1")
+		f2 := f.start(t, "p12b:err-f2", workflow.References{}, "s1")
+		dead := f.start(t, "p12b:err-dead", workflow.References{}, "s1")
+		exec(`UPDATE jobs SET status='completed' WHERE execution_id IN ($1,$2)`, old.ID, f2.ID)
+		// Older than 24 h: must not count.
+		exec(`UPDATE workflow_executions SET state='FAILED', finished_at=now()-interval '3 days', reason_code='lease_expired' WHERE id=$1`, old.ID)
+		exec(`UPDATE workflow_executions SET state='FAILED', finished_at=now(), reason_code='attempts_exhausted' WHERE id=$1`, f2.ID)
+		exec(`UPDATE jobs SET status='dead_letter', dead_letter_reason='step_timeout' WHERE execution_id=$1`, dead.ID)
+		exec(`INSERT INTO workflow_alerts(workspace_id,execution_id,state,status,attempts,last_error_code) VALUES($1,$2,'failed','failed',5,'send_failed')`, f.ws, f2.ID)
+		// sect returns the 4-space item lines under a 2-space heading.
+		sect := func(out, head string) string {
+			var got []string
+			in := false
+			for _, line := range strings.Split(out, "\n") {
+				switch {
+				case line == "  "+head+":":
+					in = true
+				case in && strings.HasPrefix(line, "    "):
+					got = append(got, line)
+				case in:
+					return strings.Join(got, "\n")
+				}
+			}
+			if !in {
+				t.Fatalf("section %s missing:\n%s", head, out)
+			}
+			return strings.Join(got, "\n")
+		}
+		hub := f.must("status")
+		if !strings.Contains(hub, "errors:") || p12bFields(hub)["failed"] != "1" {
+			t.Fatalf("hub status: failed alerts / errors section wrong:\n%s", hub)
+		}
+		fe := sect(hub, "failed_executions_24h")
+		if !regexp.MustCompile(`(?m)^\s+attempts_exhausted\s+2\b`).MatchString(fe) || strings.Contains(fe, "lease_expired") {
+			t.Errorf("failed_executions_24h wrong (old failure must not count):\n%s", hub)
+		}
+		if dl := sect(hub, "dead_letter_jobs"); !regexp.MustCompile(`(?m)^\s+step_timeout\s+1\b`).MatchString(dl) {
+			t.Errorf("dead_letter_jobs wrong:\n%s", hub)
+		}
+		mine := f.must("status", "--workspace-id", f.ws)
+		if p12bFields(mine)["failed"] != "1" || !strings.Contains(mine, "attempts_exhausted") {
+			t.Errorf("own workspace errors:\n%s", mine)
+		}
+		other := f.must("status", "--workspace-id", p12bOtherWS)
+		if p12bFields(other)["failed"] != "0" || strings.Contains(other, "attempts_exhausted") || strings.Contains(other, "step_timeout") {
+			t.Errorf("another workspace sees errors:\n%s", other)
+		}
+		for _, head := range []string{"failed_executions_24h", "dead_letter_jobs"} {
+			if got := strings.TrimSpace(sect(other, head)); got != "none" {
+				t.Errorf("%s of an empty workspace = %q, want none", head, got)
+			}
+		}
+	})
+
+	// D-B-1 (fix B): the wait kinds approval and input print as themselves.
+	t.Run("workflow show prints wait kind approval and input", func(t *testing.T) {
+		ex := f.start(t, "p12b:wait-kinds", workflow.References{}, "s1", "s2")
+		for i, w := range []struct{ step, kind string }{{"s1", "approval"}, {"s2", "input"}} {
+			var approval int64
+			nonce := fmt.Sprintf("p12b-wait-kind-nonce-%d", i)
+			if err := f.pool.QueryRow(ctx, `INSERT INTO approvals(workspace_id,kind,nonce,expires_at) VALUES($1,'confirm_action',$2,now()+interval '1 hour') RETURNING id`, f.ws, nonce).Scan(&approval); err != nil {
+				t.Fatal(err)
+			}
+			exec(`INSERT INTO workflow_waits(workspace_id,execution_id,step_key,approval_id,wait_kind) VALUES($1,$2,$3,$4,$5)`, f.ws, ex.ID, w.step, approval, w.kind)
+		}
+		out := f.must("workflow", "show", strconv.FormatInt(ex.ID, 10), "--workspace-id", f.ws)
+		var doc struct {
+			Waits []struct {
+				Kind string `json:"kind"`
+			} `json:"waits"`
+		}
+		if err := json.Unmarshal([]byte(out), &doc); err != nil {
+			t.Fatalf("workflow show is not JSON: %v\n%s", err, out)
+		}
+		var kinds []string
+		for _, w := range doc.Waits {
+			kinds = append(kinds, w.Kind)
+		}
+		if strings.Join(kinds, ",") != "approval,input" {
+			t.Fatalf("wait kinds = %v, want approval,input (never unknown)", kinds)
+		}
+		tl := f.must("execution", "timeline", strconv.FormatInt(ex.ID, 10), "--workspace-id", f.ws)
+		if !strings.Contains(tl, "opened kind=approval") || !strings.Contains(tl, "opened kind=input") || strings.Contains(tl, "kind=unknown") {
+			t.Errorf("timeline wait kinds:\n%s", tl)
 		}
 	})
 

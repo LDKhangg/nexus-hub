@@ -12,7 +12,7 @@ func TestPhase12bMetricsAddrLoopbackOnly(t *testing.T) {
 	if got := Defaults().MetricsAddr; got != "127.0.0.1:9090" {
 		t.Fatalf("default = %q", got)
 	}
-	for _, v := range []string{`"127.0.0.1:9090"`, `"[::1]:9090"`, `"localhost:1"`, `"127.0.0.1:65535"`, `"127.5.5.5:8080"`, `""`} {
+	for _, v := range []string{`"127.0.0.1:9090"`, `"[::1]:9090"`, `"localhost:1"`, `"127.0.0.1:65535"`, `"127.5.5.5:8080"`, `""`, `null`} {
 		if err := Validate("metrics_addr", json.RawMessage(v)); err != nil {
 			t.Errorf("rejected %s: %v", v, err)
 		}
@@ -20,7 +20,7 @@ func TestPhase12bMetricsAddrLoopbackOnly(t *testing.T) {
 	for _, v := range []string{
 		`"0.0.0.0:9090"`, `":9090"`, `"[::]:9090"`, `"8.8.8.8:9090"`, `"10.0.0.5:9090"`, `"example.com:9090"`,
 		`"127.0.0.1:0"`, `"127.0.0.1:70000"`, `"127.0.0.1:-1"`, `"127.0.0.1:"`, `"127.0.0.1"`, `"localhost"`,
-		`"127.0.0.1:9090/metrics"`, `" 127.0.0.1:9090"`, `"127.0.0.1:abc"`, `"public"`, `9090`, `null`, `true`,
+		`"127.0.0.1:9090/metrics"`, `" 127.0.0.1:9090"`, `"127.0.0.1:abc"`, `"public"`, `9090`, `true`,
 	} {
 		if err := Validate("metrics_addr", json.RawMessage(v)); err == nil {
 			t.Errorf("accepted %s", v)
@@ -42,6 +42,11 @@ func TestPhase12bBadStoredMetricsAddrDoesNotLoad(t *testing.T) {
 	s, err := Load(context.Background(), mapStore{"metrics_addr": json.RawMessage(`""`)})
 	if err != nil || s.MetricsAddr != "" {
 		t.Fatalf("off: %q %v", s.MetricsAddr, err)
+	}
+	// JSON null reads as "" (metrics off), the safe side.
+	s, err = Load(context.Background(), mapStore{"metrics_addr": json.RawMessage(`null`)})
+	if err != nil || s.MetricsAddr != "" {
+		t.Fatalf("null: %q %v", s.MetricsAddr, err)
 	}
 	s, err = Load(context.Background(), mapStore{"metrics_addr": json.RawMessage(`"127.0.0.1:19090"`)})
 	if err != nil || s.MetricsAddr != "127.0.0.1:19090" {

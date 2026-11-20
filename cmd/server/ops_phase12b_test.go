@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,6 +32,21 @@ func hubText(t *testing.T, h *metrics.Hub) string {
 	return string(b)
 }
 
+// freeLoopbackAddr returns a loopback host:port that was free a moment ago
+// (port 0 is rejected by design, so a test needs a concrete port).
+func freeLoopbackAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return addr
+}
+
 func startMetrics(t *testing.T, addr string, hub *metrics.Hub) (*metricsServer, string, context.CancelFunc, chan error) {
 	t.Helper()
 	ms := listenMetrics(addr, hub)
@@ -48,7 +64,7 @@ func startMetrics(t *testing.T, addr string, hub *metrics.Hub) (*metricsServer, 
 func TestPhase12bMetricsListenerServesOnlyGetMetrics(t *testing.T) {
 	hub := opsTestHub()
 	hub.Error(metrics.KindStepFailure, "timeout")
-	_, base, cancel, done := startMetrics(t, "127.0.0.1:0", hub)
+	_, base, cancel, done := startMetrics(t, freeLoopbackAddr(t), hub)
 	get := func(method, path string) (int, string) {
 		req, _ := http.NewRequest(method, base+path, nil)
 		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
@@ -96,7 +112,7 @@ func TestPhase12bListenMetricsRefusesPublicOrBusyAddress(t *testing.T) {
 	if ms != nil {
 		_ = ms.listener.Close()
 	}
-	first, _, _, _ := startMetrics(t, "127.0.0.1:0", hub)
+	first, _, _, _ := startMetrics(t, freeLoopbackAddr(t), hub)
 	busy := first.listener.Addr().String()
 	if again := listenMetrics(busy, hub); again != nil {
 		_ = again.listener.Close()
