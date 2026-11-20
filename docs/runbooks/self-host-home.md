@@ -1869,6 +1869,35 @@ is true at startup the hub logs one line saying so, and `nh settings` marks it
 deprecated. Dangerous tools follow the rule set: set `defaults.dangerous` or
 an `actions` entry.
 
+## Load test (Phase 12)
+
+Use a disposable local database whose name ends in `_loadtest`. The harness
+applies all migrations, creates and removes its own workspace, and refuses any
+non-loopback database host. It uses only the local PostgreSQL connection and a
+temporary HTTP listener on `127.0.0.1`.
+
+Start a disposable PostgreSQL container:
+
+```sh
+docker run --rm --name nexus-loadtest-pg -p 127.0.0.1:55432:5432 -e POSTGRES_PASSWORD=loadtest -e POSTGRES_DB=nexus_loadtest postgres:17-alpine
+```
+
+In another terminal, run the harness from the repository root. Install
+`goose` first; the harness passes the database URL to it through the process
+environment, never through command arguments.
+
+```sh
+DATABASE_URL='postgres://postgres:loadtest@127.0.0.1:55432/nexus_loadtest?sslmode=disable' go run ./cmd/loadtest -n 120 -concurrency 10 -duplicates 0.1 -out docs/product/reports/loadtest-$(date +%F).json -timeout 5m
+```
+
+The one-line result gives delivery count, duplicate count, client latency
+percentiles, execution states, total wall time, Go and PostgreSQL versions,
+and CPU count. The JSON report also contains server-side latency and failed
+checks. A successful run has `passed: true`, exactly `n` completed executions,
+no failed or stuck executions, no HTTP failures, and client `p95_ms` below
+500 ms. Stop the container after reading the report; its database is
+disposable even if cleanup was interrupted.
+
 ## Upkeep
 
 - Updates: `git pull`, rebuild both binaries, run `goose … up`, then
