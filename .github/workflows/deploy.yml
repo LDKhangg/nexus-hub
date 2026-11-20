@@ -111,6 +111,7 @@ jobs:
           mkdir -p dist/pkg/db dist/pkg/deploy/vps
           cp -R db/migrations dist/pkg/db/migrations
           cp deploy/vps/deploy.sh dist/pkg/deploy/vps/deploy.sh
+          cp deploy/vps/nexus-hub.service dist/pkg/deploy/vps/nexus-hub.service
           echo "$SHA" > dist/pkg/REVISION
           name="nexus-hub-${SHA}.tar.gz"
           tar -C dist/pkg --owner=0 --group=0 --numeric-owner -czf "dist/$name" .

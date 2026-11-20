@@ -37,14 +37,20 @@ RETURNING a.id;
 -- Expires up to max_rows open policy gates whose execution has ended
 -- (completed, failed, cancelled, or past its deadline); the sweep then
 -- closes their messages (review B R-B-1).
+-- The picked set is a MATERIALIZED CTE so the LIMIT is applied once: an
+-- IN (SELECT ... LIMIT ... SKIP LOCKED) subquery may be re-evaluated and
+-- touch more rows than max_rows.
+WITH picked AS MATERIALIZED (
+    SELECT g.id FROM public.approvals g
+    JOIN public.workflow_executions e ON e.workspace_id = g.workspace_id AND e.id = g.execution_id
+    WHERE g.kind = 'policy_gate' AND g.decision IS NULL
+      AND (e.state IN ('COMPLETED', 'FAILED', 'CANCELLED')
+           OR (e.deadline_at IS NOT NULL AND e.deadline_at <= sqlc.arg(at_time)::timestamptz))
+    ORDER BY g.id LIMIT sqlc.arg(max_rows)::int FOR UPDATE OF g SKIP LOCKED
+)
 UPDATE public.approvals a SET decision = 'expired', decided_by = 'system', decided_at = now(), updated_at = now()
-WHERE a.id IN (SELECT g.id FROM public.approvals g
-               JOIN public.workflow_executions e ON e.workspace_id = g.workspace_id AND e.id = g.execution_id
-               WHERE g.kind = 'policy_gate' AND g.decision IS NULL
-                 AND (e.state IN ('COMPLETED', 'FAILED', 'CANCELLED')
-                      OR (e.deadline_at IS NOT NULL AND e.deadline_at <= sqlc.arg(at_time)::timestamptz))
-               ORDER BY g.id LIMIT sqlc.arg(max_rows)::int FOR UPDATE OF g SKIP LOCKED)
-  AND a.decision IS NULL
+FROM picked
+WHERE a.id = picked.id AND a.kind = 'policy_gate' AND a.decision IS NULL
 RETURNING a.workspace_id, a.id, a.nonce, a.expires_at, COALESCE(a.policy_action, '')::text AS policy_action,
        COALESCE(a.resource_key, '')::text AS resource_key, COALESCE(a.input_sha256, '')::text AS input_sha256,
        COALESCE(a.execution_id, 0)::bigint AS execution_id, COALESCE(a.telegram_message_id, 0)::bigint AS telegram_message_id,

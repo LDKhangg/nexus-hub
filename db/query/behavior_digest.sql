@@ -29,14 +29,20 @@ RETURNING id;
 
 -- name: AssignDigestEntries :many
 -- Puts up to max_rows due, unbatched entries of one chat into a batch.
-UPDATE public.behavior_digest_entries e SET batch_id = sqlc.arg(batch_id)::bigint
-WHERE e.id IN (
+-- The picked set is a MATERIALIZED CTE so the LIMIT is applied once: an
+-- IN (SELECT ... LIMIT ... SKIP LOCKED) subquery may be re-evaluated and
+-- touch more rows than max_rows.
+WITH picked AS MATERIALIZED (
   SELECT x.id FROM public.behavior_digest_entries x
   WHERE x.workspace_id = sqlc.arg(workspace_id) AND x.integration_id = sqlc.arg(integration_id)
     AND x.chat_id = sqlc.arg(chat_id) AND x.batch_id IS NULL AND x.due_at <= sqlc.arg(at_time)::timestamptz
   ORDER BY x.run_id, x.msg_key
   LIMIT sqlc.arg(max_rows)::int
-  FOR UPDATE SKIP LOCKED)
+  FOR UPDATE SKIP LOCKED
+)
+UPDATE public.behavior_digest_entries e SET batch_id = sqlc.arg(batch_id)::bigint
+FROM picked
+WHERE e.id = picked.id AND e.batch_id IS NULL
 RETURNING e.run_id, e.msg_key;
 
 -- name: LockDigestBatch :one

@@ -5,8 +5,9 @@
 #   sudo /opt/nexus-hub/bin/deploy.sh /opt/nexus-hub/incoming/nexus-hub-<sha>.tar.gz <sha256>
 #
 # Steps: verify the checksum, extract to /opt/nexus-hub/releases/<sha>, run the
-# goose migrations, switch /opt/nexus-hub/current atomically, restart the unit,
-# health-check it, and roll the symlink back on failure.
+# goose migrations, switch /opt/nexus-hub/current atomically, install the
+# release's systemd unit when it differs from the installed one, restart the
+# unit, health-check it, and roll the symlink (and the unit) back on failure.
 #
 # Migrations are forward-only: a failed health check rolls back the binary
 # (the symlink), never the schema. Every migration must stay compatible with
@@ -23,6 +24,8 @@ readonly RELEASES=$ROOT/releases
 readonly CURRENT=$ROOT/current
 readonly ENV_FILE=/etc/nexus-hub/env
 readonly UNIT=nexus-hub
+readonly UNIT_FILE=/etc/systemd/system/$UNIT.service
+readonly UNIT_SRC=deploy/vps/nexus-hub.service
 readonly SERVICE_USER=nexus
 readonly HEALTH_HOST=127.0.0.1
 readonly HEALTH_PORT=8080
@@ -114,6 +117,29 @@ switch_to() {
   mv -Tf -- "$CURRENT.new" "$CURRENT"
 }
 
+# install_unit <release dir>: install the unit file the release ships when it
+# differs from $UNIT_FILE (root:root 0644, temp file plus rename, so systemd
+# never reads a half-written unit), then reload systemd. A release without a
+# unit file (older than this step) keeps the installed one. Errors are
+# returned, not fatal, so a rollback still restarts the previous binary.
+install_unit() {
+  local src=$1/$UNIT_SRC tmp
+  if [[ ! -f $src || -L $src ]]; then
+    log "release ${1##*/} ships no unit file; keeping $UNIT_FILE"
+    return 0
+  fi
+  if [[ -f $UNIT_FILE ]] && cmp -s -- "$src" "$UNIT_FILE"; then
+    return 0
+  fi
+  tmp=$(mktemp "${UNIT_FILE%/*}/.$UNIT.service.XXXXXX") || return 1
+  if ! install -o root -g root -m 0644 -T -- "$src" "$tmp" || ! mv -Tf -- "$tmp" "$UNIT_FILE"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  systemctl daemon-reload || return 1
+  log "installed $UNIT_FILE from release ${1##*/}; systemd reloaded"
+}
+
 healthy() {
   local deadline=$((SECONDS + HEALTH_TIMEOUT))
   while ((SECONDS < deadline)); do
@@ -127,6 +153,13 @@ healthy() {
 }
 
 switch_to "$release"
+if ! install_unit "$release"; then
+  if [[ -n $previous && -d $previous && $previous != "$release" ]]; then
+    switch_to "$previous"
+    log "rolled back current -> $previous"
+  fi
+  die "could not install $UNIT_FILE; $UNIT was not restarted"
+fi
 log "current -> $release; restarting $UNIT"
 systemctl restart "$UNIT"
 
@@ -134,6 +167,7 @@ if ! healthy; then
   log "health check failed after ${HEALTH_TIMEOUT}s"
   if [[ -n $previous && -d $previous && $previous != "$release" ]]; then
     switch_to "$previous"
+    install_unit "$previous" || log "could not reinstall the unit of ${previous##*/}; keeping $UNIT_FILE"
     log "rolled back current -> $previous; restarting $UNIT (migrations are not rolled back)"
     systemctl restart "$UNIT" || true
   else

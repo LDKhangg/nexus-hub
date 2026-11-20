@@ -53,15 +53,18 @@ func (q *Queries) CancelClickUpDraft(ctx context.Context, arg CancelClickUpDraft
 }
 
 const cancelEndedExecutionClickUpDrafts = `-- name: CancelEndedExecutionClickUpDrafts :many
+WITH picked AS MATERIALIZED (
+    SELECT c.id FROM public.clickup_drafts c
+    JOIN public.workflow_executions e ON e.workspace_id = c.workspace_id AND e.id = c.execution_id
+    WHERE c.source = 'orchestrator' AND c.state IN ('pending', 'failed')
+      AND (e.state IN ('COMPLETED', 'FAILED', 'CANCELLED')
+           OR (e.deadline_at IS NOT NULL AND e.deadline_at <= $1::timestamptz))
+    ORDER BY c.id LIMIT $2::int FOR UPDATE OF c SKIP LOCKED
+)
 UPDATE public.clickup_drafts d SET state = 'cancelled', body = NULL, reason_code = 'execution_ended',
     finished_at = now(), updated_at = now()
-WHERE d.id IN (SELECT c.id FROM public.clickup_drafts c
-               JOIN public.workflow_executions e ON e.workspace_id = c.workspace_id AND e.id = c.execution_id
-               WHERE c.source = 'orchestrator' AND c.state IN ('pending', 'failed')
-                 AND (e.state IN ('COMPLETED', 'FAILED', 'CANCELLED')
-                      OR (e.deadline_at IS NOT NULL AND e.deadline_at <= $1::timestamptz))
-               ORDER BY c.id LIMIT $2::int FOR UPDATE OF c SKIP LOCKED)
-  AND d.state IN ('pending', 'failed')
+FROM picked
+WHERE d.id = picked.id AND d.source = 'orchestrator' AND d.state IN ('pending', 'failed')
 RETURNING d.id, d.workspace_id, d.integration_id, d.chat_id, d.thread_id, d.task_id, d.parent_comment_id, d.mention_user_ids, d.new_status, d.body, d.body_sha256, d.state, d.source, d.execution_id, d.plan_task_key, d.preview_message_id, d.posted_comment_id, d.reason_code, d.expires_at, d.created_at, d.updated_at, d.finished_at
 `
 
@@ -73,6 +76,9 @@ type CancelEndedExecutionClickUpDraftsParams struct {
 // Cancels up to limit open orchestrator drafts (pending, or failed with a
 // retry) whose execution has ended or is past its deadline (review A
 // R-A-2). A draft that is posting is never touched.
+// The picked set is a MATERIALIZED CTE so the LIMIT is applied once: an
+// IN (SELECT ... LIMIT ... SKIP LOCKED) subquery may be re-evaluated and
+// touch more rows than max_rows.
 func (q *Queries) CancelEndedExecutionClickUpDrafts(ctx context.Context, arg CancelEndedExecutionClickUpDraftsParams) ([]ClickupDraft, error) {
 	rows, err := q.db.Query(ctx, cancelEndedExecutionClickUpDrafts, arg.AtTime, arg.MaxRows)
 	if err != nil {
@@ -223,10 +229,14 @@ func (q *Queries) EndFailedClickUpDraft(ctx context.Context, arg EndFailedClickU
 }
 
 const expireClickUpDrafts = `-- name: ExpireClickUpDrafts :many
+WITH picked AS MATERIALIZED (
+    SELECT c.id FROM public.clickup_drafts c
+    WHERE c.state IN ('pending', 'failed') AND c.expires_at <= $1::timestamptz
+    ORDER BY c.expires_at LIMIT $2::int FOR UPDATE SKIP LOCKED
+)
 UPDATE public.clickup_drafts d SET state = 'expired', body = NULL, finished_at = now(), updated_at = now()
-WHERE d.id IN (SELECT c.id FROM public.clickup_drafts c
-               WHERE c.state IN ('pending', 'failed') AND c.expires_at <= $1::timestamptz
-               ORDER BY c.expires_at LIMIT $2::int FOR UPDATE SKIP LOCKED)
+FROM picked
+WHERE d.id = picked.id AND d.state IN ('pending', 'failed')
 RETURNING d.id, d.workspace_id, d.integration_id, d.chat_id, d.thread_id, d.task_id, d.parent_comment_id, d.mention_user_ids, d.new_status, d.body, d.body_sha256, d.state, d.source, d.execution_id, d.plan_task_key, d.preview_message_id, d.posted_comment_id, d.reason_code, d.expires_at, d.created_at, d.updated_at, d.finished_at
 `
 
@@ -237,6 +247,9 @@ type ExpireClickUpDraftsParams struct {
 
 // Expires up to limit overdue open drafts in every workspace and clears
 // their bodies.
+// The picked set is a MATERIALIZED CTE so the LIMIT is applied once: an
+// IN (SELECT ... LIMIT ... SKIP LOCKED) subquery may be re-evaluated and
+// touch more rows than max_rows.
 func (q *Queries) ExpireClickUpDrafts(ctx context.Context, arg ExpireClickUpDraftsParams) ([]ClickupDraft, error) {
 	rows, err := q.db.Query(ctx, expireClickUpDrafts, arg.AtTime, arg.MaxRows)
 	if err != nil {
@@ -602,10 +615,14 @@ func (q *Queries) InsertClickUpDraft(ctx context.Context, arg InsertClickUpDraft
 }
 
 const reclaimStaleClickUpDraftPosts = `-- name: ReclaimStaleClickUpDraftPosts :many
+WITH picked AS MATERIALIZED (
+    SELECT c.id FROM public.clickup_drafts c
+    WHERE c.state = 'posting' AND c.updated_at < $1::timestamptz
+    ORDER BY c.updated_at LIMIT $2::int FOR UPDATE SKIP LOCKED
+)
 UPDATE public.clickup_drafts d SET updated_at = now()
-WHERE d.id IN (SELECT c.id FROM public.clickup_drafts c
-               WHERE c.state = 'posting' AND c.updated_at < $1::timestamptz
-               ORDER BY c.updated_at LIMIT $2::int FOR UPDATE SKIP LOCKED)
+FROM picked
+WHERE d.id = picked.id AND d.state = 'posting'
 RETURNING d.id, d.workspace_id, d.integration_id, d.chat_id, d.thread_id, d.task_id, d.parent_comment_id, d.mention_user_ids, d.new_status, d.body, d.body_sha256, d.state, d.source, d.execution_id, d.plan_task_key, d.preview_message_id, d.posted_comment_id, d.reason_code, d.expires_at, d.created_at, d.updated_at, d.finished_at
 `
 
@@ -616,6 +633,9 @@ type ReclaimStaleClickUpDraftPostsParams struct {
 
 // Posts interrupted before they finished (a crash mid-confirm): the caller
 // finishes them with the same idempotency key, so nothing posts twice.
+// The picked set is a MATERIALIZED CTE so the LIMIT is applied once: an
+// IN (SELECT ... LIMIT ... SKIP LOCKED) subquery may be re-evaluated and
+// touch more rows than max_rows.
 func (q *Queries) ReclaimStaleClickUpDraftPosts(ctx context.Context, arg ReclaimStaleClickUpDraftPostsParams) ([]ClickupDraft, error) {
 	rows, err := q.db.Query(ctx, reclaimStaleClickUpDraftPosts, arg.Before, arg.MaxRows)
 	if err != nil {

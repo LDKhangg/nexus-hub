@@ -13,7 +13,7 @@ is exposed.
 | File | Installed to |
 |---|---|
 | `deploy.sh` | `/opt/nexus-hub/bin/deploy.sh` (root:root 0755) |
-| `nexus-hub.service` | `/etc/systemd/system/nexus-hub.service` |
+| `nexus-hub.service` | `/etc/systemd/system/nexus-hub.service` (root:root 0644; first time by hand, then by `deploy.sh`) |
 | `sudoers-deploy` | `/etc/sudoers.d/nexus-hub-deploy` (root:root 0440) |
 
 Never paste secrets into chat, Git or shell arguments.
@@ -106,22 +106,33 @@ turns deploys off (CI still runs).
 
 1. Builds `nexus-server`, `nh` and `goose` (pinned in the workflow) with
    `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 -trimpath -ldflags "-s -w"`.
-2. Packages them with `db/migrations/`, `deploy/vps/deploy.sh` and `REVISION`
+2. Packages them with `db/migrations/`, `deploy/vps/deploy.sh`,
+   `deploy/vps/nexus-hub.service` and `REVISION`
    into `nexus-hub-<sha>.tar.gz` and a sha256 checksum.
 3. Copies the tarball to `/opt/nexus-hub/incoming/` and runs
    `sudo /opt/nexus-hub/bin/deploy.sh <tarball> <sha256>`.
 4. `deploy.sh` verifies the checksum, extracts to
    `/opt/nexus-hub/releases/<sha>/`, runs `goose up` as `nexus` (the DSN goes
-   through `GOOSE_DBSTRING`, never argv), switches `current`, restarts the
-   unit and waits up to 30 s for it to be active and for `127.0.0.1:8080` to
-   accept connections. On failure it switches back to the previous release
-   and exits 1. It keeps the last 3 releases and deletes the tarball.
+   through `GOOSE_DBSTRING`, never argv), switches `current`, installs the
+   release's `deploy/vps/nexus-hub.service` to
+   `/etc/systemd/system/nexus-hub.service` when it differs (root:root 0644,
+   temp file plus rename, then `systemctl daemon-reload`), restarts the unit
+   and waits up to 30 s for it to be active and for `127.0.0.1:8080` to
+   accept connections. On failure it switches back to the previous release,
+   reinstalls that release's unit when it differs, and exits 1. It keeps the
+   last 3 releases and deletes the tarball.
 
 Migrations are forward-only. A rollback restores the previous binary, not the
 previous schema, so every migration must work with the release before it.
 
+Unit changes therefore reach the VPS with the next deploy; do not edit
+`/etc/systemd/system/nexus-hub.service` by hand, the next deploy replaces it.
+
 The installed `/opt/nexus-hub/bin/deploy.sh` is not replaced by a deploy. When
-`deploy/vps/deploy.sh` changes, install the copy from the new release:
+`deploy/vps/deploy.sh` changes, install the copy from the new release (a
+`deploy.sh` older than the unit-install step never installs the unit, so do
+this once after the first release that ships it, then deploy again or run
+`systemctl daemon-reload && systemctl restart nexus-hub`):
 
 ```sh
 install -o root -g root -m 0755 /opt/nexus-hub/current/deploy/vps/deploy.sh /opt/nexus-hub/bin/deploy.sh
