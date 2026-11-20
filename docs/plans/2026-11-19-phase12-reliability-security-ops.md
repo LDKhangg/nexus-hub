@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `executing-plans` for an assigned task. The role boundaries and sequential handoff process in `AGENTS.md` override generic implementation/TDD instructions. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** DRAFT 2026-11-19. Plan only. The owner asked to record the plan and **not** start implementation. No task is dispatched until the owner says go. The owner's three decisions (§1.2) are fixed. Every Lead call in §1.3 can be changed by the owner before approval.
+**Status:** APPROVED 2026-11-20 by the owner in chat (start 12a). Drafted 2026-11-19 (6197cbd). The owner's three decisions (§1.2) are fixed. Every Lead call in §1.3 can still be changed by the owner; changes after a batch is done go into a follow-up.
 
 **Goal:** Prove that the hub survives failure and attack on the real deployment (Oracle VPS, Supabase PostgreSQL, Cloudflare tunnel). A restart, a crash, a duplicate webhook or a dead worker never loses acknowledged work and never runs a side effect twice. The owner can see queue depth, worker status, errors and LLM cost, and gets a Telegram alert when a workflow is stuck or failed. Old data is cleaned up by rule. The database can be restored from a Supabase backup by following a tested runbook. Git, the one binary the hub runs, cannot reach the network except GitHub, cannot fill the disk and runs inside an OS sandbox.
 
@@ -126,7 +126,7 @@ same-head PASS + APPROVE → completion report → owner merges
 ```
 
 - Agent backend (opencode or Claude subagents) is chosen at dispatch time, by quota, with the same role limits.
-- Nothing is dispatched until the owner approves this plan (§Status).
+- Agents for this phase: Claude subagents per role, same role limits (Opus: implementation tasks and every review; Sonnet: tests and docs). Test Plans are relayed to the owner.
 - Live check after deploy, with the owner: `/metrics` answers on the VPS loopback only; one forced stuck execution alerts once; `nh retention run --dry-run` prints counts; git sandbox active (`bwrap` present).
 
 ## 7. Phase completion gate
