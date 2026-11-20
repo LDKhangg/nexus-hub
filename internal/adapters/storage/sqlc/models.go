@@ -890,7 +890,7 @@ type WorkflowAlert struct {
 	State       string
 	// When the alert was delivered; NULL unless status is sent.
 	SentAt pgtype.Timestamptz
-	// sent, pending (send not yet delivered), failed (attempts exhausted) or suppressed (hourly cap).
+	// sent, pending (send not yet delivered), failed (attempts exhausted), suppressed (hourly cap) or obsolete (stuck or overdue condition ended before a retry; never sent).
 	Status string
 	// Send attempts made, including a timed-out one.
 	Attempts int32

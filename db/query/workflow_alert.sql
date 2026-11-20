@@ -85,10 +85,20 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(executio
 
 -- name: ListDueWorkflowAlertRetries :many
 -- Pending alerts due for a (re)try, oldest first, with what the alert
--- line shows.
+-- line shows. obsolete is true when a stuck or overdue condition no longer
+-- holds (the execution ended, its job moved on, or it no longer waits for
+-- approval); failed alerts are never obsolete.
 SELECT wa.workspace_id, wa.execution_id, wa.state, b.name AS behavior_name,
        COALESCE(wa.since_at, wa.created_at)::timestamptz AS since_at,
-       COALESCE(wa.error_code, '')::text AS error_code, wa.attempts
+       COALESCE(wa.error_code, '')::text AS error_code, wa.attempts,
+       (CASE wa.state
+            WHEN 'failed' THEN false
+            WHEN 'approval_overdue' THEN x.state <> 'WAITING_FOR_APPROVAL'
+            ELSE x.state IN ('COMPLETED','FAILED','CANCELLED') OR NOT EXISTS (
+                SELECT 1 FROM public.jobs j
+                WHERE j.workspace_id = wa.workspace_id AND j.execution_id = wa.execution_id
+                  AND j.status = CASE wa.state WHEN 'stuck_running' THEN 'processing' ELSE 'pending' END)
+        END)::boolean AS obsolete
 FROM public.workflow_alerts wa
 JOIN public.workflow_executions x ON x.workspace_id = wa.workspace_id AND x.id = wa.execution_id
 JOIN public.behavior_versions v ON v.workspace_id = x.workspace_id AND v.id = x.behavior_version_id
@@ -96,6 +106,13 @@ JOIN public.behaviors b ON b.workspace_id = v.workspace_id AND b.id = v.behavior
 WHERE wa.status = 'pending' AND wa.next_attempt_at <= sqlc.arg(due_at)::timestamptz
 ORDER BY wa.next_attempt_at, wa.created_at, wa.execution_id, wa.state
 LIMIT sqlc.arg(row_limit);
+
+-- name: MarkWorkflowAlertObsolete :execrows
+-- Closes a pending stuck or overdue alert whose condition ended, unsent.
+UPDATE public.workflow_alerts
+SET status = 'obsolete', next_attempt_at = NULL
+WHERE workspace_id = sqlc.arg(workspace_id) AND execution_id = sqlc.arg(execution_id) AND state = sqlc.arg(state)
+  AND state <> 'failed' AND status = 'pending';
 
 -- name: CountWorkflowAlertsSentSince :one
 -- Alerts delivered since a time, hub-wide (the hourly rate cap).

@@ -87,6 +87,9 @@ type WorkflowAlert struct {
 	ErrorCode string
 	// Attempts is the send attempts already made (a retry; 0 when new).
 	Attempts int
+	// Obsolete marks a due retry of a stuck or overdue alert whose
+	// condition no longer holds; it is closed without a send.
+	Obsolete bool
 }
 
 // AlertQuery bounds one candidate scan.
@@ -123,8 +126,11 @@ type WorkflowAlertStore interface {
 	// made after a.Attempts attempts, with a safe code: the alert is due
 	// again at next, or failed for good when next is zero.
 	MarkAlertAttemptFailed(ctx context.Context, a WorkflowAlert, code string, next time.Time) error
+	// MarkAlertObsolete closes a pending stuck or overdue alert whose
+	// condition ended, without sending it.
+	MarkAlertObsolete(ctx context.Context, a WorkflowAlert) error
 	// ListAlertRetries returns pending alerts due at or before due,
-	// oldest first, at most limit.
+	// oldest first, at most limit, each with its Obsolete flag.
 	ListAlertRetries(ctx context.Context, due time.Time, limit int) ([]WorkflowAlert, error)
 	// CountAlertsSentSince counts alerts delivered since since, hub-wide.
 	CountAlertsSentSince(ctx context.Context, since time.Time) (int, error)
@@ -273,6 +279,16 @@ func (w *WorkflowAlerts) Scan(ctx context.Context) {
 	for _, a := range retries {
 		if ctx.Err() != nil {
 			return
+		}
+		if a.Obsolete && a.State != AlertFailed {
+			if err := w.Store.MarkAlertObsolete(ctx, a); err != nil {
+				if ctx.Err() == nil {
+					log.Printf("workflow alerts: obsolete mark failed state=%s execution_id=%d", a.State, a.ExecutionID)
+				}
+				continue
+			}
+			log.Printf("workflow alerts: retry dropped; condition ended state=%s execution_id=%d", a.State, a.ExecutionID)
+			continue
 		}
 		// Over the cap a due retry waits for room in the window; it is
 		// not merged, since its claim was made under the cap.

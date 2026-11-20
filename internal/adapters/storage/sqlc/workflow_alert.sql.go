@@ -107,7 +107,15 @@ func (q *Queries) CountWorkflowAlertsSentSince(ctx context.Context, since pgtype
 const listDueWorkflowAlertRetries = `-- name: ListDueWorkflowAlertRetries :many
 SELECT wa.workspace_id, wa.execution_id, wa.state, b.name AS behavior_name,
        COALESCE(wa.since_at, wa.created_at)::timestamptz AS since_at,
-       COALESCE(wa.error_code, '')::text AS error_code, wa.attempts
+       COALESCE(wa.error_code, '')::text AS error_code, wa.attempts,
+       (CASE wa.state
+            WHEN 'failed' THEN false
+            WHEN 'approval_overdue' THEN x.state <> 'WAITING_FOR_APPROVAL'
+            ELSE x.state IN ('COMPLETED','FAILED','CANCELLED') OR NOT EXISTS (
+                SELECT 1 FROM public.jobs j
+                WHERE j.workspace_id = wa.workspace_id AND j.execution_id = wa.execution_id
+                  AND j.status = CASE wa.state WHEN 'stuck_running' THEN 'processing' ELSE 'pending' END)
+        END)::boolean AS obsolete
 FROM public.workflow_alerts wa
 JOIN public.workflow_executions x ON x.workspace_id = wa.workspace_id AND x.id = wa.execution_id
 JOIN public.behavior_versions v ON v.workspace_id = x.workspace_id AND v.id = x.behavior_version_id
@@ -130,10 +138,13 @@ type ListDueWorkflowAlertRetriesRow struct {
 	SinceAt      pgtype.Timestamptz
 	ErrorCode    string
 	Attempts     int32
+	Obsolete     bool
 }
 
 // Pending alerts due for a (re)try, oldest first, with what the alert
-// line shows.
+// line shows. obsolete is true when a stuck or overdue condition no longer
+// holds (the execution ended, its job moved on, or it no longer waits for
+// approval); failed alerts are never obsolete.
 func (q *Queries) ListDueWorkflowAlertRetries(ctx context.Context, arg ListDueWorkflowAlertRetriesParams) ([]ListDueWorkflowAlertRetriesRow, error) {
 	rows, err := q.db.Query(ctx, listDueWorkflowAlertRetries, arg.DueAt, arg.RowLimit)
 	if err != nil {
@@ -151,6 +162,7 @@ func (q *Queries) ListDueWorkflowAlertRetries(ctx context.Context, arg ListDueWo
 			&i.SinceAt,
 			&i.ErrorCode,
 			&i.Attempts,
+			&i.Obsolete,
 		); err != nil {
 			return nil, err
 		}
@@ -336,6 +348,28 @@ func (q *Queries) MarkWorkflowAlertAttemptFailed(ctx context.Context, arg MarkWo
 		arg.State,
 		arg.PrevAttempts,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const markWorkflowAlertObsolete = `-- name: MarkWorkflowAlertObsolete :execrows
+UPDATE public.workflow_alerts
+SET status = 'obsolete', next_attempt_at = NULL
+WHERE workspace_id = $1 AND execution_id = $2 AND state = $3
+  AND state <> 'failed' AND status = 'pending'
+`
+
+type MarkWorkflowAlertObsoleteParams struct {
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+	State       string
+}
+
+// Closes a pending stuck or overdue alert whose condition ended, unsent.
+func (q *Queries) MarkWorkflowAlertObsolete(ctx context.Context, arg MarkWorkflowAlertObsoleteParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markWorkflowAlertObsolete, arg.WorkspaceID, arg.ExecutionID, arg.State)
 	if err != nil {
 		return 0, err
 	}

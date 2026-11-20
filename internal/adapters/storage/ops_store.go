@@ -262,10 +262,21 @@ func (s *OpsStore) ListAlertRetries(ctx context.Context, due time.Time, limit in
 	for _, r := range rows {
 		out = append(out, behavior.WorkflowAlert{
 			WorkspaceID: uuidString(r.WorkspaceID), ExecutionID: r.ExecutionID, State: behavior.AlertState(r.State),
-			BehaviorName: r.BehaviorName, Since: r.SinceAt.Time, ErrorCode: r.ErrorCode, Attempts: int(r.Attempts),
+			BehaviorName: r.BehaviorName, Since: r.SinceAt.Time, ErrorCode: r.ErrorCode, Attempts: int(r.Attempts), Obsolete: r.Obsolete,
 		})
 	}
 	return out, nil
+}
+
+// MarkAlertObsolete closes a pending stuck or overdue alert whose
+// condition ended, without sending it.
+func (s *OpsStore) MarkAlertObsolete(ctx context.Context, a behavior.WorkflowAlert) error {
+	ws, err := parseDBID(a.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	_, err = s.q.MarkWorkflowAlertObsolete(ctx, sqlc.MarkWorkflowAlertObsoleteParams{WorkspaceID: ws, ExecutionID: a.ExecutionID, State: string(a.State)})
+	return err
 }
 
 // CountAlertsSentSince counts alerts delivered since since, hub-wide.

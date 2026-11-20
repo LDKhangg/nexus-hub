@@ -9,7 +9,7 @@
 -- summarised, so a restart keeps both. Ids, states, times and codes only:
 -- never message text, prompts or payloads.
 ALTER TABLE public.workflow_alerts
-    ADD COLUMN status text NOT NULL DEFAULT 'sent' CHECK (status IN ('sent','pending','failed','suppressed')),
+    ADD COLUMN status text NOT NULL DEFAULT 'sent' CHECK (status IN ('sent','pending','failed','suppressed','obsolete')),
     ADD COLUMN attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0 AND attempts <= 100),
     ADD COLUMN next_attempt_at timestamptz,
     ADD COLUMN last_error_code text CHECK (last_error_code IS NULL OR last_error_code ~ '^[a-z][a-z0-9_]{0,63}$'),
@@ -36,7 +36,7 @@ CREATE INDEX workflow_alerts_created_idx ON public.workflow_alerts (created_at);
 -- finish time.
 CREATE INDEX workflow_executions_failed_finished_idx ON public.workflow_executions (finished_at)
     WHERE state = 'FAILED';
-COMMENT ON COLUMN public.workflow_alerts.status IS 'sent, pending (send not yet delivered), failed (attempts exhausted) or suppressed (hourly cap).';
+COMMENT ON COLUMN public.workflow_alerts.status IS 'sent, pending (send not yet delivered), failed (attempts exhausted), suppressed (hourly cap) or obsolete (stuck or overdue condition ended before a retry; never sent).';
 COMMENT ON COLUMN public.workflow_alerts.sent_at IS 'When the alert was delivered; NULL unless status is sent.';
 COMMENT ON COLUMN public.workflow_alerts.attempts IS 'Send attempts made, including a timed-out one.';
 COMMENT ON COLUMN public.workflow_alerts.next_attempt_at IS 'When a pending alert is tried (again); NULL unless pending.';
