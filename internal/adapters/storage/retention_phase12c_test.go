@@ -87,6 +87,31 @@ func TestPhase12cRetentionStorageContract(t *testing.T) {
 		t.Fatal("young, live, or other-workspace execution was deleted")
 	}
 
+	// R-C-2 regression (REQ-11): one unexpected FK must not stop later eligible executions.
+	blocked := p12bExec(e, workspaceA, versionA.ID, "retention:blocked")
+	laterOne := p12bExec(e, workspaceA, versionA.ID, "retention:later-one")
+	laterTwo := p12bExec(e, workspaceA, versionA.ID, "retention:later-two")
+	for i, id := range []int64{blocked, laterOne, laterTwo} {
+		finished := now.Add(time.Duration(-120+i*5) * 24 * time.Hour)
+		mustExec(t, ctx, pool, `UPDATE jobs SET status='completed', updated_at=$2 WHERE execution_id=$1`, id, finished)
+		mustExec(t, ctx, pool, `UPDATE workflow_executions SET state='COMPLETED', finished_at=$2 WHERE id=$1`, id, finished)
+	}
+	mustExec(t, ctx, pool, `CREATE TABLE retention_execution_reference(id bigint PRIMARY KEY REFERENCES workflow_executions(id))`)
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS retention_execution_reference`) })
+	mustExec(t, ctx, pool, `INSERT INTO retention_execution_reference(id) VALUES($1)`, blocked)
+	blockedResult, err := store.SweepRetention(ctx, workspaceA, behavior.RetentionRules{WorkflowDays: 90}, now, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blockedResult.Counts["workflow_executions"] != 2 || len(blockedResult.Issues) != 1 ||
+		blockedResult.Issues[0].Table != "workflow_executions" || blockedResult.Issues[0].Code != "23503" || blockedResult.Issues[0].Count != 1 {
+		t.Fatalf("recoverable workflow FK result = %+v", blockedResult)
+	}
+	if e.count(`SELECT count(*) FROM workflow_executions WHERE id=`+itoa(blocked)) != 1 ||
+		e.count(`SELECT count(*) FROM workflow_executions WHERE id IN (`+itoa(laterOne)+`,`+itoa(laterTwo)+`)`) != 0 {
+		t.Fatal("blocked execution was removed or later executions survived")
+	}
+
 	parent := p12bExec(e, workspaceA, versionA.ID, "retention:parent")
 	finishOld(parent)
 	child := p12bExec(e, workspaceA, versionA.ID, "retention:child")
@@ -145,7 +170,8 @@ func TestPhase12cRetentionStorageContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(fkResult.Issues) != 1 || fkResult.Issues[0].Table != "notification_outbox" || fkResult.Issues[0].Code != "23503" {
+	if len(fkResult.Issues) != 1 || fkResult.Issues[0].Table != "notification_outbox" ||
+		fkResult.Issues[0].Code != "23503" || fkResult.Issues[0].Count != 1 {
 		t.Fatalf("FK issue = %+v", fkResult.Issues)
 	}
 	if fkResult.Counts["outbound_actions"] != 1 || fkResult.Counts["message_logs"] != 1 {

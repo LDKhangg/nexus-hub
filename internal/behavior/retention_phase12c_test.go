@@ -57,7 +57,7 @@ func TestPhase12cRetentionLifecycleAndObservability(t *testing.T) {
 	fixed := time.Date(2026, 11, 20, 1, 2, 3, 0, time.FixedZone("private", 3600))
 	store := &phase12cRetentionStore{called: make(chan struct{}, 4), result: RetentionResult{
 		Counts: map[string]int64{"tool_runs": 2, "message_logs": 1},
-		Issues: []RetentionIssue{{Table: "workflow_executions", Code: "23503"}},
+		Issues: []RetentionIssue{{Table: "workflow_executions", Code: "23503", Count: 3}},
 	}}
 	metrics := &phase12cRetentionMetrics{seen: map[string]int64{}}
 	var logs bytes.Buffer
@@ -88,7 +88,7 @@ func TestPhase12cRetentionLifecycleAndObservability(t *testing.T) {
 	}
 	store.mu.Unlock()
 	out := logs.String()
-	for _, want := range []string{"message_logs=1", "tool_runs=2", "workflow_executions_code=23503"} {
+	for _, want := range []string{"message_logs=1", "tool_runs=2", "workflow_executions_code=23503", "workflow_executions_issue_count=3"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log misses %q: %s", want, out)
 		}

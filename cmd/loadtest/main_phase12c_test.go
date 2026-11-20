@@ -44,6 +44,42 @@ func TestPhase12cValidateLoadtestDatabaseURL(t *testing.T) {
 	}
 }
 
+// R-C-1 regression (REQ-12, abuse): pgx overrides and alternate connection targets are refused safely.
+func TestPhase12cValidateLoadtestDatabaseURLRejectsOverrides(t *testing.T) {
+	const valid = "postgres://u:p@127.0.0.1:5432/nexus_loadtest?sslmode=disable"
+	t.Run("numeric PGPORT is allowed", func(t *testing.T) {
+		t.Setenv("PGPORT", "5432")
+		if err := validateDatabaseURL(valid); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, tc := range []struct {
+		name string
+		env  string
+		raw  string
+	}{
+		{name: "PGHOST", env: "PGHOST", raw: valid},
+		{name: "text PGPORT", env: "PGPORT", raw: valid},
+		{name: "query host", raw: "postgres://u:url-password-must-not-leak@127.0.0.1/nexus_loadtest?host=127.0.0.1"},
+		{name: "query dbname", raw: "postgres://u:url-password-must-not-leak@127.0.0.1/nexus_loadtest?dbname=nexus_loadtest"},
+		{name: "query service", raw: "postgres://u:url-password-must-not-leak@127.0.0.1/nexus_loadtest?service=local"},
+		{name: "multiple hosts", raw: "postgres://u:url-password-must-not-leak@127.0.0.1:5432,127.0.0.2:5432/nexus_loadtest"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.env != "" {
+				t.Setenv(tc.env, "not-numeric-or-safe")
+			}
+			err := validateDatabaseURL(tc.raw)
+			if err == nil {
+				t.Fatal("unsafe database configuration was accepted")
+			}
+			if strings.Contains(err.Error(), tc.raw) || strings.Contains(err.Error(), "url-password-must-not-leak") {
+				t.Fatalf("error leaked database URL or password: %v", err)
+			}
+		})
+	}
+}
+
 // TC-C-18 (REQ-12): deliveries are signed, duplicates preserve bodies, and all samples are measured.
 func TestPhase12cDeliverSignsUniqueAndDuplicateRequests(t *testing.T) {
 	const secret = "test-only-secret"

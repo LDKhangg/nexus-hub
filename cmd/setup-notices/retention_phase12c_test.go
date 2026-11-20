@@ -24,6 +24,19 @@ func TestPhase12cRetentionCLI(t *testing.T) {
 		VALUES($1,$2,'telegram_message','{"text":"TOP-SECRET-PAYLOAD"}','retention-cli','sent',now()-interval '40 days')`, workspace, integration); err != nil {
 		t.Fatal(err)
 	}
+	thread := uuid.MustParse("019a6690-abcd-7000-8000-0000000000c3").String()
+	if _, err := pool.Exec(ctx, `INSERT INTO hub_threads(id,workspace_id,integration_id,thread_type,external_id) VALUES($1,$2,$3,'task','retention-cli')`, thread, workspace, integration); err != nil {
+		t.Fatal(err)
+	}
+	var messageID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO message_logs(thread_id,sender_role,content,created_at)
+		VALUES($1,'system','TOP-SECRET-PAYLOAD',now()-interval '40 days') RETURNING id`, thread).Scan(&messageID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO notification_outbox(workspace_id,source_integration_id,target_integration_id,event_key,event,message_id,status,updated_at)
+		VALUES($1,$2,$2,'retention-cli','{}',$3,'sent',now()-interval '40 days')`, workspace, integration, messageID); err != nil {
+		t.Fatal(err)
+	}
 	run := func(args ...string) (string, error) {
 		t.Helper()
 		var out bytes.Buffer
@@ -38,11 +51,23 @@ func TestPhase12cRetentionCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(show, "enabled=true") || !strings.Contains(show, "outbound_days=30") || !strings.Contains(show, "outbound_actions=1") {
+	if !strings.Contains(show, "enabled=true") || !strings.Contains(show, "outbound_days=30") ||
+		!strings.Contains(show, "candidates now (dry-run gives exact counts)") || !strings.Contains(show, "outbound_actions=1") {
 		t.Fatalf("show output: %s", show)
 	}
-	if !strings.Contains(dry, "outbound_actions=1") || strings.Contains(dry, "enabled=") {
+	if !strings.Contains(dry, "message_logs=1") || !strings.Contains(dry, "notification_outbox=1") ||
+		!strings.Contains(dry, "outbound_actions=1") || strings.Contains(dry, "enabled=") {
 		t.Fatalf("dry-run output: %s", dry)
+	}
+	var messages, outbox int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM message_logs WHERE id=$1`, messageID).Scan(&messages); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox WHERE message_id=$1`, messageID).Scan(&outbox); err != nil {
+		t.Fatal(err)
+	}
+	if messages != 1 || outbox != 1 {
+		t.Fatalf("dry-run deleted rows: message_logs=%d notification_outbox=%d", messages, outbox)
 	}
 	for _, out := range []string{show, dry} {
 		if strings.Contains(out, "TOP-SECRET") || strings.Contains(out, workspace) || strings.Contains(out, integration) {
@@ -50,7 +75,7 @@ func TestPhase12cRetentionCLI(t *testing.T) {
 		}
 	}
 	deleted, err := run("run", "--workspace-id", workspace)
-	if err != nil || !strings.Contains(deleted, "outbound_actions=1") {
+	if err != nil || deleted != dry {
 		t.Fatalf("run output=%s err=%v", deleted, err)
 	}
 	after, err := run("run", "--workspace-id", workspace, "--dry-run")
