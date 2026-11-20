@@ -118,9 +118,15 @@ turns deploys off (CI still runs).
    `/etc/systemd/system/nexus-hub.service` when it differs (root:root 0644,
    temp file plus rename, then `systemctl daemon-reload`), restarts the unit
    and waits up to 30 s for it to be active and for `127.0.0.1:8080` to
-   accept connections. On failure it switches back to the previous release,
-   reinstalls that release's unit when it differs, and exits 1. It keeps the
-   last 3 releases and deletes the tarball.
+   accept connections. Before it replaces the unit it keeps the installed one
+   as `/etc/systemd/system/nexus-hub.service.prev` (systemd ignores that
+   name). A failed restart does not stop the script: the health check then
+   fails. On failure (unit install, `daemon-reload`, restart or health check)
+   it switches back to the previous release and reinstalls that release's
+   unit when it differs; when that release ships no unit file, or its unit
+   cannot be installed, it puts the `.prev` copy back and reloads systemd.
+   Then it restarts the unit and exits 1. It keeps the last 3 releases and
+   deletes the tarball.
 
 Migrations are forward-only. A rollback restores the previous binary, not the
 previous schema, so every migration must work with the release before it.
