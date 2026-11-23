@@ -36,11 +36,12 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 LockPersonality=true
 CapabilityBoundingSet=
 # Unprivileged bwrap needs mount operations and user/mount/process/network
-# namespaces; it still receives no capabilities from the service.
+# namespaces; AF_NETLINK lets it set up loopback in the new network namespace.
+# It still receives no capabilities from the service.
 SystemCallFilter=@system-service @mount
 RestrictNamespaces=user mnt pid net ipc uts cgroup
 
