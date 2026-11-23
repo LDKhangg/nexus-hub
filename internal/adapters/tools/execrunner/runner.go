@@ -289,12 +289,14 @@ func (r *Runner) Run(ctx context.Context, c Command) (Result, error) {
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_TERMINAL_PROMPT=0",
-		"GIT_ALLOW_PROTOCOL=https",
 		"NO_COLOR=1",
 	}
-	if r.proxy != nil && c.Network && isNetworkCommand(c.Args) {
-		proxyURL := "http://" + r.proxy.Addr()
-		fixedEnv = append(fixedEnv, "https_proxy="+proxyURL, "HTTPS_PROXY="+proxyURL)
+	if r.bwrapPath != "" {
+		fixedEnv = append(fixedEnv, "GIT_ALLOW_PROTOCOL=https")
+		if r.proxy != nil && c.Network && isNetworkCommand(c.Args) {
+			proxyURL := "http://" + r.proxy.Addr()
+			fixedEnv = append(fixedEnv, "https_proxy="+proxyURL, "HTTPS_PROXY="+proxyURL)
+		}
 	}
 	cmd.Env = append(fixedEnv, c.Env...)
 	if c.Stdin != nil {
