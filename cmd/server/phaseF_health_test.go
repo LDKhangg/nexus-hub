@@ -54,10 +54,22 @@ func TestPhaseFDatabaseUnavailableFailsStartupWithoutCredentialLeak(t *testing.T
 	if strings.Contains(logs.String(), "phase-f-private-password") || strings.Contains(logs.String(), cfg.ConnString()) {
 		t.Fatalf("database credential leaked: %s", logs.String())
 	}
-	for _, required := range []string{`"component":"startup"`, `"check":"db"`, `"error_code":"database_unavailable"`} {
-		if !strings.Contains(logs.String(), required) {
-			t.Errorf("safe startup field %s absent: %s", required, logs.String())
+	var failures []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("startup log is not JSON: %q: %v", line, err)
 		}
+		if record["msg"] == "startup dependency unavailable" {
+			failures = append(failures, record)
+		}
+	}
+	if len(failures) != 1 {
+		t.Fatalf("startup dependency records=%d logs=%s", len(failures), logs.String())
+	}
+	got := failures[0]
+	if got["component"] != "startup" || got["check"] != "db" || got["error_code"] != "database_unavailable" {
+		t.Fatalf("unsafe startup failure shape: %#v", got)
 	}
 }
 
@@ -76,7 +88,7 @@ func TestPhaseFOpsReadinessRoute(t *testing.T) {
 		GitSandboxReady:  false,
 		Now:              func() time.Time { return now },
 	})
-	server := listenMetrics("127.0.0.1:0", metrics.New(metrics.Options{}), readiness.Handler())
+	server := listenMetrics(freeLoopbackAddr(t), metrics.New(metrics.Options{}), readiness.Handler())
 	if server == nil {
 		t.Fatal("loopback ops listener disabled")
 	}

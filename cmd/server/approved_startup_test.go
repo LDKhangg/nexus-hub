@@ -163,6 +163,7 @@ func TestApproved_RealServerTwoEnvStartupAndMissingKeyWarning(t *testing.T) {
 			// TC-F-3/15 (REQ-1, REQ-5): real startup, request, summary and
 			// shutdown records all use one JSON envelope.
 			summary := false
+			started := 0
 			for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
 				var record map[string]any
 				if err := json.Unmarshal([]byte(line), &record); err != nil {
@@ -172,9 +173,18 @@ func TestApproved_RealServerTwoEnvStartupAndMissingKeyWarning(t *testing.T) {
 				if record["msg"] == "readiness summary" {
 					summary = true
 				}
+				if record["msg"] == "http server started" {
+					started++
+					if record["component"] != "http" || record["addr"] != addr {
+						t.Errorf("HTTP start record shape: %#v", record)
+					}
+				}
 			}
 			if !summary {
 				t.Error("startup readiness summary absent")
+			}
+			if started != 1 {
+				t.Errorf("HTTP start records=%d output=%s", started, output.String())
 			}
 		})
 	}
