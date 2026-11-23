@@ -75,6 +75,7 @@ jobs:
             if [ "$status" -eq 1 ]; then
               count=$(jq 'length' "$tmp/report.json")
               echo "::error::gitleaks detected $count potential secret(s); details withheld"
+              jq -r '.[] | "\(.RuleID) \(.File):\(.StartLine) \(.Commit[0:12])"' "$tmp/report.json"
             else
               echo "::error::gitleaks failed with status $status"
             fi
