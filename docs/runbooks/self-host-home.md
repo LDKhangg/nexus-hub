@@ -1927,6 +1927,182 @@ no failed or stuck executions, no HTTP failures, and client `p95_ms` below
 500 ms. Stop the container after reading the report; its database is
 disposable even if cleanup was interrupted.
 
+## Recovery (Phase 12)
+
+### Restore the database
+
+Supabase Free has no daily backups. The scheduled backup and restore drill are
+still open as test debt D12-1/D12-2 in
+`docs/product/test-debt/phase12-backup-restore.md`. This procedure is **not yet
+drilled — test debt D12-1/D12-2**. Until that debt closes, take a manual dump
+before a risky change and copy it to encrypted offline storage.
+
+On the VPS, let systemd read `/etc/nexus-hub/env`; never source, echo or pass
+its `DATABASE_URL` on the command line:
+
+```sh
+systemd-run --pty --wait --collect -p User=nexus -p EnvironmentFile=/etc/nexus-hub/env \
+  /bin/sh -c 'umask 077; export PGDATABASE="$DATABASE_URL"; exec pg_dump --format=custom --file=/var/lib/nexus-hub/nexus-hub.dump'
+```
+
+Copy `/var/lib/nexus-hub/nexus-hub.dump` through a trusted encrypted channel,
+then remove the VPS copy. Restore on an administrator workstation into a
+disposable PostgreSQL 17 database, not over production:
+
+```sh
+read -rs -p 'Scratch DB password: ' POSTGRES_PASSWORD; export POSTGRES_PASSWORD
+docker run -d --name nexus-restore-pg -p 127.0.0.1:55432:5432 \
+  -e POSTGRES_PASSWORD -e POSTGRES_DB=nexus_restore postgres:17-alpine
+until docker exec nexus-restore-pg pg_isready -U postgres -d nexus_restore; do sleep 1; done
+PGPASSWORD="$POSTGRES_PASSWORD" pg_restore --host=127.0.0.1 --port=55432 \
+  --username=postgres --dbname=nexus_restore --clean --if-exists \
+  --no-owner --no-privileges /path/to/nexus-hub.dump
+SCRATCH_DATABASE_URL="host=127.0.0.1 port=55432 user=postgres password=$POSTGRES_PASSWORD dbname=nexus_restore sslmode=disable"
+GOOSE_DRIVER=postgres GOOSE_DBSTRING="$SCRATCH_DATABASE_URL" \
+  goose -dir db/migrations status
+```
+
+Every migration must report applied before starting the hub. Use an offline
+copy of the matching production master key; a new key cannot decrypt restored
+credentials. From the matching release or checkout, run:
+
+```sh
+DATABASE_URL="$SCRATCH_DATABASE_URL" \
+  NEXUS_MASTER_KEY_FILE=/path/to/offline/nexus-hub-master.key nexus-server &
+SCRATCH_HUB_PID=$!
+DATABASE_URL="$SCRATCH_DATABASE_URL" \
+  NEXUS_MASTER_KEY_FILE=/path/to/offline/nexus-hub-master.key nh status
+kill "$SCRATCH_HUB_PID"
+docker rm -f nexus-restore-pg
+unset POSTGRES_PASSWORD SCRATCH_DATABASE_URL SCRATCH_HUB_PID
+```
+
+Confirm expected execution, queue and worker counts. Use `nh workflow list
+--workspace-id $WS` for workspace-level confirmation. Do not run retention or
+point the public tunnel at the scratch hub.
+
+### Back up and rotate the master key
+
+Production reads `NEXUS_MASTER_KEY_FILE=/etc/nexus-hub/master.key` from
+`/etc/nexus-hub/env`. The file is owned by `nexus:nexus`, mode `0400`. Copy it
+to an encrypted removable volume, verify its mode, unmount the volume and keep
+it separately from database backups:
+
+```sh
+install -o root -g root -m 0600 /etc/nexus-hub/master.key \
+  /media/<offline-volume>/nexus-hub-master.key
+stat -c '%U:%G %a %n' /media/<offline-volume>/nexus-hub-master.key
+```
+
+Without this key, encrypted Telegram, ClickUp, GitHub and provider credentials
+in the database are unrecoverable. Nexus-Hub has no master-key rotate or rekey
+command. **Rotation: manual re-entry of secrets.** During a maintenance window,
+record credential names with `nh secret list --workspace-id $WS`, stop the
+hub, preserve the old key offline, create and install a new key, then re-enter
+every credential with `nh secret set` from stdin before restarting. Keep the
+old key until a database restore and all integrations have been verified.
+
+### Recover a stuck execution
+
+Telegram alerts say `stuck running`, `stuck queued`, `approval overdue` or
+`failed`, with execution ID, age and safe error code. Start with hub totals,
+then inspect the ordered execution history:
+
+```sh
+nh status --workspace-id $WS
+nh execution timeline <WF-n|id> --workspace-id $WS
+```
+
+For an active or waiting execution that must stop, cancel it. Cancel does not
+undo a request already sent. Retry accepts only `FAILED` and creates one linked
+child; it refuses an uncertain or unsafe side effect. A recorded decision that
+did not wake a waiting execution can be resumed:
+
+```sh
+nh workflow cancel --workspace-id $WS <WF-n|id>
+nh workflow retry  --workspace-id $WS <WF-n|id>
+nh workflow resume --workspace-id $WS <WF-n|id>
+```
+
+Do not retry `side_effect_uncertain`; check ClickUp, GitHub or Telegram by hand.
+A running job with an expired lease normally recovers through the reconciler
+after `systemctl restart nexus-hub` without an operator retry.
+
+### Re-register webhooks after a URL change
+
+Update the URL first, then restart so the server and commands use it:
+
+```sh
+nh settings set public_base_url 'https://<new-host>'
+systemctl restart nexus-hub
+nh telegram webhook set    --workspace-id $WS --integration-id $TG
+nh telegram webhook status --workspace-id $WS --integration-id $TG
+```
+
+Update the ClickUp webhook endpoint to
+`https://<new-host>/webhook/clickup/$SRC` in ClickUp. If replacement creates a
+new webhook ID, bind it without putting its signing secret on the command line:
+
+```sh
+nh secret set --workspace-id $WS --name clickup-webhook --kind clickup_webhook
+nh bind-webhook --source-id $SRC --webhook-id '<new-webhook-id>'
+```
+
+Nexus-Hub does not currently receive GitHub webhooks, and no `nh` GitHub
+webhook registration command exists. GitHub credentials and repository grants
+therefore need no URL update.
+
+### Read metrics and alerts
+
+`metrics_addr` defaults to `127.0.0.1:9090` and accepts only loopback. Check the
+configured value with `nh settings get metrics_addr`. On the VPS, read the
+default listener with:
+
+```sh
+curl -s 127.0.0.1:9090/metrics
+```
+
+Use the configured loopback address instead if it differs. Main series:
+
+- `nexushub_executions{state=...}` and `nexushub_queue_pending_jobs` show work
+  by state and queue depth. `nexushub_queue_oldest_due_age_seconds` shows the
+  oldest due wait.
+- `nexushub_worker_devices_online` and
+  `nexushub_worker_newest_heartbeat_age_seconds` show worker availability;
+  heartbeat age `-1` means no heartbeat exists.
+- `nexushub_errors_total{kind,code}` counts safe error classes, while
+  `nexushub_webhook_duration_seconds` is webhook latency.
+- `nexushub_llm_tokens_today` and `nexushub_llm_cost_usd_today` show current
+  UTC-day usage. `nexushub_ops_scrape_error 1` means the database snapshot
+  failed for that scrape.
+- `nexushub_alerts_sent_total`, `nexushub_alerts_suppressed_total` and
+  `nexushub_alerts_failed_total` show sent, rate-merged and exhausted alerts.
+  `nexushub_retention_deleted_total` counts rows removed by retention.
+
+An alert means: `stuck running` has not progressed past the configured running
+threshold; `stuck queued` is overdue in the queue; `approval overdue` passed
+its approval expiry plus grace; `failed` ended unsuccessfully. A merged-alert
+text means the 20-per-hour cap suppressed individual messages. Use `nh status`
+and the execution timeline to identify the current condition before acting.
+
+### Recover the git sandbox
+
+`sandbox_unavailable` fails closed: git did not run. On Oracle Linux 9, install
+or repair bubblewrap, confirm user namespaces are enabled, then restart:
+
+```sh
+dnf install bubblewrap
+sysctl user.max_user_namespaces
+nh settings get bwrap_path
+systemctl restart nexus-hub
+journalctl -u nexus-hub -n 100 --no-pager
+```
+
+`user.max_user_namespaces` must be greater than zero, `bwrap_path` must name the
+validated binary, and the journal must say `git sandbox: ready`. If the error
+remains, check systemd namespace restrictions and the loopback egress proxy;
+never disable `git_sandbox` on production as a workaround.
+
 ## Upkeep
 
 - Updates: `git pull`, rebuild both binaries, run `goose … up`, then
