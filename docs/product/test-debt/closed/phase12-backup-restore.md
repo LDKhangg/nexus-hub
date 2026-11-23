@@ -33,3 +33,10 @@ key. Record the date and result in a Test Report.
 
 - D12-1: open
 - D12-2: open (the rest of REQ-16 is still in Phase 12 scope)
+
+## Closed: waived by the owner
+
+2026-11-23: the owner closed stage 1 (GĐ1), dropped Phase 13 and waived this
+debt ("bỏ nợ test đi"). D12-1 and D12-2 are not proven; they are closed as
+waived, not as passed. The PCC IDs they cover (NFR-006, NFR-040 restore part)
+stay unverified in `TRACEABILITY.md`.

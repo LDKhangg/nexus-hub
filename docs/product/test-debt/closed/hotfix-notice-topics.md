@@ -10,3 +10,10 @@ Status: OPEN.
   - TD-NT-2 (REQ-3, REQ-4): a free-text reply to a task notice reaches the assistant with only the task ID as trusted context; messages in `telegram_command_topic` are handled exactly as in General and replies stay in that topic.
   - TD-NT-3 (REQ-5): `nh telegram topics prune` deletes only `workflow` topics of terminal executions, never task, fixed or active ones, prints counts only, is safe to run again, and removes the row of a topic already gone in Telegram; plus a Reviewer check of the hotfix.
 - Pay first in the next Phase Brief (Phase 10 Batch A).
+
+## Closed: waived by the owner
+
+2026-11-23: the owner closed stage 1 (GĐ1) and waived all open test debt
+("skip luôn"). The open items in this file are not proven; they are closed as
+waived, not as passed, and the PCC IDs they cover stay unverified in
+`TRACEABILITY.md`.

@@ -9,3 +9,10 @@ Status: PARTLY CLOSED 2026-11-18 — TD-7A-2..4 paid in Phase 7b Batch A (tests 
   - TD-7A-3: no local-task-specific test that topic text during a running job becomes an instruction (heartbeat/ack part is covered by TestB3Store_FollowupsOverHeartbeat).
   - TD-7A-4: telemetry threshold texts with real worker telemetry, and Sender 401 during flush, are not covered.
 - Pay first in the Phase 7b Phase Brief.
+
+## Closed: waived by the owner
+
+2026-11-23: the owner closed stage 1 (GĐ1) and waived all open test debt
+("skip luôn"). The open items in this file are not proven; they are closed as
+waived, not as passed, and the PCC IDs they cover stay unverified in
+`TRACEABILITY.md`.

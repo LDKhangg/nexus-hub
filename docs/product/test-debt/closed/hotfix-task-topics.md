@@ -12,3 +12,10 @@ Status: CLOSED 2026-11-18 (Phase 7b Batch A: tests 43be7fa, CI 44042781670 green
   - TD-TT-6: migration 00027 Up/Down.
   - TD-TT-7: topic root-reply — plain text in a forum topic arrives with `reply_to_message` == the topic root and must route as plain text, not as a reply; fixed in `9b761d5`, no regression test.
 - Pay first in the next Phase Brief.
+
+## Closed: waived by the owner
+
+2026-11-23: the owner closed stage 1 (GĐ1) and waived all open test debt
+("skip luôn"). The open items in this file are not proven; they are closed as
+waived, not as passed, and the PCC IDs they cover stay unverified in
+`TRACEABILITY.md`.

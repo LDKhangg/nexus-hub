@@ -38,3 +38,10 @@ Phase 2 debt (TD-1..TD-6) and Phase 3 debt (TD3-1..TD3-4) stay open as well.
 `pr-auto-approve` runs with `dry_run: true` until the owner checks the first
 reports and asks to go live. The approval itself has no confirmation step by
 the owner's decision (D1, D2, D4).
+
+## Closed: waived by the owner
+
+2026-11-23: the owner closed stage 1 (GĐ1) and waived all open test debt
+("skip luôn"). The open items in this file are not proven; they are closed as
+waived, not as passed, and the PCC IDs they cover stay unverified in
+`TRACEABILITY.md`.

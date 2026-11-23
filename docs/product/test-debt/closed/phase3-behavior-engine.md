@@ -29,3 +29,10 @@ Phase 2 debt (TD-1..TD-6) stays open as well.
 
 Behaviors run with `dry_run: true`, so nothing is written to ClickUp unless
 the owner presses "Đăng" or confirms an action.
+
+## Closed: waived by the owner
+
+2026-11-23: the owner closed stage 1 (GĐ1) and waived all open test debt
+("skip luôn"). The open items in this file are not proven; they are closed as
+waived, not as passed, and the PCC IDs they cover stay unverified in
+`TRACEABILITY.md`.

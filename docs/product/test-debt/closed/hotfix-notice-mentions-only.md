@@ -12,3 +12,10 @@ Status: CLOSED 2026-11-17 — TD-NM-1..3 paid in Phase 7a Batch A (see `docs/pro
   - TD-NM-2: `tagsGroup` against a real ClickUp group mention payload (the part type ClickUp uses is unconfirmed; the text regex is the fallback) and no false positive on e-mail addresses (`a@all.com`).
   - TD-NM-3: no Reviewer check.
 - Pay first in the next Phase Brief.
+
+## Closed: waived by the owner
+
+2026-11-23: the owner closed stage 1 (GĐ1) and waived all open test debt
+("skip luôn"). The open items in this file are not proven; they are closed as
+waived, not as passed, and the PCC IDs they cover stay unverified in
+`TRACEABILITY.md`.
