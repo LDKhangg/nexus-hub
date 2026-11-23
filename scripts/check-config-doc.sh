@@ -19,3 +19,25 @@ if [ "$(sort "$tmp/docs" | uniq -d | wc -l)" -ne 0 ]; then
   echo "docs/configuration.md contains duplicate setting keys" >&2
   exit 1
 fi
+
+: > "$tmp/env-source-raw"
+for dir in "$root/cmd" "$root/internal"; do
+  if [ -d "$dir" ]; then
+    find "$dir" -type f -name '*.go' ! -name '*_test.go' -exec \
+      grep -hEo 'os\.(Getenv|LookupEnv)\("[^"]+"' {} + >> "$tmp/env-source-raw"
+  fi
+done
+sed 's/^os\.[^(]*("//; s/"$//' "$tmp/env-source-raw" | sort -u > "$tmp/env-source"
+sed -n '/^## Process environment$/,/^## Runtime settings$/s/^| `\([^`]*\)` |.*/\1/p' \
+  "$root/docs/configuration.md" > "$tmp/env-docs-raw"
+sort "$tmp/env-docs-raw" > "$tmp/env-docs"
+
+if ! diff -u "$tmp/env-source" "$tmp/env-docs"; then
+  echo "configuration environment variables do not match non-test Go sources" >&2
+  exit 1
+fi
+
+if [ "$(sort "$tmp/env-docs-raw" | uniq -d | wc -l)" -ne 0 ]; then
+  echo "docs/configuration.md contains duplicate environment variables" >&2
+  exit 1
+fi
