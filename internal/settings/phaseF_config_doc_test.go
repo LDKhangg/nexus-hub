@@ -55,6 +55,35 @@ func TestConfigurationDocCheckerRejectsDriftAndDuplicates(t *testing.T) {
 	}
 }
 
+// TC-Fb-17 (REQ-6).
+func TestConfigurationDocCheckerRecognizesRawStringEnvironmentNames(t *testing.T) {
+	runConfigDocProbeRegression(t, "NEXUS_RAW_PROBE", "package config\n\nimport \"os\"\n\nfunc readRawProbe() {\n\t_ = os.Getenv(`NEXUS_RAW_PROBE`)\n}\n")
+}
+
+// TC-Fb-18 (REQ-6).
+func TestConfigurationDocCheckerRecognizesSyscallEnvironmentNames(t *testing.T) {
+	runConfigDocProbeRegression(t, "NEXUS_SYSCALL_PROBE", "package config\n\nimport \"syscall\"\n\nfunc readSyscallProbe() {\n\t_, _ = syscall.Getenv(\"NEXUS_SYSCALL_PROBE\")\n}\n")
+}
+
+func runConfigDocProbeRegression(t *testing.T, environmentName, probeSource string) {
+	t.Helper()
+	root := settingsRepoRoot(t)
+	settingsSource := mustReadFile(t, filepath.Join(root, "internal/settings/settings.go"))
+	document := mustReadFile(t, filepath.Join(root, "docs/configuration.md"))
+	script := mustReadFile(t, filepath.Join(root, "scripts/check-config-doc.sh"))
+	temp := t.TempDir()
+	writeTestFile(t, filepath.Join(temp, "internal/settings/settings.go"), settingsSource, 0o600)
+	writeTestFile(t, filepath.Join(temp, "internal/config/config.go"), configDocEnvironmentSource(t, document), 0o600)
+	writeTestFile(t, filepath.Join(temp, "internal/config/probe.go"), probeSource, 0o600)
+	writeTestFile(t, filepath.Join(temp, "docs/configuration.md"), document, 0o600)
+	writeTestFile(t, filepath.Join(temp, "scripts/check-config-doc.sh"), script, 0o700)
+	runConfigDocCheck(t, temp, false)
+
+	documented := strings.Replace(document, "## Runtime settings", "| `"+environmentName+"` | No | Regression probe. | empty |\n\n## Runtime settings", 1)
+	writeTestFile(t, filepath.Join(temp, "docs/configuration.md"), documented, 0o600)
+	runConfigDocCheck(t, temp, true)
+}
+
 func configDocEnvironmentSource(t *testing.T, document string) string {
 	t.Helper()
 	rows := parseMarkdownTable(t, document, "## Process environment", "## Runtime settings", 4)
