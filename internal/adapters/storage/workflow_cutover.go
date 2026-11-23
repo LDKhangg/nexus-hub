@@ -498,13 +498,25 @@ func (s *WorkflowStore) importBehaviorRun(ctx context.Context, tx pgx.Tx, q *sql
 // cutover runs) nothing is started. A run whose pinned version cannot be
 // normalized ends failed with workflow_reference_invalid.
 func (s *WorkflowStore) StartPendingBehaviorRuns(ctx context.Context, workspaceID string, now time.Time, limit int) (int, error) {
+	return s.startPendingBehaviorRuns(ctx, workspaceID, now, limit, false)
+}
+
+// StartPendingUrgentBehaviorRuns is StartPendingBehaviorRuns restricted to
+// runs of the owner's Telegram commands. The starter uses it while the
+// queue is over queue_max_pending (Phase 12 REQ-7): owner commands are
+// never deferred, every other run stays pending until the queue drains.
+func (s *WorkflowStore) StartPendingUrgentBehaviorRuns(ctx context.Context, workspaceID string, now time.Time, limit int) (int, error) {
+	return s.startPendingBehaviorRuns(ctx, workspaceID, now, limit, true)
+}
+
+func (s *WorkflowStore) startPendingBehaviorRuns(ctx context.Context, workspaceID string, now time.Time, limit int, urgentOnly bool) (int, error) {
 	ws, err := parseDBID(workspaceID)
 	if err != nil || now.IsZero() || limit < 1 {
 		return 0, workflowInvalid("start behavior runs")
 	}
 	started := 0
 	for started < limit {
-		ok, err := s.startOneBehaviorRun(ctx, ws, now)
+		ok, err := s.startOneBehaviorRun(ctx, ws, now, urgentOnly)
 		if err != nil || !ok {
 			return started, err
 		}
@@ -513,13 +525,13 @@ func (s *WorkflowStore) StartPendingBehaviorRuns(ctx context.Context, workspaceI
 	return started, nil
 }
 
-func (s *WorkflowStore) startOneBehaviorRun(ctx context.Context, ws pgtype.UUID, now time.Time) (bool, error) {
+func (s *WorkflowStore) startOneBehaviorRun(ctx context.Context, ws pgtype.UUID, now time.Time, urgentOnly bool) (bool, error) {
 	for {
 		tx, err := s.pool.Begin(ctx)
 		if err != nil {
 			return false, err
 		}
-		started, retry, err := s.startBehaviorRunTx(ctx, tx, ws, now)
+		started, retry, err := s.startBehaviorRunTx(ctx, tx, ws, now, urgentOnly)
 		if err != nil {
 			_ = tx.Rollback(ctx)
 			return false, err
@@ -535,13 +547,13 @@ func (s *WorkflowStore) startOneBehaviorRun(ctx context.Context, ws pgtype.UUID,
 
 // startBehaviorRunTx starts the oldest startable run. retry reports that
 // an unstartable run was failed and the next one may be tried.
-func (s *WorkflowStore) startBehaviorRunTx(ctx context.Context, tx pgx.Tx, ws pgtype.UUID, now time.Time) (started, retry bool, err error) {
+func (s *WorkflowStore) startBehaviorRunTx(ctx context.Context, tx pgx.Tx, ws pgtype.UUID, now time.Time, urgentOnly bool) (started, retry bool, err error) {
 	q := sqlc.New(tx)
 	allowed, err := workflowStartAllowed(ctx, q, ws)
 	if err != nil || !allowed {
 		return false, false, err
 	}
-	row, err := q.SelectStartableBehaviorRun(ctx, sqlc.SelectStartableBehaviorRunParams{WorkspaceID: ws, AtTime: ts(now)})
+	row, err := q.SelectStartableBehaviorRun(ctx, sqlc.SelectStartableBehaviorRunParams{WorkspaceID: ws, AtTime: ts(now), UrgentOnly: urgentOnly})
 	if isNoRows(err) {
 		return false, false, nil
 	}

@@ -173,6 +173,9 @@ func (w *InboxWorker) retryCommand(ctx context.Context, u InboundUpdate, args st
 	if errors.Is(err, ErrWorkerExecutionEnded) {
 		return workflow.FormatRef(id) + ": " + msgWorkerExecutionEnded, nil
 	}
+	if errors.Is(err, ErrWorkerRetryLimit) {
+		return workflow.FormatRef(id) + ": " + msgWorkerRetryLimit, nil
+	}
 	if errors.Is(err, ErrConflict) {
 		return "", ErrDecided
 	}

@@ -162,6 +162,28 @@ SET state = CASE WHEN state = 'CANCELLING' THEN 'CANCELLED' ELSE 'INTERRUPTED' E
 WHERE state IN ('LEASED', 'RUNNING', 'CANCELLING') AND lease_expires_at < sqlc.arg(now)::timestamptz
 RETURNING *;
 
+-- name: FailStaleInterruptedWorkerJobs :many
+-- An interrupted job whose device did not resume it within the resume
+-- window ends FAILED with the fixed reason lease_expired (Phase 12 REQ-5):
+-- it never stays interrupted forever. The owner may still retry it within
+-- the retry limit. Bounded per pass.
+-- The picked set is a MATERIALIZED CTE so the LIMIT is applied once: an
+-- IN (SELECT ... LIMIT ... SKIP LOCKED) subquery may be re-evaluated and
+-- fail more rows than max_rows.
+WITH picked AS MATERIALIZED (
+    SELECT s.id FROM public.worker_jobs s
+    WHERE s.state = 'INTERRUPTED' AND s.interrupted_at < sqlc.arg(cutoff)::timestamptz
+    ORDER BY s.interrupted_at, s.id
+    LIMIT sqlc.arg(max_rows)::int
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE public.worker_jobs j
+SET state = 'FAILED', result = jsonb_build_object('status', 'failed', 'reason_code', 'lease_expired'),
+    interrupted_at = NULL, finished_at = sqlc.arg(now)::timestamptz, updated_at = sqlc.arg(now)::timestamptz
+FROM picked
+WHERE j.id = picked.id AND j.state = 'INTERRUPTED'
+RETURNING j.*;
+
 -- name: RefreshWorkerDeviceState :exec
 UPDATE public.worker_devices d
 SET state = CASE

@@ -101,6 +101,19 @@ func (q *Queries) CopyRetryExecutionSteps(ctx context.Context, arg CopyRetryExec
 	return err
 }
 
+const countPendingWorkflowJobs = `-- name: CountPendingWorkflowJobs :one
+SELECT count(*)::bigint FROM public.jobs WHERE status = 'pending'
+`
+
+// Queued work hub-wide: jobs waiting for a claim (Phase 12 REQ-7
+// backpressure). Served by jobs_due_idx.
+func (q *Queries) CountPendingWorkflowJobs(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countPendingWorkflowJobs)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const countUnfinishedExecutionSteps = `-- name: CountUnfinishedExecutionSteps :one
 SELECT COUNT(*) FROM public.execution_steps
 WHERE workspace_id = $1 AND execution_id = $2
@@ -136,6 +149,35 @@ func (q *Queries) CountUnsafeRetrySteps(ctx context.Context, arg CountUnsafeRetr
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const expireWorkflowJobLease = `-- name: ExpireWorkflowJobLease :execrows
+UPDATE public.jobs
+SET lease_expires_at = $1::timestamptz, updated_at = $1::timestamptz
+WHERE id = $2 AND workspace_id = $3 AND status = 'processing'
+  AND claim_token = $4 AND lease_expires_at > $1::timestamptz
+`
+
+type ExpireWorkflowJobLeaseParams struct {
+	AtTime      pgtype.Timestamptz
+	ID          int64
+	WorkspaceID pgtype.UUID
+	ClaimToken  pgtype.UUID
+}
+
+// Graceful shutdown: the claim holder ends its own live lease now, so the
+// next reconciliation resumes the job at once instead of after the lease.
+func (q *Queries) ExpireWorkflowJobLease(ctx context.Context, arg ExpireWorkflowJobLeaseParams) (int64, error) {
+	result, err := q.db.Exec(ctx, expireWorkflowJobLease,
+		arg.AtTime,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.ClaimToken,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const findReadyExecutionStep = `-- name: FindReadyExecutionStep :one
@@ -1276,15 +1318,43 @@ WHERE j.status = 'pending' AND j.due_at <= $1::timestamptz
   AND (j.attempts < j.max_attempts OR j.continues_attempt)
   AND e.state NOT IN ('WAITING_FOR_USER','WAITING_FOR_APPROVAL','WAITING_FOR_WORKER','COMPLETED','FAILED','CANCELLED')
   AND (e.deadline_at IS NULL OR e.deadline_at > $1::timestamptz)
-ORDER BY CASE WHEN j.status = 'processing' THEN 0 ELSE 1 END, j.due_at, j.id
+  -- Per-workspace concurrency cap (Phase 12 REQ-7): a job is claimable only
+  -- while its workspace holds fewer live claims than max_concurrent. A cap
+  -- of 0 or less is off. A resume job (an owner decision being applied) and
+  -- the owner's own executions (local_task, orchestrated_task) are urgent
+  -- and never held back. The cap is soft: concurrent claimers may overshoot
+  -- it by at most the number of claimers.
+  AND ($2::int <= 0 OR j.continues_attempt
+       OR e.source_kind IN ('local_task', 'orchestrated_task')
+       OR (SELECT count(*) FROM public.jobs r
+           WHERE r.workspace_id = j.workspace_id AND r.status = 'processing'
+             AND r.lease_expires_at > $1::timestamptz) < $2::int)
+ORDER BY CASE WHEN j.status = 'processing' THEN 0 ELSE 1 END,
+         CASE WHEN j.continues_attempt
+                   OR e.source_kind IN ('local_task', 'orchestrated_task')
+                   OR (e.legacy_run_id IS NOT NULL AND EXISTS (
+                         SELECT 1 FROM public.behavior_runs br
+                         WHERE br.id = e.legacy_run_id AND br.workspace_id = e.workspace_id
+                           AND br.trigger_kind = 'telegram.command'))
+              THEN 0 ELSE 1 END,
+         j.due_at, j.id
 FOR UPDATE OF j, e SKIP LOCKED
 LIMIT 1
 `
 
+type SelectDueWorkflowJobParams struct {
+	AtTime        pgtype.Timestamptz
+	MaxConcurrent int32
+}
+
+// Urgent first (Phase 12 REQ-7): a resume job, the owner's own executions
+// and executions started from an owner Telegram command run before the
+// backlog; FIFO by due_at within each class. The command check is a primary
+// key lookup of the execution's legacy run.
 // Lock the job and its execution together without waiting, so a claim never
 // holds a job while blocking on an execution (lock order: execution, job).
-func (q *Queries) SelectDueWorkflowJob(ctx context.Context, atTime pgtype.Timestamptz) (Job, error) {
-	row := q.db.QueryRow(ctx, selectDueWorkflowJob, atTime)
+func (q *Queries) SelectDueWorkflowJob(ctx context.Context, arg SelectDueWorkflowJobParams) (Job, error) {
+	row := q.db.QueryRow(ctx, selectDueWorkflowJob, arg.AtTime, arg.MaxConcurrent)
 	var i Job
 	err := row.Scan(
 		&i.ID,

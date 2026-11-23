@@ -84,6 +84,7 @@ func KnownWorkflowReasons() []workflow.ReasonCode {
 		CodeTriggerTextUnavailable,
 		domain.LLMCodeUnavailable,
 		domain.LLMCodeTimeout,
+		domain.LLMCodeBudgetExceeded,
 	}
 }
 

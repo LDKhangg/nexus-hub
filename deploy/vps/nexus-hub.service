@@ -18,6 +18,11 @@ ExecStart=/opt/nexus-hub/current/nexus-server
 WorkingDirectory=/var/lib/nexus-hub
 Restart=always
 RestartSec=5
+# Phase 12 graceful shutdown: SIGTERM only the hub process so a draining
+# step's git/CLI children are not killed under it; shutdown_timeout (max
+# 80s) plus the stop grace stays below TimeoutStopSec.
+KillMode=mixed
+TimeoutStopSec=100
 
 # repos_dir and tmp_dir default to /var/lib/nexus-hub/{repos,tmp}.
 StateDirectory=nexus-hub
@@ -34,7 +39,10 @@ ProtectControlGroups=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LockPersonality=true
 CapabilityBoundingSet=
-SystemCallFilter=@system-service
+# Unprivileged bwrap needs mount operations and user/mount/process/network
+# namespaces; it still receives no capabilities from the service.
+SystemCallFilter=@system-service @mount
+RestrictNamespaces=user mnt pid net ipc uts cgroup
 
 MemoryMax=400M
 TasksMax=64

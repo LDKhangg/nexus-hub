@@ -12,14 +12,17 @@ import (
 )
 
 const assignDigestEntries = `-- name: AssignDigestEntries :many
-UPDATE public.behavior_digest_entries e SET batch_id = $1::bigint
-WHERE e.id IN (
+WITH picked AS MATERIALIZED (
   SELECT x.id FROM public.behavior_digest_entries x
   WHERE x.workspace_id = $2 AND x.integration_id = $3
     AND x.chat_id = $4 AND x.batch_id IS NULL AND x.due_at <= $5::timestamptz
   ORDER BY x.run_id, x.msg_key
   LIMIT $6::int
-  FOR UPDATE SKIP LOCKED)
+  FOR UPDATE SKIP LOCKED
+)
+UPDATE public.behavior_digest_entries e SET batch_id = $1::bigint
+FROM picked
+WHERE e.id = picked.id AND e.batch_id IS NULL
 RETURNING e.run_id, e.msg_key
 `
 
@@ -38,6 +41,9 @@ type AssignDigestEntriesRow struct {
 }
 
 // Puts up to max_rows due, unbatched entries of one chat into a batch.
+// The picked set is a MATERIALIZED CTE so the LIMIT is applied once: an
+// IN (SELECT ... LIMIT ... SKIP LOCKED) subquery may be re-evaluated and
+// touch more rows than max_rows.
 func (q *Queries) AssignDigestEntries(ctx context.Context, arg AssignDigestEntriesParams) ([]AssignDigestEntriesRow, error) {
 	rows, err := q.db.Query(ctx, assignDigestEntries,
 		arg.BatchID,

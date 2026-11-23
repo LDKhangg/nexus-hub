@@ -74,6 +74,19 @@ func (s *WorkerStore) RetryJob(ctx context.Context, workspaceID, jobID string, a
 	if err != nil {
 		return behavior.WorkerJob{}, notFound(err)
 	}
+	// The retry limit (Phase 12 REQ-5): a retryable job of the expected
+	// attempt that already used its WorkerMaxAttempts leases stays where it
+	// is; the refusal is audited with a fixed reason code.
+	if retryableWorkerState(before.State) && int(before.Attempt) == attempt && before.Attempt >= behavior.WorkerMaxAttempts {
+		if err := q.InsertWorkerEvent(ctx, workerEvent(ws, before.DeviceID, before.ID, behavior.WorkerEventRejected, behavior.WorkerReasonAttemptsExhausted)); err != nil {
+			return behavior.WorkerJob{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return behavior.WorkerJob{}, err
+		}
+		log.Printf("worker job %s: retry refused, %d of %d attempts used", uuidString(before.ID), before.Attempt, behavior.WorkerMaxAttempts)
+		return behavior.WorkerJob{}, behavior.ErrWorkerRetryLimit
+	}
 	row, err := q.RetryWorkerJob(ctx, sqlc.RetryWorkerJobParams{Now: ts(now), WorkspaceID: ws, ID: id, Attempt: int32(attempt)})
 	if err != nil {
 		if isNoRows(err) {

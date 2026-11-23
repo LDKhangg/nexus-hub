@@ -1,0 +1,28 @@
+{
+  "n": 120,
+  "duplicates": 12,
+  "concurrency": 10,
+  "client_latency": {
+    "p50_ms": 40.38796,
+    "p95_ms": 59.172571,
+    "p99_ms": 65.284253,
+    "max_ms": 65.794645
+  },
+  "server_latency": {
+    "p50_ms": 40.166636,
+    "p95_ms": 59.083984,
+    "p99_ms": 64.502339,
+    "max_ms": 65.700677
+  },
+  "completed": 120,
+  "failed": 0,
+  "stuck": 0,
+  "http_failures": 0,
+  "execution_count": 120,
+  "total_wall_time_ms": 1464.857035,
+  "go_version": "go1.27.4-X:nodwarf5",
+  "postgres_version": "17.10",
+  "cpu_count": 8,
+  "passed": true,
+  "generated_at": "2026-11-20T09:02:06.693076355Z"
+}

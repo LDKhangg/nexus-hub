@@ -90,6 +90,7 @@ func KnownWorkflowReasons() []workflow.ReasonCode {
 		CodeLLMError,
 		CodeInvalidDecision,
 		CodeTokenBudget,
+		CodeLLMBudgetExceeded,
 	}
 }
 

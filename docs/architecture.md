@@ -352,3 +352,9 @@ earlier succeeded task of the execution names in its evidence
 (dangerous budget 1, dry runs included). When the engine or its store is unavailable,
 a built-in safe set applies (read allow, write approval_required, dangerous
 deny). Only `nh policy` writes rule sets.
+
+Git tools run the fixed git binary through a verified `bwrap` sandbox. Only the
+active workspace and a private HOME are writable, local commands have no
+network, and network commands use a loopback CONNECT proxy restricted to
+`github.com:443`; startup probe failure leaves tools registered but returns
+`sandbox_unavailable`. Host-side size checks retain the `max_clone_bytes` cap.

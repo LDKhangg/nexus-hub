@@ -57,11 +57,14 @@ func (e *DeniedError) Error() string { return e.Code }
 
 // Runner executes git under the VPS limits.
 type Runner struct {
-	gitPath    string
-	home       string
-	sem        chan struct{}
-	cpuSeconds uint64 // overrides the read CPU limit in tests
-	asBytes    uint64 // RLIMIT_AS; tests raise it for the Go-based fake git
+	gitPath     string
+	home        string
+	sem         chan struct{}
+	cpuSeconds  uint64 // overrides the read CPU limit in tests
+	asBytes     uint64 // RLIMIT_AS; tests raise it for the Go-based fake git
+	bwrapPath   string
+	proxy       *connectProxy
+	unavailable string
 }
 
 // New verifies gitPath (absolute, executable, base name "git") and prepares
@@ -82,6 +85,68 @@ func New(gitPath, tmpDir string) (*Runner, error) {
 		return nil, fmt.Errorf("prepare git home: %w", err)
 	}
 	return &Runner{gitPath: gitPath, home: home, sem: make(chan struct{}, MaxConcurrent), asBytes: addressSpaceBytes}, nil
+}
+
+// SandboxConfig selects the verified bubblewrap executable and bounds its
+// startup probe. A zero ProbeTimeout uses the production default.
+type SandboxConfig struct {
+	BwrapPath    string
+	ProbeTimeout time.Duration
+}
+
+// NewSandboxed prepares a runner that executes git only inside bubblewrap.
+// It probes the requested namespaces before starting the private CONNECT
+// proxy; any failure leaves no usable runner, so callers can fail closed.
+func NewSandboxed(gitPath, tmpDir string, cfg SandboxConfig) (*Runner, error) {
+	r, err := New(gitPath, tmpDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyExecutable(cfg.BwrapPath, "bwrap"); err != nil {
+		return nil, errors.New("bwrap is not an executable file")
+	}
+	probeTimeout := cfg.ProbeTimeout
+	if probeTimeout <= 0 {
+		probeTimeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	probe := exec.CommandContext(ctx, cfg.BwrapPath, "--unshare-all", "--die-with-parent", "--new-session", "--ro-bind", "/", "/", "--", "/bin/true")
+	probe.Stdout, probe.Stderr = nil, nil
+	if err := probe.Run(); err != nil {
+		return nil, errors.New("bwrap startup probe failed")
+	}
+	p, err := startConnectProxy()
+	if err != nil {
+		return nil, errors.New("git egress proxy startup failed")
+	}
+	r.bwrapPath, r.proxy = cfg.BwrapPath, p
+	return r, nil
+}
+
+// NewUnavailable returns a fail-closed runner. It lets tools remain
+// registered while every attempted git call returns the supplied safe code.
+func NewUnavailable(code string) *Runner {
+	return &Runner{sem: make(chan struct{}, MaxConcurrent), unavailable: code, asBytes: addressSpaceBytes}
+}
+
+func verifyExecutable(path, base string) error {
+	if !filepath.IsAbs(path) || filepath.Base(path) != base {
+		return errors.New("executable path is invalid")
+	}
+	st, err := os.Stat(path)
+	if err != nil || !st.Mode().IsRegular() || st.Mode().Perm()&0o111 == 0 {
+		return errors.New("executable path is not usable")
+	}
+	return nil
+}
+
+// Close stops the runner's loopback proxy. It is safe to call more than once.
+func (r *Runner) Close() error {
+	if r == nil || r.proxy == nil {
+		return nil
+	}
+	return r.proxy.Close()
 }
 
 // GitPath returns the verified git binary path.
@@ -166,6 +231,9 @@ func checkEnv(env []string) error {
 // Run executes git. Errors are policy denials, cancellation while waiting
 // for a slot, or a failure to start the process.
 func (r *Runner) Run(ctx context.Context, c Command) (Result, error) {
+	if r.unavailable != "" {
+		return Result{}, &DeniedError{Code: r.unavailable}
+	}
 	if err := checkArgs(c.Args); err != nil {
 		return Result{}, err
 	}
@@ -196,12 +264,25 @@ func (r *Runner) Run(ctx context.Context, c Command) (Result, error) {
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.Command(r.gitPath, c.Args...)
-	cmd.Dir = c.Dir
-	if cmd.Dir == "" {
-		cmd.Dir = r.home
+	dir := c.Dir
+	if dir == "" {
+		dir = r.home
 	}
-	cmd.Env = append([]string{
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+		return Result{}, &DeniedError{Code: "working_directory_denied"}
+	}
+	commandPath, commandArgs := r.gitPath, c.Args
+	if r.bwrapPath != "" {
+		args, err := r.sandboxArgs(dir, c.Network && isNetworkCommand(c.Args))
+		if err != nil {
+			return Result{}, err
+		}
+		commandPath = r.bwrapPath
+		commandArgs = append(args, append([]string{"--", r.gitPath}, c.Args...)...)
+	}
+	cmd := exec.Command(commandPath, commandArgs...)
+	cmd.Dir = dir
+	fixedEnv := []string{
 		"PATH=" + basePath,
 		"HOME=" + r.home,
 		"LANG=C.UTF-8",
@@ -209,7 +290,15 @@ func (r *Runner) Run(ctx context.Context, c Command) (Result, error) {
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_TERMINAL_PROMPT=0",
 		"NO_COLOR=1",
-	}, c.Env...)
+	}
+	if r.bwrapPath != "" {
+		fixedEnv = append(fixedEnv, "GIT_ALLOW_PROTOCOL=https")
+		if r.proxy != nil && c.Network && isNetworkCommand(c.Args) {
+			proxyURL := "http://" + r.proxy.Addr()
+			fixedEnv = append(fixedEnv, "https_proxy="+proxyURL, "HTTPS_PROXY="+proxyURL)
+		}
+	}
+	cmd.Env = append(fixedEnv, c.Env...)
 	if c.Stdin != nil {
 		cmd.Stdin = bytes.NewReader(c.Stdin)
 	}
@@ -256,6 +345,68 @@ func (r *Runner) Run(ctx context.Context, c Command) (Result, error) {
 		return res, fmt.Errorf("wait git: %w", waitErr)
 	}
 	return res, nil
+}
+
+func isNetworkCommand(args []string) bool {
+	for i := 0; i < len(args); {
+		switch args[i] {
+		case "-c", "-C":
+			i += 2
+		case "--no-pager":
+			i++
+		default:
+			return networkSubcommands[args[i]]
+		}
+	}
+	return false
+}
+
+func (r *Runner) sandboxArgs(dir string, network bool) ([]string, error) {
+	if forbiddenWritablePath(dir) || forbiddenWritablePath(r.home) {
+		return nil, &DeniedError{Code: "working_directory_denied"}
+	}
+	args := []string{"--unshare-all"}
+	if network {
+		args = append(args, "--share-net")
+	}
+	args = append(args, "--die-with-parent", "--new-session", "--tmpfs", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp")
+	for _, path := range []string{"/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc/ssl", "/etc/pki", "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/etc/gai.conf"} {
+		if _, err := os.Stat(path); err == nil {
+			args = append(args, "--ro-bind", path, path)
+		}
+	}
+	if !underAny(r.gitPath, "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32") {
+		args = append(args, "--ro-bind", r.gitPath, r.gitPath)
+	}
+	for _, path := range uniquePaths(dir, r.home) {
+		args = append(args, "--bind", path, path)
+	}
+	return append(args, "--chdir", dir), nil
+}
+
+func forbiddenWritablePath(path string) bool {
+	return path == "/home" || strings.HasPrefix(path, "/home/")
+}
+
+func underAny(path string, roots ...string) bool {
+	for _, root := range roots {
+		if path == root || strings.HasPrefix(path, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func uniquePaths(paths ...string) []string {
+	seen := make(map[string]bool, len(paths))
+	var out []string
+	for _, path := range paths {
+		if !seen[path] {
+			seen[path] = true
+			out = append(out, path)
+		}
+	}
+	return out
 }
 
 func signalOf(ee *exec.ExitError) syscall.Signal {

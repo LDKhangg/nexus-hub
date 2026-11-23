@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
@@ -21,6 +23,26 @@ import (
 type WorkflowStore struct {
 	pool *pgxpool.Pool
 	q    *sqlc.Queries
+	// maxConcurrent is the per-workspace cap on live job claims (Phase 12
+	// REQ-7); 0 is off. Atomic: set at wiring, read by every claimer.
+	maxConcurrent atomic.Int32
+}
+
+// SetWorkspaceMaxConcurrent sets the per-workspace cap on executions
+// running a step at the same time (workspace_max_concurrent_executions).
+// n <= 0 turns the cap off. A resume job and the owner's own executions
+// are never held back by it.
+func (s *WorkflowStore) SetWorkspaceMaxConcurrent(n int) {
+	if n < 0 || n > math.MaxInt32 {
+		n = 0
+	}
+	s.maxConcurrent.Store(int32(n))
+}
+
+// CountPendingWork returns how many workflow jobs wait for a claim
+// hub-wide (Phase 12 REQ-7 backpressure).
+func (s *WorkflowStore) CountPendingWork(ctx context.Context) (int64, error) {
+	return s.q.CountPendingWorkflowJobs(ctx)
 }
 
 func NewWorkflowStore(pool *pgxpool.Pool) (*WorkflowStore, error) {

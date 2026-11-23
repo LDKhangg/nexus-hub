@@ -57,7 +57,7 @@ func (s *WorkflowStore) ClaimJob(ctx context.Context, at time.Time) (*workflow.J
 	}
 	defer tx.Rollback(ctx)
 	q := sqlc.New(tx)
-	candidate, err := q.SelectDueWorkflowJob(ctx, ts(at))
+	candidate, err := q.SelectDueWorkflowJob(ctx, sqlc.SelectDueWorkflowJobParams{AtTime: ts(at), MaxConcurrent: s.maxConcurrent.Load()})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -155,6 +155,28 @@ func (s *WorkflowStore) AuthorizeAction(ctx context.Context, jobID int64, worksp
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+var _ workflow.LeaseReleaser = (*WorkflowStore)(nil)
+
+// ReleaseJobLease ends the caller's own live lease at at (graceful
+// shutdown). It changes nothing else: the job stays processing with its
+// claim, so the next reconciliation treats it exactly like an expired lease
+// (retry by the definition's policy, or fail). A stale or ended claim is a
+// no-op.
+func (s *WorkflowStore) ReleaseJobLease(ctx context.Context, jobID int64, workspaceID, claimToken string, at time.Time) error {
+	ws, err := parseDBID(workspaceID)
+	if err != nil || jobID <= 0 || at.IsZero() {
+		return workflowInvalid("lease release")
+	}
+	token, err := workflowJobToken(claimToken)
+	if err != nil {
+		return err
+	}
+	_, err = s.q.ExpireWorkflowJobLease(ctx, sqlc.ExpireWorkflowJobLeaseParams{
+		AtTime: ts(at), ID: jobID, WorkspaceID: ws, ClaimToken: token,
+	})
+	return err
 }
 
 func validateJobCheckpointRequest(req workflow.JobCheckpointRequest) (pgtype.UUID, pgtype.UUID, []byte, error) {

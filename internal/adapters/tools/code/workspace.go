@@ -102,7 +102,7 @@ func (w *workspace) tokenEnv(ctx context.Context, c tools.Call, perms map[string
 }
 
 func (w *workspace) run(ctx context.Context, root string, env []string, network bool, sub ...string) (execrunner.Result, error) {
-	return runGit(ctx, w.runner, execrunner.Command{Args: w.args(root, sub...), Env: env, Network: network})
+	return runGit(ctx, w.runner, execrunner.Command{Args: w.args(root, sub...), Dir: root, Env: env, Network: network})
 }
 
 // wsTool is one workspace tool.

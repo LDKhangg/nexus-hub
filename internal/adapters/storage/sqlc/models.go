@@ -422,6 +422,20 @@ type Job struct {
 	ContinuesAttempt bool
 }
 
+// Workspace-scoped daily LLM token and estimated cost ledger; counts only, never content.
+type LlmUsageDaily struct {
+	WorkspaceID pgtype.UUID
+	Day         pgtype.Date
+	Provider    string
+	Model       string
+	// All prompt tokens of the day, cache reads and writes included.
+	InputTokens  int64
+	OutputTokens int64
+	// Estimate from the hub price table (internal/adapters/llm/pricing.go); 0 for unknown models and subscription CLI providers.
+	CostUsd   float64
+	UpdatedAt pgtype.Timestamptz
+}
+
 type MessageLog struct {
 	ID       int64
 	ThreadID pgtype.UUID
@@ -867,6 +881,31 @@ type WorkerTelemetryHourly struct {
 	FailuresTotal        pgtype.Int8
 	ExecutorTokensTotal  pgtype.Int8
 	BusySecondsTotal     pgtype.Int8
+}
+
+// One Telegram alert per workflow execution and alert state (dedup); ids, state and time only.
+type WorkflowAlert struct {
+	WorkspaceID pgtype.UUID
+	ExecutionID int64
+	State       string
+	// When the alert was delivered; NULL unless status is sent.
+	SentAt pgtype.Timestamptz
+	// sent, pending (send not yet delivered), failed (attempts exhausted), suppressed (hourly cap) or obsolete (stuck or overdue condition ended before a retry; never sent).
+	Status string
+	// Send attempts made, including a timed-out one.
+	Attempts int32
+	// When a pending alert is tried (again); NULL unless pending.
+	NextAttemptAt pgtype.Timestamptz
+	// Safe code of the last failed send attempt.
+	LastErrorCode pgtype.Text
+	// When the alert state began (for the age in the alert line).
+	SinceAt pgtype.Timestamptz
+	// Safe error code of the execution shown in the alert line.
+	ErrorCode pgtype.Text
+	// When the alert was claimed.
+	CreatedAt pgtype.Timestamptz
+	// When a suppressed alert was counted in a merged-alerts summary.
+	SummarisedAt pgtype.Timestamptz
 }
 
 type WorkflowExecution struct {

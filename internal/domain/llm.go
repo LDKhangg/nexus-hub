@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 type Role string
@@ -168,4 +169,22 @@ func AsLLMError(err error) (*LLMError, bool) {
 		return le, true
 	}
 	return nil, false
+}
+
+// LLMCodeBudgetExceeded: the workspace's model spend of the current UTC
+// day reached llm_daily_budget_usd; no new model call starts until the
+// next day or a higher budget. Not retryable.
+const LLMCodeBudgetExceeded = "llm_budget_exceeded"
+
+// LLMUsageRecord is one model call's entry in the daily spend ledger:
+// workspace, UTC day, provider, model, token counts and an estimated cost.
+// It never carries prompt, answer or credential text.
+type LLMUsageRecord struct {
+	WorkspaceID  string
+	Day          time.Time // UTC date; the time of day is ignored
+	Provider     string
+	Model        string
+	InputTokens  int64 // all prompt tokens, cache reads and writes included
+	OutputTokens int64
+	CostUSD      float64
 }

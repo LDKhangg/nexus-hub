@@ -271,6 +271,7 @@ var workerFailureReasons = map[string]string{
 	"invalid_job":      "yêu cầu không hợp lệ cho máy local",
 	"workspace_failed": "không chuẩn bị được thư mục làm việc",
 	"no_changes":       "không có thay đổi nào",
+	"lease_expired":    "máy local mất kết nối quá 24 giờ, việc không được tiếp tục",
 
 	"executor_unsupported": "claude trên máy local quá cũ, cần cập nhật (tối thiểu 2.1.314)",
 }
@@ -673,6 +674,10 @@ func (w *InboxWorker) workerJobCallback(ctx context.Context, u InboundUpdate, da
 			log.Print("worker job buttons: stale approval not closed")
 		}
 		return msgWorkerExecutionEnded, "execution_ended", true
+	case errors.Is(err, ErrWorkerRetryLimit):
+		// The retry limit is reached: Retry can never work again, but the
+		// buttons stay open so Cancel can still end the job's step.
+		return msgWorkerRetryLimit, WorkerReasonAttemptsExhausted, false
 	case errors.Is(err, ErrConflict), errors.Is(err, ErrNotFound):
 		// Already retried, finished or cancelled: the buttons are stale.
 		if _, derr := w.d.Approvals.Decide(ctx, u.WorkspaceID, a.Nonce, DecisionExpired, "", actor, w.now()); derr != nil {

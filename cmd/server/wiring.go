@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,6 +53,7 @@ type agentServices struct {
 	policy *policy.Engine
 	// policyStore holds rule sets, decisions and policy gates.
 	policyStore *storage.PolicyStore
+	gitRunner   *execrunner.Runner
 
 	conversations workflow.ConversationStore
 	// provider returns the workspace's default LLM provider.
@@ -94,6 +96,11 @@ func buildTools(s settings.Settings, resolver *secrets.Resolver, redactor *agent
 }
 
 func buildToolsWithPeople(s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, directory *storage.PeopleRepository, extra ...tools.Tool) (*tools.Registry, error) {
+	reg, _, err := buildToolRegistry(s, resolver, redactor, directory, extra...)
+	return reg, err
+}
+
+func buildToolRegistry(s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, directory *storage.PeopleRepository, extra ...tools.Tool) (*tools.Registry, *execrunner.Runner, error) {
 	apiClient := netguard.Client(s.ToolTimeout, netguard.DefaultHosts)
 	creds := githubapi.NewCredentials(apiClient, resolver, redactor, nil)
 	gh := githubapi.NewClient(apiClient, creds)
@@ -112,26 +119,53 @@ func buildToolsWithPeople(s settings.Settings, resolver *secrets.Resolver, redac
 	// Undo of a run-level reaction (/undo), also ActionOnly.
 	all = append(all, clickuptools.NewChatReactionRemoveTool(apiClient, resolver, clickupchat.New(apiClient)))
 	all = append(all, extra...)
-	if gitPath, err := resolveGit(s.GitPath); err != nil {
-		log.Print("git not found; code and workspace tools disabled")
-	} else if runner, err := execrunner.New(gitPath, s.TmpDir); err != nil {
-		log.Printf("git runner unavailable (%v); code and workspace tools disabled", err)
+	var runner *execrunner.Runner
+	gitPath, gitErr := resolveGit(s.GitPath)
+	if s.GitSandbox {
+		if gitErr == nil {
+			runner, gitErr = execrunner.NewSandboxed(gitPath, s.TmpDir, execrunner.SandboxConfig{BwrapPath: s.BwrapPath})
+		}
+		if gitErr != nil {
+			log.Print("git sandbox: unavailable; git calls fail closed with sandbox_unavailable")
+			runner = execrunner.NewUnavailable("sandbox_unavailable")
+		} else {
+			log.Print("git sandbox: ready")
+		}
 	} else {
-		all = append(all, codetools.NewReadTools(runner, s.ReposDir)...)
-		all = append(all, codetools.NewWorkspaceTools(runner, creds, s.ReposDir, s.MaxCloneBytes, redactor)...)
+		log.Print("WARNING: git_sandbox=false; use only on a non-production development box")
+		if gitErr == nil {
+			runner, gitErr = execrunner.New(gitPath, s.TmpDir)
+		}
+		if gitErr != nil {
+			log.Print("git runner: unavailable; git calls fail closed with git_unavailable")
+			runner = execrunner.NewUnavailable("git_unavailable")
+		}
 	}
-	return tools.NewRegistry(all...)
+	all = append(all, codetools.NewReadTools(runner, s.ReposDir)...)
+	all = append(all, codetools.NewWorkspaceTools(runner, creds, s.ReposDir, s.MaxCloneBytes, redactor)...)
+	reg, err := tools.NewRegistry(all...)
+	if err != nil {
+		_ = runner.Close()
+		return nil, nil, err
+	}
+	return reg, runner, nil
 }
 
-func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, sender *telegram.Client, extra ...tools.Tool) (agentServices, error) {
+func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, sender *telegram.Client, ops opsServices, extra ...tools.Tool) (agentServices, error) {
 	directory, err := storage.NewPeopleRepository(pool)
 	if err != nil {
 		return agentServices{}, errors.New("people directory startup failed")
 	}
-	reg, err := buildToolsWithPeople(s, resolver, redactor, directory, extra...)
+	reg, gitRunner, err := buildToolRegistry(s, resolver, redactor, directory, extra...)
 	if err != nil {
 		return agentServices{}, errors.New("tool registry startup failed")
 	}
+	built := false
+	defer func() {
+		if !built {
+			_ = gitRunner.Close()
+		}
+	}()
 	store, err := storage.NewAgentStore(pool)
 	if err != nil {
 		return agentServices{}, errors.New("agent store startup failed")
@@ -158,6 +192,9 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 	if err != nil {
 		return agentServices{}, errors.New("llm provider startup failed")
 	}
+	// Every model call is counted in the spend ledger and checked against
+	// llm_daily_budget_usd (Phase 12).
+	factory.SetMeter(ops.meter)
 	log.Printf("llm provider: %s", factory.Provider())
 	if !factory.Ready() {
 		log.Printf("llm provider %s: binary not usable; LLM work falls back to notices (llm_unconfigured)", factory.Provider())
@@ -204,8 +241,9 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
 		Policy: policyEngine,
 	})
-	worker := relay.NewActionWorker(actions, sender, relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout}, conversations)
-	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, investigators: investigators, people: directory, store: store, conversations: conversations, policy: policyEngine, policyStore: policyStore}, nil
+	worker := relay.NewActionWorker(meteredActionStore{ActionStore: actions, hub: ops.hub}, sender, relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout}, conversations)
+	built = true
+	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, investigators: investigators, people: directory, store: store, conversations: conversations, policy: policyEngine, policyStore: policyStore, gitRunner: gitRunner}, nil
 }
 
 // policyKnownActions is the closed set of names a rule set may use: the
@@ -641,11 +679,16 @@ type workflowRuntime struct {
 	orch       *agent.Orchestrator
 	pipeline   agent.PipelineSettings
 	interval   time.Duration
+	// queueMaxPending is queue_max_pending (Phase 12 REQ-7): at or above it
+	// the starter defers new non-urgent executions. backpressured is the
+	// current state, used only by the starter goroutine to log changes.
+	queueMaxPending int64
+	backpressured   bool
 }
 
 // buildWorkflowRuntime registers the behavior and agent step executors
 // (behavior approvals become durable waits) and builds the runtime.
-func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServices, behaviors *storage.BehaviorStore, runs *behavior.RunWorker, engine *behavior.Engine, extra func(*workflow.Registry, *storage.WorkflowStore) error) (*workflowRuntime, error) {
+func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServices, behaviors *storage.BehaviorStore, runs *behavior.RunWorker, engine *behavior.Engine, onStepFailure func(workflow.ReasonCode, bool), extra func(*workflow.Registry, *storage.WorkflowStore) error) (*workflowRuntime, error) {
 	store, err := storage.NewWorkflowStore(pool)
 	if err != nil {
 		return nil, errors.New("workflow store startup failed")
@@ -679,8 +722,12 @@ func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServi
 	}
 	// The behavior run executors plus one for the comment pipeline, which
 	// the legacy agent worker ran on its own.
+	// The per-workspace concurrency cap (Phase 12 REQ-7) is enforced at
+	// claim time; resumes and the owner's executions are exempt.
+	store.SetWorkspaceMaxConcurrent(int(s.WorkspaceMaxConcurrent))
 	worker := workflow.NewWorker(store, reg, nil, workflow.WorkerSettings{
 		Workers: int(s.BehaviorWorkers) + 1, PollInterval: s.BehaviorPollInterval,
+		OnStepFailure: onStepFailure,
 	})
 	return &workflowRuntime{
 		store: store, commands: workflow.NewEngine(store), agents: agents, worker: worker, reconciler: workflow.NewReconciler(store), orch: ag.orchestrator,
@@ -689,20 +736,27 @@ func buildWorkflowRuntime(pool *pgxpool.Pool, s settings.Settings, ag agentServi
 			MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens,
 			DebounceWindow: s.DebounceWindow, DebounceMaxWait: s.DebounceMaxWait,
 		},
-		interval: s.BehaviorPollInterval,
+		interval:        s.BehaviorPollInterval,
+		queueMaxPending: s.QueueMaxPending,
 	}, nil
 }
 
 // Run reconciles once, then runs the worker, the starter and the periodic
-// reconciler until ctx ends. On shutdown it stops claiming and starting;
-// a step cut off mid-attempt writes nothing more, and its lease simply
-// expires for the next reconciliation (no lease is released early).
-func (r *workflowRuntime) Run(ctx context.Context) error {
-	r.reconcile(ctx)
+// reconciler until ctx ends (no drain: see RunDrain).
+func (r *workflowRuntime) Run(ctx context.Context) error { return r.RunDrain(ctx, ctx) }
+
+// RunDrain reconciles once, then runs the worker, the starter and the
+// periodic reconciler until stop ends. On shutdown it stops claiming and
+// starting at once, while job steps already in flight keep running until
+// they return or hard ends. A step cut off by hard writes nothing more and
+// releases its own lease, so the next start's reconciliation resumes it at
+// once.
+func (r *workflowRuntime) RunDrain(stop, hard context.Context) error {
+	r.reconcile(stop)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = r.worker.Run(ctx)
+		_ = r.worker.RunUntil(stop, hard)
 	}()
 	start := time.NewTicker(r.interval)
 	defer start.Stop()
@@ -710,15 +764,22 @@ func (r *workflowRuntime) Run(ctx context.Context) error {
 	defer reconcile.Stop()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-stop.Done():
 			<-done
 			return nil
 		case <-start.C:
-			r.startCutOver(ctx)
+			r.startCutOver(stop)
 		case <-reconcile.C:
-			r.reconcile(ctx)
+			r.reconcile(stop)
 		}
 	}
+}
+
+// Recover runs the startup reconciliation pass (expired leases back to the
+// queue, missing wakeups re-armed, lost signals repaired) before the hub
+// serves; Run repeats it, which is idempotent.
+func (r *workflowRuntime) Recover(ctx context.Context) error {
+	return r.reconciler.Reconcile(ctx, time.Now())
 }
 
 // reconcile repairs expired leases, missing wakeups and lost signals. Only
@@ -738,21 +799,69 @@ func (r *workflowRuntime) startCutOver(ctx context.Context) {
 		}
 		return
 	}
+	headroom := r.startHeadroom(ctx)
 	for _, ws := range workspaces {
 		if ctx.Err() != nil {
 			return
 		}
 		now := time.Now()
-		if _, err := r.store.StartPendingBehaviorRuns(ctx, ws, now, workflowStartBatch); err != nil && ctx.Err() == nil {
-			log.Printf("workflow starter: workspace %s behavior runs not started", ws)
-		}
-		if _, err := r.agents.StartDueBatches(ctx, ws, now, r.pipeline, workflowStartBatch); err != nil && ctx.Err() == nil {
-			log.Printf("workflow starter: workspace %s agent batches not started", ws)
+		if headroom <= 0 {
+			// Backpressure: only the owner's Telegram commands start. Every
+			// other run and agent batch stays stored and pending (its
+			// webhook was already answered) until the queue drains.
+			if _, err := r.store.StartPendingUrgentBehaviorRuns(ctx, ws, now, workflowStartBatch); err != nil && ctx.Err() == nil {
+				log.Printf("workflow starter: workspace %s owner command runs not started", ws)
+			}
+		} else {
+			limit := min(workflowStartBatch, headroom)
+			n, err := r.store.StartPendingBehaviorRuns(ctx, ws, now, limit)
+			if err != nil && ctx.Err() == nil {
+				log.Printf("workflow starter: workspace %s behavior runs not started", ws)
+			}
+			headroom -= n
+			if headroom > 0 {
+				m, err := r.agents.StartDueBatches(ctx, ws, now, r.pipeline, min(workflowStartBatch, headroom))
+				if err != nil && ctx.Err() == nil {
+					log.Printf("workflow starter: workspace %s agent batches not started", ws)
+				}
+				headroom -= m
+			}
 		}
 		if _, err := r.orch.ReleaseOrphanBatches(ctx, r.agents, ws, workflowStartBatch); err != nil && ctx.Err() == nil {
 			log.Printf("workflow starter: workspace %s orphan agent batches not released", ws)
 		}
 	}
+}
+
+// startHeadroom returns how many new non-urgent executions this starter
+// pass may create: queue_max_pending minus the jobs waiting for a claim
+// hub-wide, or 0 under backpressure (Phase 12 REQ-7). It logs each change
+// of the backpressure state with counts only. A failed count does not
+// block starts (the hub behaves as before the cap existed).
+func (r *workflowRuntime) startHeadroom(ctx context.Context) int {
+	if r.queueMaxPending <= 0 {
+		return math.MaxInt32
+	}
+	pending, err := r.store.CountPendingWork(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Print("workflow starter: queued job count unavailable; starting without backpressure")
+		}
+		return workflowStartBatch
+	}
+	over := pending >= r.queueMaxPending
+	if over != r.backpressured {
+		r.backpressured = over
+		if over {
+			log.Printf("workflow starter: backpressure on: %d queued jobs, queue_max_pending %d; new non-urgent executions deferred", pending, r.queueMaxPending)
+		} else {
+			log.Printf("workflow starter: backpressure off: %d queued jobs, queue_max_pending %d", pending, r.queueMaxPending)
+		}
+	}
+	if over {
+		return 0
+	}
+	return int(r.queueMaxPending - pending)
 }
 
 // --- orchestrated tasks (Phase 7b) ---

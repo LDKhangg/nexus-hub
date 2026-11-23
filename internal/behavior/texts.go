@@ -3,6 +3,7 @@ package behavior
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -272,3 +273,47 @@ const (
 
 // usageComment answers /comment without text or outside a ClickUp task topic.
 const usageComment = "Cú pháp: /comment <nội dung> (gõ trong topic của một task ClickUp)"
+
+// workflowAlert is a stuck or failed workflow alert (Phase 12 REQ-10):
+// icon, execution id, behavior name, state, age and error code only. An
+// empty name or code is left out.
+func (t texts) workflowAlert(state AlertState, executionID int64, name string, age time.Duration, code string) string {
+	icon, label := "⚠️", string(state)
+	switch state {
+	case AlertStuckRunning:
+		icon, label = "⏳", t.pick("kẹt khi chạy", "stuck running")
+	case AlertStuckQueued:
+		icon, label = "⏳", t.pick("kẹt trong hàng đợi", "stuck queued")
+	case AlertApprovalOverdue:
+		icon, label = "⌛", t.pick("quá hạn duyệt", "approval overdue")
+	case AlertFailed:
+		icon, label = "❌", t.pick("thất bại", "failed")
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s #%d", icon, t.pick("Workflow", "Workflow"), executionID)
+	if name != "" {
+		fmt.Fprintf(&b, " (%s)", name)
+	}
+	fmt.Fprintf(&b, ": %s, %s %s", label, t.pick("đã", "for"), alertAge(age, t))
+	if code != "" {
+		fmt.Fprintf(&b, ", %s %s", t.pick("mã", "code"), code)
+	}
+	return b.String()
+}
+
+// workflowAlertSummary is the one line of alerts merged by the hourly cap.
+func (t texts) workflowAlertSummary(n, limit int) string {
+	return fmt.Sprintf(t.pick("⚠️ %d cảnh báo bị gộp (giới hạn %d cảnh báo/giờ).", "⚠️ %d alerts merged (limit %d alerts per hour)."), n, limit)
+}
+
+// alertAge is a short age: minutes under two hours, then hours, then days.
+func alertAge(d time.Duration, t texts) string {
+	switch {
+	case d < 2*time.Hour:
+		return fmt.Sprintf(t.pick("%d phút", "%d min"), int64(d/time.Minute))
+	case d < 48*time.Hour:
+		return fmt.Sprintf(t.pick("%d giờ", "%d h"), int64(d/time.Hour))
+	default:
+		return fmt.Sprintf(t.pick("%d ngày", "%d d"), int64(d/(24*time.Hour)))
+	}
+}

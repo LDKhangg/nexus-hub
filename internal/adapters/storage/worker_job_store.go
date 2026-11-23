@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log"
 	"strings"
 	"time"
 
@@ -817,8 +818,14 @@ func (s *WorkerStore) RecordTelemetry(ctx context.Context, device behavior.Worke
 
 // --- maintenance ---
 
+// staleInterruptedBatch bounds one pass of FailStaleInterruptedWorkerJobs.
+const staleInterruptedBatch = 100
+
 // ExpireLeases interrupts jobs whose lease ran out (event lease_lost); a job
-// that was cancelling is cancelled.
+// that was cancelling is cancelled. In the same pass, an interrupted job
+// whose device did not resume it within WorkerResumeWindow ends FAILED with
+// the reason lease_expired (Phase 12 REQ-5), so a dead worker never leaves
+// a job interrupted forever. The count is the expired leases only.
 func (s *WorkerStore) ExpireLeases(ctx context.Context) (int, error) {
 	now := s.now()
 	tx, err := s.pool.Begin(ctx)
@@ -843,6 +850,18 @@ func (s *WorkerStore) ExpireLeases(ctx context.Context) (int, error) {
 			return 0, err
 		}
 	}
+	failed, err := q.FailStaleInterruptedWorkerJobs(ctx, sqlc.FailStaleInterruptedWorkerJobsParams{
+		Now: ts(now), Cutoff: ts(now.Add(-behavior.WorkerResumeWindow)), MaxRows: staleInterruptedBatch,
+	})
+	if err != nil {
+		return 0, err
+	}
+	for _, r := range failed {
+		kind := behavior.WorkerEventResultPrefix + behavior.WorkerStatusFailed
+		if err := q.InsertWorkerEvent(ctx, workerEvent(r.WorkspaceID, r.DeviceID, r.ID, kind, behavior.WorkerReasonLeaseExpired)); err != nil {
+			return 0, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err
 	}
@@ -852,6 +871,10 @@ func (s *WorkerStore) ExpireLeases(ctx context.Context) (int, error) {
 			change = behavior.WorkerChangeFinished
 		}
 		s.notify(ctx, change, r)
+	}
+	for _, r := range failed {
+		log.Printf("worker job %s: failed (%s) after the resume window, attempt %d", uuidString(r.ID), behavior.WorkerReasonLeaseExpired, r.Attempt)
+		s.notify(ctx, behavior.WorkerChangeFinished, r)
 	}
 	return len(rows), nil
 }

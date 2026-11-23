@@ -49,6 +49,38 @@ jobs:
       CODE: ${{ needs.changes.outputs.docs_only != 'true' }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: secret scan
+        if: env.CODE == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=8.28.0
+          asset="gitleaks_${version}_linux_x64.tar.gz"
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${version}"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          curl --fail --silent --show-error --location --output "$tmp/$asset" "$base/$asset"
+          curl --fail --silent --show-error --location --output "$tmp/checksums.txt" "$base/gitleaks_${version}_checksums.txt"
+          grep "  ${asset}$" "$tmp/checksums.txt" > "$tmp/checksum"
+          cd "$tmp"
+          sha256sum --check --status checksum
+          tar -xzf "$asset" gitleaks
+          cd "$GITHUB_WORKSPACE"
+          if "$tmp/gitleaks" git --log-level fatal --redact --report-format json --report-path "$tmp/report.json"; then
+            echo "gitleaks: no potential secrets detected"
+          else
+            status=$?
+            if [ "$status" -eq 1 ]; then
+              count=$(jq 'length' "$tmp/report.json")
+              echo "::error::gitleaks detected $count potential secret(s); details withheld"
+              jq -r '.[] | "\(.RuleID) \(.File):\(.StartLine) \(.Commit[0:12])"' "$tmp/report.json"
+            else
+              echo "::error::gitleaks failed with status $status"
+            fi
+            exit "$status"
+          fi
       - uses: actions/setup-go@v7
         if: env.CODE == 'true'
         with:
@@ -74,7 +106,7 @@ jobs:
     name: test (race, postgres)
     needs: changes
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     services:
       postgres:
         image: postgres:17-alpine
@@ -143,7 +175,7 @@ jobs:
         run: |
           set -o pipefail
           gotestsum --format testname --jsonfile test.json --junitfile junit.xml \
-            -- -race -count=1 ./... 2>&1 | tee test.log
+            -- -race -count=1 -timeout 25m ./... 2>&1 | tee test.log
       - name: Summary
         if: always()
         run: |

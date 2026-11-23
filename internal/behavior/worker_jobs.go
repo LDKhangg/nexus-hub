@@ -21,6 +21,12 @@ const (
 	WorkerTelemetryRetain   = 30 * 24 * time.Hour
 	WorkerMaxPayloadBytes   = 16 << 10
 	WorkerMaxSummaryRunes   = 2000
+	// WorkerMaxAttempts is the retry limit of one worker job (Phase 12
+	// REQ-5): a job leased this many times is never queued again; a Retry
+	// is refused with ErrWorkerRetryLimit. A job is retried only by the
+	// owner (Retry button or /retry), never automatically, because a local
+	// job's side effects (branch push, PR) may already have happened.
+	WorkerMaxAttempts = 5
 )
 
 // Worker job states.
@@ -81,6 +87,8 @@ const (
 	WorkerReasonOwnerCancel  = "owner_cancelled"
 	WorkerReasonLeaseExpired = "lease_expired"
 	WorkerReasonNoContact    = "no_contact"
+	// WorkerReasonAttemptsExhausted: a Retry refused at WorkerMaxAttempts.
+	WorkerReasonAttemptsExhausted = "attempts_exhausted"
 )
 
 // WorkerProgress is one bounded progress event: a fixed phase and counts,

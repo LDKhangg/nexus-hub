@@ -5,8 +5,10 @@
 #   sudo /opt/nexus-hub/bin/deploy.sh /opt/nexus-hub/incoming/nexus-hub-<sha>.tar.gz <sha256>
 #
 # Steps: verify the checksum, extract to /opt/nexus-hub/releases/<sha>, run the
-# goose migrations, switch /opt/nexus-hub/current atomically, restart the unit,
-# health-check it, and roll the symlink back on failure.
+# goose migrations, switch /opt/nexus-hub/current atomically, install the
+# release's systemd unit when it differs from the installed one (keeping the
+# replaced unit as $UNIT_FILE.prev), restart the unit, health-check it, and
+# roll the symlink (and the unit) back on failure.
 #
 # Migrations are forward-only: a failed health check rolls back the binary
 # (the symlink), never the schema. Every migration must stay compatible with
@@ -23,6 +25,9 @@ readonly RELEASES=$ROOT/releases
 readonly CURRENT=$ROOT/current
 readonly ENV_FILE=/etc/nexus-hub/env
 readonly UNIT=nexus-hub
+readonly UNIT_FILE=/etc/systemd/system/$UNIT.service
+readonly UNIT_FILE_PREV=$UNIT_FILE.prev
+readonly UNIT_SRC=deploy/vps/nexus-hub.service
 readonly SERVICE_USER=nexus
 readonly HEALTH_HOST=127.0.0.1
 readonly HEALTH_PORT=8080
@@ -114,6 +119,68 @@ switch_to() {
   mv -Tf -- "$CURRENT.new" "$CURRENT"
 }
 
+# install_unit <release dir> [save]: install the unit file the release ships
+# when it differs from $UNIT_FILE (root:root 0644, temp file plus rename, so
+# systemd never reads a half-written unit), then reload systemd. With "save",
+# the installed unit is first copied to $UNIT_FILE_PREV (same atomic way), so
+# restore_unit_prev can put it back; only the forward install saves, so a
+# rollback never overwrites the pre-deploy copy. Returns 0 when installed or
+# unchanged, 2 when the release ships no unit file (the installed one is kept),
+# 1 on error. Errors are returned, not fatal, so a rollback still restarts the
+# previous binary.
+install_unit() {
+  local src=$1/$UNIT_SRC save=${2:-} tmp
+  if [[ ! -f $src || -L $src ]]; then
+    log "release ${1##*/} ships no unit file"
+    return 2
+  fi
+  if [[ -f $UNIT_FILE ]] && cmp -s -- "$src" "$UNIT_FILE"; then
+    return 0
+  fi
+  if [[ $save == save && -f $UNIT_FILE ]]; then
+    tmp=$(mktemp "${UNIT_FILE%/*}/.$UNIT.service.XXXXXX") || return 1
+    if ! install -o root -g root -m 0644 -T -- "$UNIT_FILE" "$tmp" || ! mv -Tf -- "$tmp" "$UNIT_FILE_PREV"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+  fi
+  tmp=$(mktemp "${UNIT_FILE%/*}/.$UNIT.service.XXXXXX") || return 1
+  if ! install -o root -g root -m 0644 -T -- "$src" "$tmp" || ! mv -Tf -- "$tmp" "$UNIT_FILE"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  systemctl daemon-reload || return 1
+  log "installed $UNIT_FILE from release ${1##*/}; systemd reloaded"
+}
+
+# restore_unit_prev: put back the unit this deploy replaced, if it replaced
+# one (atomic rename within the directory), and reload systemd. A no-op when
+# there is no $UNIT_FILE_PREV. systemd ignores the .prev name: it has no unit
+# type suffix.
+restore_unit_prev() {
+  [[ -f $UNIT_FILE_PREV && ! -L $UNIT_FILE_PREV ]] || return 0
+  if ! mv -Tf -- "$UNIT_FILE_PREV" "$UNIT_FILE"; then
+    log "could not restore $UNIT_FILE from $UNIT_FILE_PREV"
+    return 1
+  fi
+  if ! systemctl daemon-reload; then
+    log "restored $UNIT_FILE from $UNIT_FILE_PREV but systemd reload failed"
+    return 1
+  fi
+  log "restored the previous $UNIT_FILE; systemd reloaded"
+}
+
+# rollback_unit <release dir>: reinstall the unit of the release rolled back
+# to; when it ships none or the install fails, restore the pre-deploy unit.
+rollback_unit() {
+  local rc=0
+  install_unit "$1" || rc=$?
+  if ((rc != 0)); then
+    ((rc == 2)) || log "could not reinstall the unit of ${1##*/}"
+    restore_unit_prev || log "keeping $UNIT_FILE as it is"
+  fi
+}
+
 healthy() {
   local deadline=$((SECONDS + HEALTH_TIMEOUT))
   while ((SECONDS < deadline)); do
@@ -126,16 +193,35 @@ healthy() {
   return 1
 }
 
+# A .prev left by an earlier deploy is stale: only the unit this deploy
+# replaces may be restored.
+rm -f -- "$UNIT_FILE_PREV"
 switch_to "$release"
+rc=0
+install_unit "$release" save || rc=$?
+if ((rc != 0)); then
+  if ((rc != 2)); then
+    if [[ -n $previous && -d $previous && $previous != "$release" ]]; then
+      switch_to "$previous"
+      log "rolled back current -> $previous"
+    fi
+    restore_unit_prev || log "keeping $UNIT_FILE as it is"
+    die "could not install $UNIT_FILE; $UNIT was not restarted"
+  fi
+  log "keeping $UNIT_FILE"
+fi
 log "current -> $release; restarting $UNIT"
-systemctl restart "$UNIT"
+# Not fatal: a failed restart falls through to the health check, which then
+# fails and rolls back.
+systemctl restart "$UNIT" || log "restart of $UNIT failed"
 
 if ! healthy; then
   log "health check failed after ${HEALTH_TIMEOUT}s"
   if [[ -n $previous && -d $previous && $previous != "$release" ]]; then
     switch_to "$previous"
+    rollback_unit "$previous"
     log "rolled back current -> $previous; restarting $UNIT (migrations are not rolled back)"
-    systemctl restart "$UNIT" || true
+    systemctl restart "$UNIT" || log "restart of $UNIT failed after the rollback"
   else
     log "no previous release to roll back to"
   fi
