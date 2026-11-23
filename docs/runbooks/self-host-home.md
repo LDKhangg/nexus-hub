@@ -914,6 +914,7 @@ Production git runs inside `bubblewrap`, with `git_sandbox=true` and
 `dnf install bubblewrap`. Confirm `sysctl user.max_user_namespaces` is greater
 than zero before restarting the service. Keep `git_sandbox=false` only for a
 non-production development box; startup logs a warning when it is disabled.
+The unit must allow `AF_NETLINK` for bwrap loopback setup; manually install the new `deploy.sh` once per `deploy/vps/README.md` §upgrade so later deploys install the updated unit.
 
 After restart, `nh status` should work and the journal should contain
 `git sandbox: ready`. `sandbox_unavailable` means the binary validation,
