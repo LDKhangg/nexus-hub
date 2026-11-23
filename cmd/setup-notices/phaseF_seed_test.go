@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"reflect"
 	"regexp"
 	"sort"
@@ -28,6 +30,8 @@ func TestValidateDemoDatabaseURLAllowsOnlyLocalDevelopmentDatabases(t *testing.T
 		"postgres://demo:fake@localhost:5432/nexus_dev?sslmode=disable",
 		"postgres://demo:fake@127.0.0.1:5432/nexus_test?sslmode=disable",
 		"postgres://demo:fake@[::1]:5432/nexus_dev?sslmode=disable",
+		"postgres://demo:fake@localhost:5432,127.0.0.1:5433/nexus_test?sslmode=disable",
+		"postgres://demo:fake@localhost:5432/nexus_test?sslmode=prefer",
 	} {
 		cfg, err := validateDemoDatabaseURL(raw)
 		if err != nil {
@@ -53,7 +57,7 @@ func TestDemoSeedRejectsUnsafeDatabaseURLsBeforeOutput(t *testing.T) {
 		{"production name", "postgres://demo:fake@localhost/nexus", "demo seed requires a database name ending in _dev or _test"},
 		{"unix socket", "postgres://demo:fake@localhost/nexus_test?host=%2Fvar%2Frun%2Fpostgresql", "demo seed requires a loopback database host"},
 		{"query host override", "postgres://demo:fake@localhost/nexus_test?host=db.example.invalid", "demo seed requires a loopback database host"},
-		{"multiple hosts", "postgres://demo:fake@localhost:5432,127.0.0.1:5433/nexus_test", "demo seed does not allow fallback database hosts"},
+		{"remote fallback", "postgres://demo:fake@localhost:5432,db.example.invalid:5433/nexus_test", "demo seed requires a loopback database host"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -71,6 +75,33 @@ func TestDemoSeedRejectsUnsafeDatabaseURLsBeforeOutput(t *testing.T) {
 				t.Fatal("refusal exposed the database URL or wrote command output")
 			}
 		})
+	}
+}
+
+// TC-Fb-13 (REQ-8): R1 regression.
+func TestDemoSeedGuardRejectsRemoteResolvedAddressBeforeDial(t *testing.T) {
+	config, err := pgxpool.ParseConfig("postgres://demo:fake@localhost:5432/nexus_test?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolverCalls := 0
+	dialCalled := false
+	config.ConnConfig.LookupFunc = func(context.Context, string) ([]string, error) {
+		resolverCalls++
+		return []string{"203.0.113.10"}, nil
+	}
+	config.ConnConfig.DialFunc = func(context.Context, string, string) (net.Conn, error) {
+		dialCalled = true
+		return nil, errors.New("unexpected dial")
+	}
+	guardDemoSeedDial(config)
+
+	_, err = config.ConnConfig.LookupFunc(context.Background(), "localhost")
+	if err == nil || err.Error() != "demo seed requires a loopback database host" {
+		t.Fatalf("remote DNS result error = %v", err)
+	}
+	if resolverCalls != 1 || dialCalled {
+		t.Fatalf("resolver calls = %d, dial called = %t", resolverCalls, dialCalled)
 	}
 }
 
@@ -171,6 +202,99 @@ func TestDemoSeedCreatesSafeIdempotentFixtureInOldestWorkspace(t *testing.T) {
 		if !strings.Contains(configs, want) {
 			t.Errorf("seeded integration config lacks fake reference %s", want)
 		}
+	}
+}
+
+// TC-Fb-14, TC-Fb-15 (REQ-8): R3 regressions.
+func TestDemoSeedRejectsForeignRowsWithoutChangingAnything(t *testing.T) {
+	t.Run("enabled behavior", func(t *testing.T) {
+		ctx, pool := setupDB(t)
+		workspaceID := uuid.New()
+		if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,display_name) VALUES($1,'Existing')`, workspaceID); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { cleanupDemoSeedRows(t, pool, workspaceID) })
+		if _, err := pool.Exec(ctx, `INSERT INTO behaviors(workspace_id,name,status,draft,draft_source)
+			VALUES($1,'demo-notice','enabled','{"foreign":true}','foreign source')`, workspaceID); err != nil {
+			t.Fatal(err)
+		}
+
+		assertSeedConflictRollsBack(t, ctx, pool)
+		var status, source string
+		var draft string
+		if err := pool.QueryRow(ctx, `SELECT status,draft::text,draft_source FROM behaviors
+			WHERE workspace_id=$1 AND name='demo-notice'`, workspaceID).Scan(&status, &draft, &source); err != nil {
+			t.Fatal(err)
+		}
+		if status != "enabled" || draft != `{"foreign": true}` || source != "foreign source" {
+			t.Fatalf("foreign behavior changed: status=%q draft=%q source=%q", status, draft, source)
+		}
+		assertTableCount(t, ctx, pool, "integrations", 0)
+		assertTableCount(t, ctx, pool, "contacts", 0)
+		assertTableCount(t, ctx, pool, "contact_accounts", 0)
+	})
+
+	t.Run("account bound to another contact", func(t *testing.T) {
+		ctx, pool := setupDB(t)
+		workspaceID, foreignContactID := uuid.New(), uuid.New()
+		if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,display_name) VALUES($1,'Existing')`, workspaceID); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { cleanupDemoSeedRows(t, pool, workspaceID) })
+		if _, err := pool.Exec(ctx, `INSERT INTO contacts(id,workspace_id,display_name,note) VALUES($1,$2,'Foreign','keep')`, foreignContactID, workspaceID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO contact_accounts(id,workspace_id,contact_id,platform,external_id,platform_name,source)
+			VALUES($1,$2,$3,'clickup','demo-alice','Foreign Account','manual')`, uuid.New(), workspaceID, foreignContactID); err != nil {
+			t.Fatal(err)
+		}
+
+		assertSeedConflictRollsBack(t, ctx, pool)
+		var gotContactID uuid.UUID
+		if err := pool.QueryRow(ctx, `SELECT contact_id FROM contact_accounts
+			WHERE workspace_id=$1 AND platform='clickup' AND external_id='demo-alice'`, workspaceID).Scan(&gotContactID); err != nil {
+			t.Fatal(err)
+		}
+		if gotContactID != foreignContactID {
+			t.Fatalf("foreign account rebound to %s", gotContactID)
+		}
+		assertTableCount(t, ctx, pool, "integrations", 0)
+		assertTableCount(t, ctx, pool, "contacts", 1)
+		assertTableCount(t, ctx, pool, "contact_accounts", 1)
+		assertTableCount(t, ctx, pool, "behaviors", 0)
+	})
+}
+
+func assertSeedConflictRollsBack(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	var out bytes.Buffer
+	err := seedCommand(ctx, pool, []string{"demo"}, &out)
+	if !errors.Is(err, errDemoSeedConflict) || err.Error() != "demo seed conflicts with existing data" {
+		t.Fatalf("seed conflict error = %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("conflicting seed wrote output: %q", out.String())
+	}
+}
+
+func assertTableCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table string, want int) {
+	t.Helper()
+	var got int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&got); err != nil || got != want {
+		t.Fatalf("%s count = %d, want %d: %v", table, got, want, err)
+	}
+}
+
+// TC-Fb-16 (REQ-8): D2 regression.
+func TestDemoSeedFailureKeepsPublicMessageAndWrappedCause(t *testing.T) {
+	ctx, pool := setupDB(t)
+	pool.Close()
+	err := seedCommand(ctx, pool, []string{"demo"}, &bytes.Buffer{})
+	if err == nil || err.Error() != "demo seed failed" {
+		t.Fatalf("closed-pool seed error = %v", err)
+	}
+	if errors.Unwrap(err) == nil {
+		t.Fatal("demo seed failure does not wrap its cause")
 	}
 }
 

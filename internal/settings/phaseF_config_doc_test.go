@@ -30,6 +30,7 @@ func TestConfigurationDocCheckerRejectsDriftAndDuplicates(t *testing.T) {
 	script := mustReadFile(t, filepath.Join(root, "scripts/check-config-doc.sh"))
 	settingRow := markdownRow(document, "triage_model")
 	environmentRow := markdownRow(document, "DATABASE_URL")
+	environmentSource := configDocEnvironmentSource(t, document)
 	mutations := []struct {
 		name     string
 		settings string
@@ -40,16 +41,37 @@ func TestConfigurationDocCheckerRejectsDriftAndDuplicates(t *testing.T) {
 		{"duplicate setting", settingsSource, strings.Replace(document, settingRow, settingRow+settingRow, 1)},
 		{"missing environment variable", settingsSource, strings.Replace(document, environmentRow, "", 1)},
 		{"extra environment variable", settingsSource, strings.Replace(document, "## Runtime settings", "| `NEXUS_UNUSED_TEST_VARIABLE` | No | Test drift. | empty |\n\n## Runtime settings", 1)},
+		{"duplicate environment variable", settingsSource, strings.Replace(document, environmentRow, environmentRow+environmentRow, 1)},
 	}
 	for _, mutation := range mutations {
 		t.Run(mutation.name, func(t *testing.T) {
 			temp := t.TempDir()
 			writeTestFile(t, filepath.Join(temp, "internal/settings/settings.go"), mutation.settings, 0o600)
+			writeTestFile(t, filepath.Join(temp, "internal/config/config.go"), environmentSource, 0o600)
 			writeTestFile(t, filepath.Join(temp, "docs/configuration.md"), mutation.doc, 0o600)
 			writeTestFile(t, filepath.Join(temp, "scripts/check-config-doc.sh"), script, 0o700)
 			runConfigDocCheck(t, temp, false)
 		})
 	}
+}
+
+func configDocEnvironmentSource(t *testing.T, document string) string {
+	t.Helper()
+	rows := parseMarkdownTable(t, document, "## Process environment", "## Runtime settings", 4)
+	names := make([]string, 0, len(rows))
+	for name := range rows {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var source strings.Builder
+	source.WriteString("package config\n\nimport \"os\"\n\nfunc readEnvironment() {\n")
+	for _, name := range names {
+		source.WriteString("\t_ = os.Getenv(\"")
+		source.WriteString(name)
+		source.WriteString("\")\n")
+	}
+	source.WriteString("}\n")
+	return source.String()
 }
 
 func runConfigDocCheck(t *testing.T, root string, wantSuccess bool) {

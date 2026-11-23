@@ -23,6 +23,7 @@ func TestReadmeLocalRunUsesDispatchedCLICommandsAndJSONLogJourney(t *testing.T) 
 		t.Fatal("README local run section is missing")
 	}
 	section := readme[start:end]
+	normalizedSection := strings.Join(strings.Fields(section), " ")
 	commandPattern := regexp.MustCompile(`(?:bin/)?nh\s+([a-z][a-z-]*)`)
 	commands := commandPattern.FindAllStringSubmatch(section, -1)
 	if len(commands) == 0 {
@@ -34,7 +35,7 @@ func TestReadmeLocalRunUsesDispatchedCLICommandsAndJSONLogJourney(t *testing.T) 
 		}
 	}
 	for _, required := range []string{"bin/nh seed demo", "webhook events stored", "no production fake Telegram provider"} {
-		if !strings.Contains(section, required) {
+		if !strings.Contains(normalizedSection, required) {
 			t.Errorf("README local journey lacks %q", required)
 		}
 	}
