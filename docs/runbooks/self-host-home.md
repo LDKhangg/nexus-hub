@@ -6,6 +6,9 @@ Phase 1 notices, the Phase 2 agent and Phase 3 behaviors with Telegram commands,
 (section 9) PR auto-approve from ClickUp Chat DMs and (section 10) Telegram
 reports when someone tags you in ClickUp.
 
+See `docs/configuration.md` for every environment variable and runtime setting,
+including defaults, limits, credential handling and migration order.
+
 Phase 3 is merged with test debt (`docs/product/test-debt/phase3-behavior-engine.md`).
 Keep every behavior on `dry_run: true`: then nothing is written to ClickUp until
 you press "Đăng" or confirm.
