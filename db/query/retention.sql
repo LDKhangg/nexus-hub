@@ -1,36 +1,42 @@
--- name: DeleteRetentionOutboundActions :execrows
+-- name: PickRetentionOutboundActions :many
 WITH picked AS MATERIALIZED (
     SELECT o.id
     FROM outbound_actions o
     WHERE o.status IN ('sent', 'failed')
       AND o.updated_at < sqlc.arg(cutoff)
       AND (sqlc.narg(workspace_id)::uuid IS NULL OR o.workspace_id = sqlc.narg(workspace_id))
+      AND NOT (o.id = ANY(sqlc.arg(skip_ids)::bigint[]))
+      AND (sqlc.narg(only_id)::bigint IS NULL OR o.id = sqlc.narg(only_id))
     ORDER BY o.updated_at, o.id
     LIMIT sqlc.arg(batch_size)
     FOR UPDATE SKIP LOCKED
 )
-DELETE FROM outbound_actions o USING picked p WHERE o.id = p.id;
+SELECT id FROM picked;
 
--- name: DeleteRetentionNotificationOutbox :execrows
+-- name: PickRetentionNotificationOutbox :many
 WITH picked AS MATERIALIZED (
     SELECT o.id
     FROM notification_outbox o
     WHERE o.status IN ('sent', 'failed')
       AND o.updated_at < sqlc.arg(cutoff)
       AND (sqlc.narg(workspace_id)::uuid IS NULL OR o.workspace_id = sqlc.narg(workspace_id))
+      AND NOT (o.id = ANY(sqlc.arg(skip_ids)::bigint[]))
+      AND (sqlc.narg(only_id)::bigint IS NULL OR o.id = sqlc.narg(only_id))
     ORDER BY o.updated_at, o.id
     LIMIT sqlc.arg(batch_size)
     FOR UPDATE SKIP LOCKED
 )
-DELETE FROM notification_outbox o USING picked p WHERE o.id = p.id;
+SELECT id FROM picked;
 
--- name: DeleteRetentionMessageLogs :execrows
+-- name: PickRetentionMessageLogs :many
 WITH picked AS MATERIALIZED (
     SELECT m.id
     FROM message_logs m
     JOIN hub_threads t ON t.id = m.thread_id
     WHERE m.created_at < sqlc.arg(cutoff)
       AND (sqlc.narg(workspace_id)::uuid IS NULL OR t.workspace_id = sqlc.narg(workspace_id))
+      AND NOT (m.id = ANY(sqlc.arg(skip_ids)::bigint[]))
+      AND (sqlc.narg(only_id)::bigint IS NULL OR m.id = sqlc.narg(only_id))
       AND t.summary_through_message_id IS DISTINCT FROM m.id
       AND NOT EXISTS (SELECT 1 FROM notification_outbox o WHERE o.message_id = m.id)
       AND NOT EXISTS (
@@ -41,14 +47,16 @@ WITH picked AS MATERIALIZED (
     LIMIT sqlc.arg(batch_size)
     FOR UPDATE OF m SKIP LOCKED
 )
-DELETE FROM message_logs m USING picked p WHERE m.id = p.id;
+SELECT id FROM picked;
 
--- name: DeleteRetentionPolicyDecisions :execrows
+-- name: PickRetentionPolicyDecisions :many
 WITH picked AS MATERIALIZED (
     SELECT p.id
     FROM policy_decisions p
     WHERE p.created_at < sqlc.arg(cutoff)
       AND (sqlc.narg(workspace_id)::uuid IS NULL OR p.workspace_id = sqlc.narg(workspace_id))
+      AND NOT (p.id = ANY(sqlc.arg(skip_ids)::bigint[]))
+      AND (sqlc.narg(only_id)::bigint IS NULL OR p.id = sqlc.narg(only_id))
       AND NOT EXISTS (
           SELECT 1 FROM workflow_executions e
           WHERE e.id = p.execution_id AND e.state NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
@@ -59,15 +67,17 @@ WITH picked AS MATERIALIZED (
     LIMIT sqlc.arg(batch_size)
     FOR UPDATE OF p SKIP LOCKED
 )
-DELETE FROM policy_decisions p USING picked x WHERE p.id = x.id;
+SELECT id FROM picked;
 
--- name: DeleteRetentionToolRuns :execrows
+-- name: PickRetentionToolRuns :many
 WITH picked AS MATERIALIZED (
     SELECT r.id
     FROM tool_runs r
     WHERE r.created_at < sqlc.arg(cutoff)
       AND r.status <> 'started'
       AND (sqlc.narg(workspace_id)::uuid IS NULL OR r.workspace_id = sqlc.narg(workspace_id))
+      AND NOT (r.id = ANY(sqlc.arg(skip_ids)::bigint[]))
+      AND (sqlc.narg(only_id)::bigint IS NULL OR r.id = sqlc.narg(only_id))
       AND NOT EXISTS (SELECT 1 FROM policy_decisions p WHERE p.tool_run_id = r.id)
       AND NOT EXISTS (
           SELECT 1 FROM agent_jobs a
@@ -89,7 +99,7 @@ WITH picked AS MATERIALIZED (
     LIMIT sqlc.arg(batch_size)
     FOR UPDATE OF r SKIP LOCKED
 )
-DELETE FROM tool_runs r USING picked p WHERE r.id = p.id;
+SELECT id FROM picked;
 
 -- name: PickRetentionWorkflowExecutions :many
 WITH picked AS MATERIALIZED (
@@ -99,6 +109,7 @@ WITH picked AS MATERIALIZED (
       AND e.finished_at < sqlc.arg(cutoff)
       AND (sqlc.narg(workspace_id)::uuid IS NULL OR e.workspace_id = sqlc.narg(workspace_id))
       AND NOT (e.id = ANY(sqlc.arg(skip_ids)::bigint[]))
+      AND (sqlc.narg(only_id)::bigint IS NULL OR e.id = sqlc.narg(only_id))
       AND NOT EXISTS (SELECT 1 FROM workflow_executions c WHERE c.parent_execution_id = e.id)
       AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.execution_id = e.id AND a.decision IS NULL)
       AND NOT EXISTS (SELECT 1 FROM workflow_waits w WHERE w.execution_id = e.id AND w.closed_at IS NULL)

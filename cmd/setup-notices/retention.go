@@ -22,7 +22,7 @@ func retentionCommand(ctx context.Context, pool *pgxpool.Pool, args []string, ou
 	}
 	fs := commandFlags("retention " + args[0])
 	workspaceID := fs.String("workspace-id", "", "limit retention to one workspace")
-	dryRun := fs.Bool("dry-run", false, "count safe candidates without deleting")
+	dryRun := fs.Bool("dry-run", false, "simulate deletions; exact only below five batches per group")
 	if fs.Parse(args[1:]) != nil || fs.NArg() != 0 {
 		return errors.New("invalid retention arguments")
 	}
@@ -60,7 +60,7 @@ func retentionCommand(ctx context.Context, pool *pgxpool.Pool, args []string, ou
 		fmt.Fprintf(out, "policy_decisions_days=%d\n", rules.PolicyDecisionsDays)
 		fmt.Fprintf(out, "workflow_days=%d\n", rules.WorkflowDays)
 		fmt.Fprintf(out, "outbound_days=%d\n", rules.OutboundDays)
-		fmt.Fprintln(out, "candidates now (dry-run gives exact counts)")
+		fmt.Fprintln(out, "candidates now (dry-run is exact only below five batches per group)")
 		writeRetentionCounts(out, counts)
 		return nil
 	}
@@ -85,6 +85,9 @@ func retentionCommand(ctx context.Context, pool *pgxpool.Pool, args []string, ou
 
 func writeRetentionResult(out io.Writer, result behavior.RetentionResult) {
 	writeRetentionCounts(out, result.Counts)
+	if result.Partial {
+		fmt.Fprintln(out, "status=partial (cap reached)")
+	}
 	for _, issue := range result.Issues {
 		fmt.Fprintf(out, "%s_code=%s\n", issue.Table, issue.Code)
 		fmt.Fprintf(out, "%s_issue_count=%d\n", issue.Table, issue.Count)

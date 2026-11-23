@@ -92,13 +92,15 @@ func (q *Queries) CountRetentionCandidates(ctx context.Context, arg CountRetenti
 	return i, err
 }
 
-const deleteRetentionMessageLogs = `-- name: DeleteRetentionMessageLogs :execrows
+const pickRetentionMessageLogs = `-- name: PickRetentionMessageLogs :many
 WITH picked AS MATERIALIZED (
     SELECT m.id
     FROM message_logs m
     JOIN hub_threads t ON t.id = m.thread_id
     WHERE m.created_at < $1
       AND ($2::uuid IS NULL OR t.workspace_id = $2)
+      AND NOT (m.id = ANY($3::bigint[]))
+      AND ($4::bigint IS NULL OR m.id = $4)
       AND t.summary_through_message_id IS DISTINCT FROM m.id
       AND NOT EXISTS (SELECT 1 FROM notification_outbox o WHERE o.message_id = m.id)
       AND NOT EXISTS (
@@ -106,88 +108,154 @@ WITH picked AS MATERIALIZED (
           WHERE a.thread_id = t.id AND a.status IN ('pending', 'processing')
       )
     ORDER BY m.created_at, m.id
-    LIMIT $3
+    LIMIT $5
     FOR UPDATE OF m SKIP LOCKED
 )
-DELETE FROM message_logs m USING picked p WHERE m.id = p.id
+SELECT id FROM picked
 `
 
-type DeleteRetentionMessageLogsParams struct {
+type PickRetentionMessageLogsParams struct {
 	Cutoff      pgtype.Timestamptz
 	WorkspaceID pgtype.UUID
+	SkipIds     []int64
+	OnlyID      pgtype.Int8
 	BatchSize   int32
 }
 
-func (q *Queries) DeleteRetentionMessageLogs(ctx context.Context, arg DeleteRetentionMessageLogsParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteRetentionMessageLogs, arg.Cutoff, arg.WorkspaceID, arg.BatchSize)
+func (q *Queries) PickRetentionMessageLogs(ctx context.Context, arg PickRetentionMessageLogsParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, pickRetentionMessageLogs,
+		arg.Cutoff,
+		arg.WorkspaceID,
+		arg.SkipIds,
+		arg.OnlyID,
+		arg.BatchSize,
+	)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return result.RowsAffected(), nil
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
-const deleteRetentionNotificationOutbox = `-- name: DeleteRetentionNotificationOutbox :execrows
+const pickRetentionNotificationOutbox = `-- name: PickRetentionNotificationOutbox :many
 WITH picked AS MATERIALIZED (
     SELECT o.id
     FROM notification_outbox o
     WHERE o.status IN ('sent', 'failed')
       AND o.updated_at < $1
       AND ($2::uuid IS NULL OR o.workspace_id = $2)
+      AND NOT (o.id = ANY($3::bigint[]))
+      AND ($4::bigint IS NULL OR o.id = $4)
     ORDER BY o.updated_at, o.id
-    LIMIT $3
+    LIMIT $5
     FOR UPDATE SKIP LOCKED
 )
-DELETE FROM notification_outbox o USING picked p WHERE o.id = p.id
+SELECT id FROM picked
 `
 
-type DeleteRetentionNotificationOutboxParams struct {
+type PickRetentionNotificationOutboxParams struct {
 	Cutoff      pgtype.Timestamptz
 	WorkspaceID pgtype.UUID
+	SkipIds     []int64
+	OnlyID      pgtype.Int8
 	BatchSize   int32
 }
 
-func (q *Queries) DeleteRetentionNotificationOutbox(ctx context.Context, arg DeleteRetentionNotificationOutboxParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteRetentionNotificationOutbox, arg.Cutoff, arg.WorkspaceID, arg.BatchSize)
+func (q *Queries) PickRetentionNotificationOutbox(ctx context.Context, arg PickRetentionNotificationOutboxParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, pickRetentionNotificationOutbox,
+		arg.Cutoff,
+		arg.WorkspaceID,
+		arg.SkipIds,
+		arg.OnlyID,
+		arg.BatchSize,
+	)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return result.RowsAffected(), nil
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
-const deleteRetentionOutboundActions = `-- name: DeleteRetentionOutboundActions :execrows
+const pickRetentionOutboundActions = `-- name: PickRetentionOutboundActions :many
 WITH picked AS MATERIALIZED (
     SELECT o.id
     FROM outbound_actions o
     WHERE o.status IN ('sent', 'failed')
       AND o.updated_at < $1
       AND ($2::uuid IS NULL OR o.workspace_id = $2)
+      AND NOT (o.id = ANY($3::bigint[]))
+      AND ($4::bigint IS NULL OR o.id = $4)
     ORDER BY o.updated_at, o.id
-    LIMIT $3
+    LIMIT $5
     FOR UPDATE SKIP LOCKED
 )
-DELETE FROM outbound_actions o USING picked p WHERE o.id = p.id
+SELECT id FROM picked
 `
 
-type DeleteRetentionOutboundActionsParams struct {
+type PickRetentionOutboundActionsParams struct {
 	Cutoff      pgtype.Timestamptz
 	WorkspaceID pgtype.UUID
+	SkipIds     []int64
+	OnlyID      pgtype.Int8
 	BatchSize   int32
 }
 
-func (q *Queries) DeleteRetentionOutboundActions(ctx context.Context, arg DeleteRetentionOutboundActionsParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteRetentionOutboundActions, arg.Cutoff, arg.WorkspaceID, arg.BatchSize)
+func (q *Queries) PickRetentionOutboundActions(ctx context.Context, arg PickRetentionOutboundActionsParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, pickRetentionOutboundActions,
+		arg.Cutoff,
+		arg.WorkspaceID,
+		arg.SkipIds,
+		arg.OnlyID,
+		arg.BatchSize,
+	)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return result.RowsAffected(), nil
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
-const deleteRetentionPolicyDecisions = `-- name: DeleteRetentionPolicyDecisions :execrows
+const pickRetentionPolicyDecisions = `-- name: PickRetentionPolicyDecisions :many
 WITH picked AS MATERIALIZED (
     SELECT p.id
     FROM policy_decisions p
     WHERE p.created_at < $1
       AND ($2::uuid IS NULL OR p.workspace_id = $2)
+      AND NOT (p.id = ANY($3::bigint[]))
+      AND ($4::bigint IS NULL OR p.id = $4)
       AND NOT EXISTS (
           SELECT 1 FROM workflow_executions e
           WHERE e.id = p.execution_id AND e.state NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
@@ -195,33 +263,55 @@ WITH picked AS MATERIALIZED (
       AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.id = p.approval_id AND a.decision IS NULL)
       AND NOT EXISTS (SELECT 1 FROM tool_runs r WHERE r.id = p.tool_run_id AND r.status = 'started')
     ORDER BY p.created_at, p.id
-    LIMIT $3
+    LIMIT $5
     FOR UPDATE OF p SKIP LOCKED
 )
-DELETE FROM policy_decisions p USING picked x WHERE p.id = x.id
+SELECT id FROM picked
 `
 
-type DeleteRetentionPolicyDecisionsParams struct {
+type PickRetentionPolicyDecisionsParams struct {
 	Cutoff      pgtype.Timestamptz
 	WorkspaceID pgtype.UUID
+	SkipIds     []int64
+	OnlyID      pgtype.Int8
 	BatchSize   int32
 }
 
-func (q *Queries) DeleteRetentionPolicyDecisions(ctx context.Context, arg DeleteRetentionPolicyDecisionsParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteRetentionPolicyDecisions, arg.Cutoff, arg.WorkspaceID, arg.BatchSize)
+func (q *Queries) PickRetentionPolicyDecisions(ctx context.Context, arg PickRetentionPolicyDecisionsParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, pickRetentionPolicyDecisions,
+		arg.Cutoff,
+		arg.WorkspaceID,
+		arg.SkipIds,
+		arg.OnlyID,
+		arg.BatchSize,
+	)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return result.RowsAffected(), nil
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
-const deleteRetentionToolRuns = `-- name: DeleteRetentionToolRuns :execrows
+const pickRetentionToolRuns = `-- name: PickRetentionToolRuns :many
 WITH picked AS MATERIALIZED (
     SELECT r.id
     FROM tool_runs r
     WHERE r.created_at < $1
       AND r.status <> 'started'
       AND ($2::uuid IS NULL OR r.workspace_id = $2)
+      AND NOT (r.id = ANY($3::bigint[]))
+      AND ($4::bigint IS NULL OR r.id = $4)
       AND NOT EXISTS (SELECT 1 FROM policy_decisions p WHERE p.tool_run_id = r.id)
       AND NOT EXISTS (
           SELECT 1 FROM agent_jobs a
@@ -240,24 +330,44 @@ WITH picked AS MATERIALIZED (
           WHERE d.id = r.clickup_draft_id AND d.state IN ('pending', 'posting', 'failed')
       )
     ORDER BY r.created_at, r.id
-    LIMIT $3
+    LIMIT $5
     FOR UPDATE OF r SKIP LOCKED
 )
-DELETE FROM tool_runs r USING picked p WHERE r.id = p.id
+SELECT id FROM picked
 `
 
-type DeleteRetentionToolRunsParams struct {
+type PickRetentionToolRunsParams struct {
 	Cutoff      pgtype.Timestamptz
 	WorkspaceID pgtype.UUID
+	SkipIds     []int64
+	OnlyID      pgtype.Int8
 	BatchSize   int32
 }
 
-func (q *Queries) DeleteRetentionToolRuns(ctx context.Context, arg DeleteRetentionToolRunsParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteRetentionToolRuns, arg.Cutoff, arg.WorkspaceID, arg.BatchSize)
+func (q *Queries) PickRetentionToolRuns(ctx context.Context, arg PickRetentionToolRunsParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, pickRetentionToolRuns,
+		arg.Cutoff,
+		arg.WorkspaceID,
+		arg.SkipIds,
+		arg.OnlyID,
+		arg.BatchSize,
+	)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return result.RowsAffected(), nil
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const pickRetentionWorkflowExecutions = `-- name: PickRetentionWorkflowExecutions :many
@@ -268,6 +378,7 @@ WITH picked AS MATERIALIZED (
       AND e.finished_at < $1
       AND ($2::uuid IS NULL OR e.workspace_id = $2)
       AND NOT (e.id = ANY($3::bigint[]))
+      AND ($4::bigint IS NULL OR e.id = $4)
       AND NOT EXISTS (SELECT 1 FROM workflow_executions c WHERE c.parent_execution_id = e.id)
       AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.execution_id = e.id AND a.decision IS NULL)
       AND NOT EXISTS (SELECT 1 FROM workflow_waits w WHERE w.execution_id = e.id AND w.closed_at IS NULL)
@@ -298,7 +409,7 @@ WITH picked AS MATERIALIZED (
           WHERE w.execution_id = e.id AND w.state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
       )
     ORDER BY e.finished_at, e.id
-    LIMIT $4
+    LIMIT $5
     FOR UPDATE OF e SKIP LOCKED
 )
 SELECT id FROM picked
@@ -308,6 +419,7 @@ type PickRetentionWorkflowExecutionsParams struct {
 	Cutoff      pgtype.Timestamptz
 	WorkspaceID pgtype.UUID
 	SkipIds     []int64
+	OnlyID      pgtype.Int8
 	BatchSize   int32
 }
 
@@ -316,6 +428,7 @@ func (q *Queries) PickRetentionWorkflowExecutions(ctx context.Context, arg PickR
 		arg.Cutoff,
 		arg.WorkspaceID,
 		arg.SkipIds,
+		arg.OnlyID,
 		arg.BatchSize,
 	)
 	if err != nil {

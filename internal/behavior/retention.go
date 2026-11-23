@@ -29,8 +29,9 @@ type RetentionIssue struct {
 
 // RetentionResult contains table counts and recoverable constraint failures.
 type RetentionResult struct {
-	Counts map[string]int64
-	Issues []RetentionIssue
+	Counts  map[string]int64
+	Issues  []RetentionIssue
+	Partial bool
 }
 
 // RetentionStore counts and deletes configured old data.
