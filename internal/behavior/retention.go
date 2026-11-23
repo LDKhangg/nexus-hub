@@ -27,11 +27,20 @@ type RetentionIssue struct {
 	Count int64
 }
 
+// RetentionPartialReason identifies the bound that stopped a dry run.
+type RetentionPartialReason string
+
+const (
+	RetentionPartialCap      RetentionPartialReason = "cap"
+	RetentionPartialDeadline RetentionPartialReason = "deadline"
+)
+
 // RetentionResult contains table counts and recoverable constraint failures.
 type RetentionResult struct {
-	Counts  map[string]int64
-	Issues  []RetentionIssue
-	Partial bool
+	Counts        map[string]int64
+	Issues        []RetentionIssue
+	Partial       bool
+	PartialReason RetentionPartialReason
 }
 
 // RetentionStore counts and deletes configured old data.

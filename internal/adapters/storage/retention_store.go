@@ -100,6 +100,7 @@ func (s *RetentionStore) SweepRetentionDryRun(ctx context.Context, workspace str
 func dryRunResult(parentCtx, dryCtx context.Context, result behavior.RetentionResult, err error) (behavior.RetentionResult, error) {
 	if err != nil && errors.Is(dryCtx.Err(), context.DeadlineExceeded) && parentCtx.Err() == nil {
 		result.Partial = true
+		result.PartialReason = behavior.RetentionPartialDeadline
 		return result, nil
 	}
 	return result, err
@@ -217,6 +218,7 @@ func runRetentionGroup(ctx context.Context, result *behavior.RetentionResult, ta
 		}
 		if maxBatches > 0 && batchCount >= maxBatches {
 			result.Partial = true
+			result.PartialReason = behavior.RetentionPartialCap
 			return false, nil
 		}
 	}
