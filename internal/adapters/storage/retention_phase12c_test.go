@@ -289,6 +289,8 @@ func TestPhase12cRetentionForeignKeyIsolationAcrossGroups(t *testing.T) {
 	var toolIDs []int64
 	for i := range 3 {
 		executionID := p12bExec(e, workspaceA, version.ID, "retention:fk-tool:"+itoa(int64(i)))
+		mustExec(t, ctx, pool, `UPDATE jobs SET status='completed', updated_at=$2 WHERE execution_id=$1`, executionID, now.Add(-100*24*time.Hour))
+		mustExec(t, ctx, pool, `UPDATE workflow_executions SET state='COMPLETED', finished_at=$2 WHERE id=$1`, executionID, now.Add(-100*24*time.Hour))
 		var id int64
 		if err := pool.QueryRow(ctx, `INSERT INTO tool_runs(workspace_id,workflow_execution_id,step,tool,tier,idempotency_key,status,created_at)
 			VALUES($1,$2,$3,'local_test','read',$4,'ok',$5) RETURNING id`, workspaceA, executionID, i+1, "retention-fk-tool-"+itoa(int64(i)), now.Add(-100*24*time.Hour)).Scan(&id); err != nil {
