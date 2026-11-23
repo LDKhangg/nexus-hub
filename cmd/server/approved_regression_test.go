@@ -18,8 +18,8 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-// TC-27 (REQ-13): unavailable git disables code tools with a safe warning,
-// without breaking HTTP API-tool registration or requiring a master key.
+// TC-27 (REQ-13, superseded by REQ-14 fail-closed wiring): unavailable git
+// keeps code tools registered, but startup selects a safe unavailable runner.
 func TestApproved_MissingGitRegistryRemainsAvailable(t *testing.T) {
 	s := settings.Defaults()
 	s.GitPath = filepath.Join(t.TempDir(), "missing", "git")
@@ -35,10 +35,10 @@ func TestApproved_MissingGitRegistryRemainsAvailable(t *testing.T) {
 	if err != nil || reg == nil {
 		t.Fatal("missing optional git broke startup")
 	}
-	if reg.Get("git_sync") != nil || reg.Get("code_search") != nil || reg.Get("github_pr_view") == nil || reg.Get("clickup_get_task") == nil {
+	if reg.Get("git_sync") == nil || reg.Get("code_search") == nil || reg.Get("github_pr_view") == nil || reg.Get("clickup_get_task") == nil {
 		t.Error("missing git disabled wrong tools")
 	}
-	if !strings.Contains(logs.String(), "code and workspace tools disabled") {
+	if !strings.Contains(logs.String(), "sandbox_unavailable") {
 		t.Error("missing git produced no actionable warning")
 	}
 }
