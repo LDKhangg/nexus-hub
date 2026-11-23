@@ -41,6 +41,11 @@ func run(args []string, out io.Writer, lookup func(string) (string, bool)) error
 	if !ok || url == "" {
 		return errors.New("explicit DATABASE_URL is required")
 	}
+	if len(args) > 0 && args[0] == "seed" {
+		if err := validateDemoDatabaseURL(url); err != nil {
+			return err
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, url)
@@ -62,11 +67,13 @@ func commandFlags(name string) *flag.FlagSet {
 
 func runCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.Writer, lookup func(string) (string, bool)) error {
 	if len(args) == 0 {
-		return errors.New("usage: setup-notices init|bind-webhook|inspect|retry-failed|master-key|secret|migrate-secrets|settings|enable-agent|disable-agent|github-account|github-repo|github-check|behavior|telegram|trace|runs|profile|memory|llm|source|contact|report-prefs|report-template|workflow|execution|status|retention|assistant|worker|policy")
+		return errors.New("usage: setup-notices init|seed|bind-webhook|inspect|retry-failed|master-key|secret|migrate-secrets|settings|enable-agent|disable-agent|github-account|github-repo|github-check|behavior|telegram|trace|runs|profile|memory|llm|source|contact|report-prefs|report-template|workflow|execution|status|retention|assistant|worker|policy")
 	}
 	switch args[0] {
 	case "init":
 		return initNotices(ctx, pool, args[1:], out)
+	case "seed":
+		return seedCommand(ctx, pool, args[1:], out)
 	case "master-key":
 		return masterKeyInit(args[1:], out)
 	case "secret":
