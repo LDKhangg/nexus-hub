@@ -86,7 +86,7 @@ func retentionCommand(ctx context.Context, pool *pgxpool.Pool, args []string, ou
 func writeRetentionResult(out io.Writer, result behavior.RetentionResult) {
 	writeRetentionCounts(out, result.Counts)
 	if result.Partial {
-		fmt.Fprintln(out, "status=partial (cap reached)")
+		fmt.Fprintln(out, "status=partial (cap reached, more rows may remain)")
 	}
 	for _, issue := range result.Issues {
 		fmt.Fprintf(out, "%s_code=%s\n", issue.Table, issue.Code)

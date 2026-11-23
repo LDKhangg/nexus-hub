@@ -78,27 +78,27 @@ func (s *RetentionStore) SweepRetentionDryRun(ctx context.Context, workspace str
 	result := behavior.RetentionResult{Counts: map[string]int64{}}
 	tx, err := s.pool.BeginTx(dryCtx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
-		return dryRunResult(dryCtx, result, err)
+		return dryRunResult(ctx, dryCtx, result, err)
 	}
 	defer tx.Rollback(context.Background())
-	if _, err := tx.Exec(dryCtx, `SET LOCAL statement_timeout = '20s'`); err != nil {
-		return dryRunResult(dryCtx, result, err)
+	if _, err := tx.Exec(dryCtx, `SET LOCAL statement_timeout = '25s'`); err != nil {
+		return dryRunResult(ctx, dryCtx, result, err)
 	}
-	if _, err := tx.Exec(dryCtx, `SET LOCAL idle_in_transaction_session_timeout = '20s'`); err != nil {
-		return dryRunResult(dryCtx, result, err)
+	if _, err := tx.Exec(dryCtx, `SET LOCAL idle_in_transaction_session_timeout = '25s'`); err != nil {
+		return dryRunResult(ctx, dryCtx, result, err)
 	}
 	if _, err := tx.Exec(dryCtx, `SET LOCAL lock_timeout = '2s'`); err != nil {
-		return dryRunResult(dryCtx, result, err)
+		return dryRunResult(ctx, dryCtx, result, err)
 	}
 	result, err = s.sweepRetention(dryCtx, tx, workspace, rules, now, batch, maxDryRunBatchesPerGroup)
 	if err != nil && retentionLockTimeout(err) {
 		return behavior.RetentionResult{}, ErrRetentionBusy
 	}
-	return dryRunResult(dryCtx, result, err)
+	return dryRunResult(ctx, dryCtx, result, err)
 }
 
-func dryRunResult(ctx context.Context, result behavior.RetentionResult, err error) (behavior.RetentionResult, error) {
-	if err != nil && (errors.Is(ctx.Err(), context.DeadlineExceeded) || retentionQueryTimeout(err)) {
+func dryRunResult(parentCtx, dryCtx context.Context, result behavior.RetentionResult, err error) (behavior.RetentionResult, error) {
+	if err != nil && errors.Is(dryCtx.Err(), context.DeadlineExceeded) && parentCtx.Err() == nil {
 		result.Partial = true
 		return result, nil
 	}
@@ -182,10 +182,6 @@ func runRetentionGroup(ctx context.Context, result *behavior.RetentionResult, ta
 	skipIDs := make([]int64, 0)
 	batchCount := 0
 	for {
-		if maxBatches > 0 && batchCount >= maxBatches {
-			result.Partial = true
-			return false, nil
-		}
 		counts, issue, ids, err := fn(ctx, batch, skipIDs, nil)
 		if err != nil {
 			return false, err
@@ -217,6 +213,10 @@ func runRetentionGroup(ctx context.Context, result *behavior.RetentionResult, ta
 			}
 		}
 		if len(ids) < int(batch) {
+			return false, nil
+		}
+		if maxBatches > 0 && batchCount >= maxBatches {
+			result.Partial = true
 			return false, nil
 		}
 	}
@@ -285,11 +285,6 @@ func foreignKeyCode(err error) string {
 func retentionLockTimeout(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "55P03"
-}
-
-func retentionQueryTimeout(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && (pgErr.Code == "57014" || pgErr.Code == "25P03")
 }
 
 type workflowDelete struct {
