@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `executing-plans` for an assigned task. The role boundaries and sequential handoff process in `AGENTS.md` override generic implementation/TDD instructions. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** DRAFT 2026-11-23, waiting for the owner's approval. Every Lead call in §1.3 can be changed by the owner.
+**Status:** APPROVED 2026-11-23 by the owner in chat (answers to Q1–Q3, "qua phase tiếp theo"). Drafted 9bbff42. Every Lead call in §1.3 can still be changed by the owner.
 
 **Goal:** Anyone (the owner, an agent, a future maintainer) can run, observe and operate the hub without reading the code: logs are structured JSON with a correlation id that follows one webhook through the workflow; the hub answers `/healthz` and `/readyz`; one document lists every environment variable and setting; a fresh clone runs locally with fakes and demo data by following the README; CI also proves generated code is not stale. This is the last foundation step before Phase 13 (fresh install and real-service acceptance).
 
@@ -42,11 +42,11 @@
 - `docs/configuration.md`: every env var and setting key, default, range, who reads it.
 - `make dev` (or documented commands) brings up a local DB, migrations, `nh seed demo` demo data, and the hub with fake providers.
 
-### 1.2 Owner decisions needed
+### 1.2 Owner decisions (2026-11-23)
 
-- Q1 (logs): move all 56 files from `log` to `slog` call by call (bigger diff, richer fields), or **bridge** the standard `log` into the slog JSON handler and convert only the entry points and workflow/worker paths that need fields (Lead recommends the bridge plus targeted conversion).
-- Q2 (migrations at startup, DEP-004): keep the **documented deploy step** (`deploy.sh` runs goose before switching; Lead recommends) or embed migrations and apply them at startup.
-- Q3 (seed/demo data): include a dev-only `nh seed demo` command now (Lead recommends) or leave demo data to Phase 13.
+- Q1 (logs) — **decided: bridge plus targeted conversion.** Options were: move all 56 files from `log` to `slog` call by call (bigger diff, richer fields), or **bridge** the standard `log` into the slog JSON handler and convert only the entry points and workflow/worker paths that need fields (Lead recommends the bridge plus targeted conversion).
+- Q2 (migrations, DEP-004) — **decided: keep the documented deploy step.** Options were: keep the **documented deploy step** (`deploy.sh` runs goose before switching; Lead recommends) or embed migrations and apply them at startup.
+- Q3 (seed/demo data) — **decided: `nh seed demo` in Phase F.** Options were: include a dev-only `nh seed demo` command now (Lead recommends) or leave demo data to Phase 13.
 
 ### 1.3 Lead calls
 
