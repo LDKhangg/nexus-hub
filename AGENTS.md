@@ -102,7 +102,8 @@ the short SHA (and `latest` on develop). Deploying to the VPS is a later phase.
 
 - A change that touches only docs (`*.md`, `docs/**`, `LICENSE`, the whole
   branch against develop; see `scripts/ci-docs-only.sh`) runs only the doc
-  path check: no Go checks, no suite, no image, no deploy.
+  checks (doc paths and the configuration reference, both shell scripts):
+  no Go checks, no suite, no image, no deploy.
 - A develop merge whose tree equals an already green branch head reuses that
   test result instead of running the suite again.
 - CI is where the suite runs. The Tester writes tests and reports the CI
