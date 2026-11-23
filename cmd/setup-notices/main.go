@@ -41,14 +41,19 @@ func run(args []string, out io.Writer, lookup func(string) (string, bool)) error
 	if !ok || url == "" {
 		return errors.New("explicit DATABASE_URL is required")
 	}
-	if len(args) > 0 && args[0] == "seed" {
-		if err := validateDemoDatabaseURL(url); err != nil {
-			return err
-		}
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, url)
+	var pool *pgxpool.Pool
+	var err error
+	if len(args) > 0 && args[0] == "seed" {
+		poolConfig, validationErr := validateDemoDatabaseURL(url)
+		if validationErr != nil {
+			return validationErr
+		}
+		pool, err = pgxpool.NewWithConfig(ctx, poolConfig)
+	} else {
+		pool, err = pgxpool.New(ctx, url)
+	}
 	if err != nil {
 		return errors.New("invalid database configuration")
 	}

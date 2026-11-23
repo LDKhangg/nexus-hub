@@ -15,21 +15,24 @@ import (
 
 const demoWebhookSecret = "demo-webhook-secret-not-for-production"
 
-func validateDemoDatabaseURL(databaseURL string) error {
+func validateDemoDatabaseURL(databaseURL string) (*pgxpool.Config, error) {
 	config, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
-		return errors.New("invalid database configuration")
+		return nil, errors.New("invalid database configuration")
+	}
+	if len(config.ConnConfig.Fallbacks) != 0 {
+		return nil, errors.New("demo seed does not allow fallback database hosts")
 	}
 	host := strings.TrimSpace(config.ConnConfig.Host)
 	ip := net.ParseIP(strings.Trim(host, "[]"))
 	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-		return errors.New("demo seed requires a loopback database host")
+		return nil, errors.New("demo seed requires a loopback database host")
 	}
 	database := config.ConnConfig.Database
 	if !strings.HasSuffix(database, "_dev") && !strings.HasSuffix(database, "_test") {
-		return errors.New("demo seed requires a database name ending in _dev or _test")
+		return nil, errors.New("demo seed requires a database name ending in _dev or _test")
 	}
-	return nil
+	return config, nil
 }
 
 func seedCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.Writer) error {

@@ -48,7 +48,7 @@ jobs:
     env:
       CODE: ${{ needs.changes.outputs.docs_only != 'true' }}
       GOOSE_VERSION: v3.28.0
-      SQLC_VERSION: v1.30.0
+      SQLC_VERSION: v1.31.1
     steps:
       - uses: actions/checkout@v5
         with:
