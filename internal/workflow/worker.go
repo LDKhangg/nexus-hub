@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/obs"
@@ -148,6 +149,7 @@ type Worker struct {
 	registry *Registry
 	clock    Clock
 	settings WorkerSettings
+	lastPoll atomic.Int64
 }
 
 func NewWorker(store JobStore, registry *Registry, clock Clock, settings WorkerSettings) *Worker {
@@ -210,11 +212,32 @@ func (w *Worker) ProcessNext(ctx context.Context) (bool, error) {
 		return false, ErrInvalidInput
 	}
 	now := w.clock.Now()
+	w.lastPoll.Store(now.UnixNano())
 	job, err := w.store.ClaimJob(ctx, now)
 	if err != nil || job == nil {
 		return false, err
 	}
 	return true, w.execute(ctx, job)
+}
+
+// LastPoll returns when this worker last tried to claim a job.
+func (w *Worker) LastPoll() time.Time {
+	if w == nil {
+		return time.Time{}
+	}
+	nanos := w.lastPoll.Load()
+	if nanos == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nanos)
+}
+
+// PollInterval returns the configured idle interval used by freshness checks.
+func (w *Worker) PollInterval() time.Duration {
+	if w == nil {
+		return 0
+	}
+	return w.settings.PollInterval
 }
 
 func (w *Worker) execute(ctx context.Context, job *Job) error {

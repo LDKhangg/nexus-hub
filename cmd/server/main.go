@@ -60,6 +60,7 @@ func run() error {
 	pool, err := storage.NewPostgresPool(startupCtx, cfg.DatabaseURL)
 	// Driver connection errors can include credentials; expose only a safe category.
 	if err != nil {
+		slog.Error("startup dependency unavailable", "component", "startup", "check", "db", "error_code", "database_unavailable")
 		return errors.New("database startup failed")
 	}
 	defer pool.Close()
@@ -88,8 +89,7 @@ func run() error {
 	}
 	key, err := secrets.LoadMasterKey(cfg.MasterKeyFile)
 	if err != nil {
-		// Legacy env references keep working; DB credentials fail visibly.
-		slog.Warn("master key unavailable; only legacy env credential references will resolve", "error_code", "master_key_unavailable")
+		slog.Warn("startup dependency unavailable", "component", "startup", "check", "master_key", "error_code", "master_key_unavailable")
 		key = nil
 	}
 	redactor := agent.NewRedactor(nil)
@@ -301,12 +301,35 @@ func run() error {
 	e.Use(middleware.Recover())
 	e.Use(middleware.BodyLimit(bodyLimit))
 	e.Server.ReadHeaderTimeout = 5 * time.Second
+	e.Match([]string{http.MethodGet, http.MethodHead}, "/healthz", func(c echo.Context) error {
+		return c.String(http.StatusOK, "ok")
+	})
 	httpdelivery.NewWorkerHandler(workerStore, workerStore).WithLeases(workerStore, &behavior.LocalTaskInstructions{Routes: taskStore, Reader: ag.conversations}).Register(e)
 	e.POST("/webhook/telegram/:integrationID", telegramHandler.Handle, webhookMetrics(ops.hub, metrics.SourceTelegram))
 	e.POST("/webhook/:source/:integrationID", handler.HandleWebhook, webhookMetrics(ops.hub, ""))
 	// /metrics is never on the public server: its own loopback listener
 	// (metrics_addr) stops with the background workers.
-	if m := listenMetrics(s.MetricsAddr, ops.hub); m != nil {
+	readiness := obs.NewReadiness(obs.ReadinessDeps{
+		PingDB: pool.Ping,
+		MigrationVersion: func(ctx context.Context) (int64, bool, error) {
+			var version int64
+			var applied bool
+			err := pool.QueryRow(ctx, "SELECT version_id, is_applied FROM goose_db_version ORDER BY id DESC LIMIT 1").Scan(&version, &applied)
+			return version, applied, err
+		},
+		MasterKeyLoaded:  key != nil,
+		WorkflowLastPoll: workflows.worker.LastPoll,
+		WorkflowInterval: workflows.worker.PollInterval(),
+		GitSandboxReady:  ag.gitRunner.Available(),
+	})
+	startupReadyCtx, cancelStartupReady := context.WithTimeout(context.Background(), 2*time.Second)
+	startupReadiness := readiness.Check(startupReadyCtx)
+	cancelStartupReady()
+	slog.Info("readiness summary", "component", "startup", "status", startupReadiness.Status,
+		"db", startupReadiness.Checks.DB, "migrations", startupReadiness.Checks.Migrations,
+		"master_key", startupReadiness.Checks.MasterKey, "workflow_worker", startupReadiness.Checks.WorkflowWorker,
+		"git_sandbox", startupReadiness.Checks.GitSandbox)
+	if m := listenMetrics(s.MetricsAddr, ops.hub, readiness.Handler()); m != nil {
 		services = append(services, m)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

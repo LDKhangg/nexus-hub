@@ -37,4 +37,5 @@ migration-create:
 	goose -dir db/migrations -s create "$(name)" sql
 
 generate:
+	go run ./cmd/gen-migration-version
 	sqlc generate

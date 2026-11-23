@@ -2054,13 +2054,19 @@ therefore need no URL update.
 
 ### Read metrics and alerts
 
+The public tunnel serves `GET /healthz`; it returns only `ok` and does not
+query the database. Use it for an external liveness check.
+
 `metrics_addr` defaults to `127.0.0.1:9090` and accepts only loopback. Check the
 configured value with `nh settings get metrics_addr`. On the VPS, read the
-default listener with:
+default readiness and metrics endpoints with:
 
 ```sh
+curl -s 127.0.0.1:9090/readyz
 curl -s 127.0.0.1:9090/metrics
 ```
+
+`/readyz` is unavailable when `metrics_addr` is empty, invalid or cannot bind.
 
 Use the configured loopback address instead if it differs. Main series:
 
