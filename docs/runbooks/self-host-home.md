@@ -16,6 +16,13 @@ To run the hub on a VPS with continuous deployment from GitHub instead, see
 Never paste tokens, secrets or webhook responses into chat, Git or shell
 arguments. Secrets go in through `secret set` on stdin.
 
+## Security (Phase 12)
+
+Expose public endpoints only through an HTTPS tunnel; use a named Cloudflare
+tunnel for a stable production URL. Keep the metrics listener on loopback.
+CI scans full Git history for credentials. Gate C evidence is recorded in
+`docs/product/reports/2026-11-23-phase12-gate-c.md`.
+
 Commands below use `nh` for `go run ./cmd/setup-notices`. Build it once:
 
 ```sh
