@@ -258,12 +258,17 @@ func TestPhase12cRetentionForeignKeyIsolationAcrossGroups(t *testing.T) {
 	}
 	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
 	mustExec(t, ctx, pool, `INSERT INTO integrations(id,workspace_id,platform) VALUES($1,$2,'telegram')`, integrationA, workspaceA)
+	mustExec(t, ctx, pool, `INSERT INTO hub_threads(id,workspace_id,integration_id,thread_type,external_id) VALUES($1,$2,$3,'task','retention-fk-messages')`, threadA, workspaceA, integrationA)
 
 	var outboxIDs []int64
 	for i := range 3 {
+		var messageID int64
+		if err := pool.QueryRow(ctx, `INSERT INTO message_logs(thread_id,sender_role,content,created_at) VALUES($1,'system','redacted',$2) RETURNING id`, threadA, now.Add(-40*24*time.Hour)).Scan(&messageID); err != nil {
+			t.Fatal(err)
+		}
 		var id int64
-		if err := pool.QueryRow(ctx, `INSERT INTO notification_outbox(workspace_id,source_integration_id,target_integration_id,event_key,event,status,updated_at)
-			VALUES($1,$2,$2,$3,'{}','sent',$4) RETURNING id`, workspaceA, integrationA, "retention-fk-outbox-"+itoa(int64(i)), now.Add(-40*24*time.Hour)).Scan(&id); err != nil {
+		if err := pool.QueryRow(ctx, `INSERT INTO notification_outbox(workspace_id,source_integration_id,target_integration_id,event_key,event,message_id,status,updated_at)
+			VALUES($1,$2,$2,$3,'{}',$4,'sent',$5) RETURNING id`, workspaceA, integrationA, "retention-fk-outbox-"+itoa(int64(i)), messageID, now.Add(-40*24*time.Hour)).Scan(&id); err != nil {
 			t.Fatal(err)
 		}
 		outboxIDs = append(outboxIDs, id)
@@ -271,7 +276,6 @@ func TestPhase12cRetentionForeignKeyIsolationAcrossGroups(t *testing.T) {
 	mustExec(t, ctx, pool, `INSERT INTO outbound_actions(workspace_id,integration_id,kind,payload,dedupe_key,status,updated_at)
 		VALUES($1,$2,'telegram_message','{}','retention-fk-later-group','sent',$3)`, workspaceA, integrationA, now.Add(-40*24*time.Hour))
 
-	mustExec(t, ctx, pool, `INSERT INTO hub_threads(id,workspace_id,integration_id,thread_type,external_id) VALUES($1,$2,$3,'task','retention-fk-messages')`, threadA, workspaceA, integrationA)
 	var messageIDs []int64
 	for range 3 {
 		var id int64
@@ -308,7 +312,7 @@ func TestPhase12cRetentionForeignKeyIsolationAcrossGroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for table, want := range map[string]int64{"notification_outbox": 2, "outbound_actions": 1, "message_logs": 2, "tool_runs": 2} {
+	for table, want := range map[string]int64{"notification_outbox": 2, "outbound_actions": 1, "message_logs": 4, "tool_runs": 2} {
 		if result.Counts[table] != want {
 			t.Errorf("%s count = %d, want %d; result=%+v", table, result.Counts[table], want, result)
 		}

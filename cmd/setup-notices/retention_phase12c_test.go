@@ -107,3 +107,33 @@ func TestPhase12cRetentionCLI(t *testing.T) {
 		}
 	}
 }
+
+// TC-C-FIX-5 (REQ-11): empty real and dry runs report every enabled group and omit disabled groups.
+func TestPhase12cRetentionCLIPrintsZeroCountsForEnabledGroups(t *testing.T) {
+	ctx, pool := setupDB(t)
+	if _, err := pool.Exec(ctx, `INSERT INTO app_settings(key,value) VALUES('retention_policy_decisions_days','0')`); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(args ...string) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := retentionCommand(ctx, pool, args, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	for name, out := range map[string]string{
+		"run":     run("run"),
+		"dry-run": run("run", "--dry-run"),
+	} {
+		for _, table := range []string{"message_logs", "notification_outbox", "outbound_actions", "tool_runs", "workflow_executions"} {
+			if !strings.Contains(out, table+"=0\n") {
+				t.Errorf("%s missing enabled group %s=0: %q", name, table, out)
+			}
+		}
+		if strings.Contains(out, "policy_decisions=") {
+			t.Errorf("%s printed disabled group: %q", name, out)
+		}
+	}
+}
