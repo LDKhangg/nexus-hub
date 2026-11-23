@@ -40,6 +40,7 @@ type Settings struct {
 	NoticeRequestTimeout            time.Duration
 	AnthropicCredential             string
 	ListenAddr                      string
+	LogLevel                        string        // debug | info | warn | error
 	OwnerTelegramChatID             int64         // 0: not set
 	OwnerTelegramUserID             int64         // 0: the owner chat is a private chat (user ID = chat ID)
 	OwnerClickUpUserID              string        // empty: not set
@@ -168,6 +169,7 @@ var specs = map[string]spec{
 	"notice_request_timeout":              {kind: kDuration, def: 10 * time.Second, min: 1, max: 30, set: func(s *Settings, v any) { s.NoticeRequestTimeout = v.(time.Duration) }},
 	"anthropic_credential":                {kind: kCredRef, def: "anthropic", set: func(s *Settings, v any) { s.AnthropicCredential = v.(string) }},
 	"listen_addr":                         {kind: kAddr, def: ":8080", set: func(s *Settings, v any) { s.ListenAddr = v.(string) }},
+	"log_level":                           {kind: kEnum, def: "info", enum: []string{"debug", "info", "warn", "error"}, set: func(s *Settings, v any) { s.LogLevel = v.(string) }},
 	"owner_telegram_chat_id":              {kind: kInt, def: int64(0), min: -maxChatID, max: maxChatID, set: func(s *Settings, v any) { s.OwnerTelegramChatID = v.(int64) }},
 	"owner_telegram_user_id":              {kind: kInt, def: int64(0), min: 0, max: maxChatID, set: func(s *Settings, v any) { s.OwnerTelegramUserID = v.(int64) }},
 	"owner_clickup_user_id":               {kind: kDigits, def: "", set: func(s *Settings, v any) { s.OwnerClickUpUserID = v.(string) }},

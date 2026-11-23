@@ -81,7 +81,7 @@ UPDATE public.agent_jobs SET status = 'processing', workflow_execution_id = $1,
   claim_token = NULL, locked_until = 'infinity'::timestamptz, workflow_attempt_deadline = NULL, updated_at = now()
 WHERE workspace_id = $2 AND id = $3 AND workflow_execution_id IS NULL
   AND (status = 'pending' OR (status = 'processing' AND locked_until <= $4::timestamptz))
-RETURNING id, workspace_id, source_integration_id, thread_id, status, attempts, run_at, first_enqueued_at, locked_until, claim_token, through_message_id, last_error_code, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at, updated_at, workflow_execution_id, workflow_attempt_deadline
+RETURNING id, workspace_id, source_integration_id, thread_id, status, attempts, run_at, first_enqueued_at, locked_until, claim_token, through_message_id, last_error_code, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at, updated_at, workflow_execution_id, workflow_attempt_deadline, correlation_id
 `
 
 type AdoptAgentBatchParams struct {
@@ -123,6 +123,7 @@ func (q *Queries) AdoptAgentBatch(ctx context.Context, arg AdoptAgentBatchParams
 		&i.UpdatedAt,
 		&i.WorkflowExecutionID,
 		&i.WorkflowAttemptDeadline,
+		&i.CorrelationID,
 	)
 	return i, err
 }
@@ -152,7 +153,7 @@ const beginDurableAgentAttempt = `-- name: BeginDurableAgentAttempt :one
 UPDATE public.agent_jobs SET attempts = attempts + 1, workflow_attempt_deadline = $1::timestamptz, updated_at = now()
 WHERE workspace_id = $2 AND id = $3 AND status = 'processing'
   AND workflow_execution_id IS NOT NULL
-RETURNING id, workspace_id, source_integration_id, thread_id, status, attempts, run_at, first_enqueued_at, locked_until, claim_token, through_message_id, last_error_code, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at, updated_at, workflow_execution_id, workflow_attempt_deadline
+RETURNING id, workspace_id, source_integration_id, thread_id, status, attempts, run_at, first_enqueued_at, locked_until, claim_token, through_message_id, last_error_code, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at, updated_at, workflow_execution_id, workflow_attempt_deadline, correlation_id
 `
 
 type BeginDurableAgentAttemptParams struct {
@@ -185,6 +186,7 @@ func (q *Queries) BeginDurableAgentAttempt(ctx context.Context, arg BeginDurable
 		&i.UpdatedAt,
 		&i.WorkflowExecutionID,
 		&i.WorkflowAttemptDeadline,
+		&i.CorrelationID,
 	)
 	return i, err
 }
@@ -350,7 +352,7 @@ func (q *Queries) FinishDurableAgentBatch(ctx context.Context, arg FinishDurable
 }
 
 const getAgentBatch = `-- name: GetAgentBatch :one
-SELECT id, workspace_id, source_integration_id, thread_id, status, attempts, run_at, first_enqueued_at, locked_until, claim_token, through_message_id, last_error_code, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at, updated_at, workflow_execution_id, workflow_attempt_deadline FROM public.agent_jobs WHERE workspace_id = $1 AND id = $2
+SELECT id, workspace_id, source_integration_id, thread_id, status, attempts, run_at, first_enqueued_at, locked_until, claim_token, through_message_id, last_error_code, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at, updated_at, workflow_execution_id, workflow_attempt_deadline, correlation_id FROM public.agent_jobs WHERE workspace_id = $1 AND id = $2
 `
 
 type GetAgentBatchParams struct {
@@ -382,6 +384,7 @@ func (q *Queries) GetAgentBatch(ctx context.Context, arg GetAgentBatchParams) (A
 		&i.UpdatedAt,
 		&i.WorkflowExecutionID,
 		&i.WorkflowAttemptDeadline,
+		&i.CorrelationID,
 	)
 	return i, err
 }
@@ -727,7 +730,7 @@ func (q *Queries) LockAgentClaim(ctx context.Context, arg LockAgentClaimParams) 
 }
 
 const lockDurableAgentBatch = `-- name: LockDurableAgentBatch :one
-SELECT j.id, j.workspace_id, j.source_integration_id, j.thread_id, j.status, j.attempts, j.run_at, j.first_enqueued_at, j.locked_until, j.claim_token, j.through_message_id, j.last_error_code, j.input_tokens, j.output_tokens, j.cache_read_tokens, j.cache_write_tokens, j.created_at, j.updated_at, j.workflow_execution_id, j.workflow_attempt_deadline FROM public.agent_jobs j
+SELECT j.id, j.workspace_id, j.source_integration_id, j.thread_id, j.status, j.attempts, j.run_at, j.first_enqueued_at, j.locked_until, j.claim_token, j.through_message_id, j.last_error_code, j.input_tokens, j.output_tokens, j.cache_read_tokens, j.cache_write_tokens, j.created_at, j.updated_at, j.workflow_execution_id, j.workflow_attempt_deadline, j.correlation_id FROM public.agent_jobs j
 JOIN public.workflow_executions e ON e.workspace_id = j.workspace_id AND e.legacy_job_id = j.id
 WHERE j.workspace_id = $1 AND j.id = $2 AND e.id = $3
   AND e.source_kind = 'agent_job' AND j.workflow_execution_id IS NOT NULL
@@ -766,6 +769,7 @@ func (q *Queries) LockDurableAgentBatch(ctx context.Context, arg LockDurableAgen
 		&i.UpdatedAt,
 		&i.WorkflowExecutionID,
 		&i.WorkflowAttemptDeadline,
+		&i.CorrelationID,
 	)
 	return i, err
 }
@@ -990,7 +994,7 @@ func (q *Queries) SelectAgentClaimCandidate(ctx context.Context, atTime pgtype.T
 
 const selectDueAgentBatch = `-- name: SelectDueAgentBatch :one
 
-SELECT j.id, j.thread_id, j.source_integration_id, j.status FROM public.agent_jobs j
+SELECT j.id, j.thread_id, j.source_integration_id, j.status, j.correlation_id FROM public.agent_jobs j
 WHERE j.workspace_id = $1::uuid AND j.workflow_execution_id IS NULL
   AND ((j.status = 'pending' AND j.run_at <= $2::timestamptz)
     OR (j.status = 'processing' AND j.locked_until <= $2::timestamptz))
@@ -1011,6 +1015,7 @@ type SelectDueAgentBatchRow struct {
 	ThreadID            pgtype.UUID
 	SourceIntegrationID pgtype.UUID
 	Status              string
+	CorrelationID       pgtype.Text
 }
 
 // Durable comment pipeline (workflow-owned agent batches). Every query is
@@ -1029,6 +1034,7 @@ func (q *Queries) SelectDueAgentBatch(ctx context.Context, arg SelectDueAgentBat
 		&i.ThreadID,
 		&i.SourceIntegrationID,
 		&i.Status,
+		&i.CorrelationID,
 	)
 	return i, err
 }
@@ -1139,12 +1145,14 @@ func (q *Queries) UntriagedAgentMessages(ctx context.Context, arg UntriagedAgent
 }
 
 const upsertPendingAgentJob = `-- name: UpsertPendingAgentJob :one
-INSERT INTO public.agent_jobs(workspace_id, source_integration_id, thread_id, run_at)
+INSERT INTO public.agent_jobs(workspace_id, source_integration_id, thread_id, run_at, correlation_id)
 VALUES ($1, $2, $3,
-        now() + LEAST(make_interval(secs => $4::float8), make_interval(secs => $5::float8)))
+        now() + LEAST(make_interval(secs => $4::float8), make_interval(secs => $5::float8)),
+        $6::text)
 ON CONFLICT (thread_id) WHERE status = 'pending'
 DO UPDATE SET run_at = LEAST(now() + make_interval(secs => $4::float8),
-                             public.agent_jobs.first_enqueued_at + make_interval(secs => $5::float8)),
+                              public.agent_jobs.first_enqueued_at + make_interval(secs => $5::float8)),
+              correlation_id = COALESCE(EXCLUDED.correlation_id, public.agent_jobs.correlation_id),
               updated_at = now()
 RETURNING id
 `
@@ -1155,6 +1163,7 @@ type UpsertPendingAgentJobParams struct {
 	ThreadID            pgtype.UUID
 	WindowSecs          float64
 	MaxWaitSecs         float64
+	CorrelationID       pgtype.Text
 }
 
 func (q *Queries) UpsertPendingAgentJob(ctx context.Context, arg UpsertPendingAgentJobParams) (int64, error) {
@@ -1164,6 +1173,7 @@ func (q *Queries) UpsertPendingAgentJob(ctx context.Context, arg UpsertPendingAg
 		arg.ThreadID,
 		arg.WindowSecs,
 		arg.MaxWaitSecs,
+		arg.CorrelationID,
 	)
 	var id int64
 	err := row.Scan(&id)

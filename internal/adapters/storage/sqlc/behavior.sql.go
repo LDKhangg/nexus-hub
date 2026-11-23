@@ -357,7 +357,7 @@ UPDATE public.telegram_updates AS u SET attempts = u.attempts + 1, claim_token =
 WHERE u.id = (SELECT c.id FROM public.telegram_updates c
               WHERE c.processed_at IS NULL AND (c.locked_until IS NULL OR c.locked_until <= $2::timestamptz)
               ORDER BY c.id FOR UPDATE SKIP LOCKED LIMIT 1)
-RETURNING u.id, u.workspace_id, u.update_id, u.chat_id, u.kind, u.command, u.args, u.attempts, u.locked_until, u.claim_token, u.received_at, u.processed_at, u.error_code, u.integration_id, u.note, u.telegram_message_id, u.reply_to_message_id, u.message_thread_id
+RETURNING u.id, u.workspace_id, u.update_id, u.chat_id, u.kind, u.command, u.args, u.attempts, u.locked_until, u.claim_token, u.received_at, u.processed_at, u.error_code, u.integration_id, u.note, u.telegram_message_id, u.reply_to_message_id, u.message_thread_id, u.correlation_id
 `
 
 type ClaimTelegramUpdateParams struct {
@@ -389,6 +389,7 @@ func (q *Queries) ClaimTelegramUpdate(ctx context.Context, arg ClaimTelegramUpda
 		&i.TelegramMessageID,
 		&i.ReplyToMessageID,
 		&i.MessageThreadID,
+		&i.CorrelationID,
 	)
 	return i, err
 }
@@ -1433,9 +1434,10 @@ func (q *Queries) InsertRunItem(ctx context.Context, arg InsertRunItemParams) (R
 const insertTelegramUpdate = `-- name: InsertTelegramUpdate :one
 
 INSERT INTO public.telegram_updates(workspace_id, update_id, chat_id, kind, command, args, integration_id, note,
-                                    telegram_message_id, reply_to_message_id, message_thread_id)
+                                    telegram_message_id, reply_to_message_id, message_thread_id, correlation_id)
 VALUES ($1, $2, $3, $4, $5, $6,
-        $7, $8, $9, $10, $11)
+        $7, $8, $9, $10, $11,
+        $12)
 ON CONFLICT (workspace_id, update_id) DO NOTHING
 RETURNING id
 `
@@ -1452,6 +1454,7 @@ type InsertTelegramUpdateParams struct {
 	TelegramMessageID pgtype.Int8
 	ReplyToMessageID  pgtype.Int8
 	MessageThreadID   pgtype.Int8
+	CorrelationID     pgtype.Text
 }
 
 // Telegram inbound.
@@ -1469,6 +1472,7 @@ func (q *Queries) InsertTelegramUpdate(ctx context.Context, arg InsertTelegramUp
 		arg.TelegramMessageID,
 		arg.ReplyToMessageID,
 		arg.MessageThreadID,
+		arg.CorrelationID,
 	)
 	var id int64
 	err := row.Scan(&id)

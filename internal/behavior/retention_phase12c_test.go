@@ -3,12 +3,15 @@ package behavior
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/LDKhangg/nexus-hub/internal/obs"
 )
 
 type phase12cRetentionStore struct {
@@ -61,11 +64,9 @@ func TestPhase12cRetentionLifecycleAndObservability(t *testing.T) {
 	}}
 	metrics := &phase12cRetentionMetrics{seen: map[string]int64{}}
 	var logs bytes.Buffer
-	oldWriter := log.Writer()
-	oldFlags := log.Flags()
-	log.SetOutput(&logs)
-	log.SetFlags(0)
-	t.Cleanup(func() { log.SetOutput(oldWriter); log.SetFlags(oldFlags) })
+	oldDefault := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(oldDefault) })
+	obs.Setup("info", &logs)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -88,10 +89,25 @@ func TestPhase12cRetentionLifecycleAndObservability(t *testing.T) {
 	}
 	store.mu.Unlock()
 	out := logs.String()
-	for _, want := range []string{"message_logs=1", "tool_runs=2", "workflow_executions_code=23503", "workflow_executions_issue_count=3"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("log misses %q: %s", want, out)
+	seenPass := false
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("retention log is not JSON: %q: %v", line, err)
 		}
+		if record["msg"] != "retention pass completed" {
+			continue
+		}
+		counts, ok := record["counts"].(map[string]any)
+		if !ok || counts["message_logs"] != float64(1) || counts["tool_runs"] != float64(2) ||
+			record["partial"] != false || record["partial_reason"] != "" ||
+			record["workflow_executions_code"] != "23503" || record["workflow_executions_issue_count"] != float64(3) {
+			t.Errorf("retention pass shape: %#v", record)
+		}
+		seenPass = true
+	}
+	if !seenPass {
+		t.Fatalf("retention completion log absent: %s", out)
 	}
 	for _, secret := range []string{"private", fixed.String()} {
 		if strings.Contains(out, secret) {
@@ -117,9 +133,9 @@ func TestPhase12cRetentionLifecycleAndObservability(t *testing.T) {
 func TestPhase12cRetentionDatabaseErrorIsSanitized(t *testing.T) {
 	store := &phase12cRetentionStore{called: make(chan struct{}, 1), err: errors.New("password=hunter2 prompt=private")}
 	var logs bytes.Buffer
-	oldWriter := log.Writer()
-	log.SetOutput(&logs)
-	t.Cleanup(func() { log.SetOutput(oldWriter) })
+	oldDefault := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(oldDefault) })
+	obs.Setup("info", &logs)
 	ctx, cancel := context.WithCancel(context.Background())
 	store.called = make(chan struct{}, 1)
 	done := make(chan error, 1)

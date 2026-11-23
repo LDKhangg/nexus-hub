@@ -49,17 +49,48 @@ Telegram (your commands)    ─┘        │
 
 ## Run it
 
-Follow `docs/runbooks/self-host-home.md`. In short:
+For a fresh local checkout, install PostgreSQL, goose, Go and sqlc. Then use a
+database whose name ends in `_dev` or `_test`:
 
 ```sh
-go build -o ~/.local/bin/nexus-server ./cmd/server
-go build -o ~/.local/bin/nh ./cmd/setup-notices
+createdb nexus_hub_dev
+export DATABASE_URL='postgres://localhost/nexus_hub_dev?sslmode=disable'
+go build -o bin/nexus-server ./cmd/server
+go build -o bin/nh ./cmd/setup-notices
 goose -dir db/migrations postgres "$DATABASE_URL" up
-systemctl --user restart nexus-hub        # the service unit is in the runbook
+bin/nh init --workspace-name 'Demo Workspace' --chat-id=-1000000000001 --team-id=demo-team
+bin/nh seed demo
 ```
 
-Secrets go in through `nh secret set` on stdin, never as arguments, never in
-Git. Updating later: pull, rebuild both binaries, `goose … up`, restart.
+`seed demo` prints the workspace, source, target, people and behavior IDs plus
+the clearly fake webhook secret. Copy its `webhook_secret` value and start the
+server in another terminal:
+
+```sh
+export DATABASE_URL='postgres://localhost/nexus_hub_dev?sslmode=disable'
+export NEXUS_DEMO_WEBHOOK_SECRET='demo-webhook-secret-not-for-production'
+bin/nexus-server
+```
+
+The demo behavior is disabled, so this path makes no LLM call. Nexus-Hub has no
+production fake Telegram provider. The demo Telegram credential points to an
+unset fake environment variable, so delivery fails before any Telegram network
+request. The signed webhook can still prove local ingestion. Replace
+`<source-id>` with `clickup_source_id` printed by the seed:
+
+```sh
+cat > /tmp/nexus-demo-webhook.json <<'EOF'
+{"event":"taskCommentPosted","webhook_id":"demo-webhook","task_id":"demo-task","history_items":[{"id":"demo-history","field":"comment","comment":{"id":"demo-comment","text_content":"Demo notice"}}]}
+EOF
+openssl dgst -sha256 -hmac "$NEXUS_DEMO_WEBHOOK_SECRET" -hex /tmp/nexus-demo-webhook.json
+curl -i -X POST -H 'Content-Type: application/json' -H 'X-Signature: <hex-from-openssl>' --data-binary @/tmp/nexus-demo-webhook.json http://127.0.0.1:8080/webhook/clickup/<source-id>
+```
+
+The server returns `200` and logs `webhook events stored` without logging the
+message. For a real service, follow `docs/runbooks/self-host-home.md`. Complete
+configuration is in `docs/configuration.md`. Secrets go through
+`nh secret set` on stdin, never arguments or Git. To update, pull, rebuild both
+binaries, run `goose … up`, then restart.
 
 ## Use it
 
@@ -70,7 +101,7 @@ the list, or `nh <command>` for its usage.
 
 | Area | Commands |
 |---|---|
-| Setup | `init`, `master-key`, `secret`, `migrate-secrets`, `settings get/set/list` |
+| Setup | `init`, `seed demo` (local `_dev`/`_test` only), `master-key`, `secret`, `migrate-secrets`, `settings get/set/list` |
 | ClickUp source | `source`, `bind-webhook`, `inspect`, `retry-failed` |
 | Agent and AI | `enable-agent`, `disable-agent`, `llm check`, `profile`, `memory` |
 | GitHub | `github-account`, `github-repo`, `github-check` |
@@ -116,6 +147,7 @@ Only the owner's chat is obeyed.
 | `examples/behaviors` | behavior YAML you can import |
 | `docs/product` | contract, roadmap, traceability, test debt |
 | `docs/runbooks` | how to run and operate |
+| `docs/configuration.md` | environment, settings, credentials and migrations |
 | `docs/plans` | one plan per phase with numbered requirements |
 | `docs/agents` | the Tester and Reviewer guides |
 | `docs/architecture.md` | the original MVP design (background; the PCC and roadmap win) |

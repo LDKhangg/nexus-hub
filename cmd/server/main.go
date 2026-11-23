@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/config"
 	httpdelivery "github.com/LDKhangg/nexus-hub/internal/delivery/http"
 	"github.com/LDKhangg/nexus-hub/internal/metrics"
+	"github.com/LDKhangg/nexus-hub/internal/obs"
 	"github.com/LDKhangg/nexus-hub/internal/orchestrator"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/reporting"
@@ -31,8 +33,10 @@ import (
 )
 
 func main() {
+	logger := obs.Setup("info", os.Stderr)
+	obs.BridgeStdLog(logger)
 	if err := run(); err != nil {
-		log.Print(err)
+		slog.Error("server stopped", "error_code", "startup_failed")
 		os.Exit(1)
 	}
 }
@@ -56,6 +60,7 @@ func run() error {
 	pool, err := storage.NewPostgresPool(startupCtx, cfg.DatabaseURL)
 	// Driver connection errors can include credentials; expose only a safe category.
 	if err != nil {
+		slog.Error("startup dependency unavailable", "component", "startup", "check", "db", "error_code", "database_unavailable")
 		return errors.New("database startup failed")
 	}
 	defer pool.Close()
@@ -65,8 +70,11 @@ func run() error {
 	}
 	s, err := settings.Load(startupCtx, settingsStore)
 	if err != nil {
-		return err
+		slog.Error("startup dependency unavailable", "component", "startup", "check", "db", "error_code", "database_unavailable")
+		return errors.New("database startup failed")
 	}
+	logger := obs.Setup(s.LogLevel, os.Stderr)
+	obs.BridgeStdLog(logger)
 	if s.AllowDangerous {
 		log.Print("setting allow_dangerous is deprecated and has no effect; the policy rule set decides dangerous tools (nh policy)")
 	}
@@ -82,8 +90,7 @@ func run() error {
 	}
 	key, err := secrets.LoadMasterKey(cfg.MasterKeyFile)
 	if err != nil {
-		// Legacy env references keep working; DB credentials fail visibly.
-		log.Printf("master key unavailable (%v); only legacy env credential references will resolve", err)
+		slog.Warn("startup dependency unavailable", "component", "startup", "check", "master_key", "error_code", "master_key_unavailable")
 		key = nil
 	}
 	redactor := agent.NewRedactor(nil)
@@ -290,16 +297,41 @@ func run() error {
 	handler := httpdelivery.NewWebhookHandler(integrations, httpdelivery.NewVerifiedParserFactory(resolver), relay.NewNoticeService(notices))
 	e := echo.New()
 	e.HideBanner = true
-	e.Use(middleware.RequestLogger())
-	e.Use(middleware.Recover())
+	e.HidePort = true
+	e.Use(httpdelivery.CorrelationMiddleware)
+	e.Use(structuredRequestLogger)
+	e.Use(httpdelivery.Recover)
 	e.Use(middleware.BodyLimit(bodyLimit))
 	e.Server.ReadHeaderTimeout = 5 * time.Second
+	e.Match([]string{http.MethodGet, http.MethodHead}, "/healthz", func(c echo.Context) error {
+		return c.String(http.StatusOK, "ok")
+	})
 	httpdelivery.NewWorkerHandler(workerStore, workerStore).WithLeases(workerStore, &behavior.LocalTaskInstructions{Routes: taskStore, Reader: ag.conversations}).Register(e)
 	e.POST("/webhook/telegram/:integrationID", telegramHandler.Handle, webhookMetrics(ops.hub, metrics.SourceTelegram))
 	e.POST("/webhook/:source/:integrationID", handler.HandleWebhook, webhookMetrics(ops.hub, ""))
 	// /metrics is never on the public server: its own loopback listener
 	// (metrics_addr) stops with the background workers.
-	if m := listenMetrics(s.MetricsAddr, ops.hub); m != nil {
+	readiness := obs.NewReadiness(obs.ReadinessDeps{
+		PingDB: pool.Ping,
+		MigrationVersion: func(ctx context.Context) (int64, bool, error) {
+			var version int64
+			var applied bool
+			err := pool.QueryRow(ctx, "SELECT version_id, is_applied FROM goose_db_version ORDER BY id DESC LIMIT 1").Scan(&version, &applied)
+			return version, applied, err
+		},
+		MasterKeyLoaded:  key != nil,
+		WorkflowLastPoll: workflows.worker.LastPoll,
+		WorkflowInterval: workflows.worker.PollInterval(),
+		GitSandboxReady:  ag.gitRunner.Available(),
+	})
+	startupReadyCtx, cancelStartupReady := context.WithTimeout(context.Background(), 2*time.Second)
+	startupReadiness := readiness.Check(startupReadyCtx)
+	cancelStartupReady()
+	slog.Info("readiness summary", "component", "startup", "status", startupReadiness.Status,
+		"db", startupReadiness.Checks.DB, "migrations", startupReadiness.Checks.Migrations,
+		"master_key", startupReadiness.Checks.MasterKey, "workflow_worker", startupReadiness.Checks.WorkflowWorker,
+		"git_sandbox", startupReadiness.Checks.GitSandbox)
+	if m := listenMetrics(s.MetricsAddr, ops.hub, readiness); m != nil {
 		services = append(services, m)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -339,10 +371,10 @@ func recoverAtStartup(ctx context.Context, passes []recoveryPass, timeout time.D
 		}
 		if err := p.run(ctx); err != nil {
 			failed++
-			log.Printf("startup recovery: %s not completed; retried by its sweeper", p.name)
+			slog.Warn("startup recovery not completed", "pass", p.name, "retry", true)
 		}
 	}
-	log.Printf("startup recovery: passes=%d failed=%d duration_ms=%d", len(passes), failed, time.Since(started).Milliseconds())
+	slog.Info("startup recovery completed", "passes", len(passes), "failed", failed, "duration_ms", time.Since(started).Milliseconds())
 }
 
 type serviceWorker interface{ Run(context.Context) error }
@@ -370,6 +402,7 @@ func runServices(ctx context.Context, e *echo.Echo, workers []serviceWorker, add
 		return errors.New("HTTP listener startup failed")
 	}
 	e.Listener = listener
+	slog.Info("http server started", "component", "http", "addr", listener.Addr().String())
 	stopCtx, stopWorkers := context.WithCancel(ctx)
 	defer stopWorkers()
 	hardCtx, cancelInFlight := context.WithCancel(context.Background())
@@ -415,12 +448,12 @@ func runServices(ctx context.Context, e *echo.Echo, workers []serviceWorker, add
 		case <-drainTimer.C:
 			timedOut = true
 			cancelInFlight()
-			log.Printf("shutdown: timeout reached; in-flight work cancelled workers_running=%d", len(workers)-stopped)
+			slog.Warn("shutdown timeout reached", "in_flight_cancelled", true, "workers_running", len(workers)-stopped)
 			stopped += waitWorkers(workerDone, len(workers)-stopped, stopGrace)
 		}
 	}
 	cancelInFlight()
-	log.Printf("shutdown: done duration_ms=%d timed_out=%t", time.Since(started).Milliseconds(), timedOut)
+	slog.Info("shutdown completed", "duration_ms", time.Since(started).Milliseconds(), "timed_out", timedOut)
 	return result
 }
 
@@ -435,8 +468,29 @@ func waitWorkers(done <-chan error, n int, grace time.Duration) int {
 		case <-done:
 			left--
 		case <-t.C:
-			log.Printf("shutdown: workers still stopping after grace workers_running=%d", left)
+			slog.Warn("shutdown workers still stopping after grace", "workers_running", left)
 		}
 	}
 	return n
+}
+
+func structuredRequestLogger(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		started := time.Now()
+		err := next(c)
+		if err != nil {
+			c.Error(err)
+		}
+		path := c.Path()
+		if path == "" {
+			path = "unmatched"
+		}
+		obs.Logger(c.Request().Context()).Info("http request",
+			"method", c.Request().Method,
+			"path", path,
+			"status", c.Response().Status,
+			"duration_ms", time.Since(started).Milliseconds(),
+		)
+		return nil
+	}
 }

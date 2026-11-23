@@ -193,7 +193,7 @@ func (m meteredActionStore) MarkFailed(ctx context.Context, a relay.OutboundActi
 	return m.ActionStore.MarkFailed(ctx, a, code)
 }
 
-// metricsServer serves /metrics on the loopback listener. It never takes
+// metricsServer serves /metrics and /readyz on the loopback listener. It never takes
 // the hub down: a serve failure is logged and the service waits for
 // shutdown. It stops with the background workers, after the public HTTP
 // server stopped accepting (REQ-4 order).
@@ -206,7 +206,7 @@ type metricsServer struct {
 // is validated as loopback here too, so a bad stored value never binds a
 // public interface. A listen failure disables metrics and is logged; the
 // hub still starts.
-func listenMetrics(addr string, hub *metrics.Hub) *metricsServer {
+func listenMetrics(addr string, hub *metrics.Hub, readiness ...any) *metricsServer {
 	if addr == "" {
 		log.Print("metrics: off (metrics_addr is empty)")
 		return nil
@@ -222,7 +222,20 @@ func listenMetrics(addr string, hub *metrics.Hub) *metricsServer {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", hub.Handler())
-	log.Printf("metrics: serving /metrics on %s", l.Addr().String())
+	if len(readiness) > 0 && readiness[0] != nil {
+		var handler http.Handler
+		switch source := readiness[0].(type) {
+		case interface{ Handler() http.Handler }:
+			handler = source.Handler()
+		case http.Handler:
+			// Preserve compatibility for callers that already constructed the handler.
+			handler = source
+		}
+		if handler != nil {
+			mux.Handle("GET /readyz", handler)
+		}
+	}
+	log.Printf("metrics: serving ops endpoints on %s", l.Addr().String())
 	return &metricsServer{listener: l, handler: mux}
 }
 

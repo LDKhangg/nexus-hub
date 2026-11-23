@@ -5,19 +5,22 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/LDKhangg/nexus-hub/internal/obs"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
+	logger := obs.Setup("info", os.Stderr)
+	obs.BridgeStdLog(logger)
 	if err := run(os.Args[1:], os.Stdout, os.LookupEnv); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		slog.Error("command failed", "error", err)
 		os.Exit(1)
 	}
 }
@@ -40,7 +43,17 @@ func run(args []string, out io.Writer, lookup func(string) (string, bool)) error
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, url)
+	var pool *pgxpool.Pool
+	var err error
+	if len(args) > 0 && args[0] == "seed" {
+		poolConfig, validationErr := validateDemoDatabaseURL(url)
+		if validationErr != nil {
+			return validationErr
+		}
+		pool, err = pgxpool.NewWithConfig(ctx, poolConfig)
+	} else {
+		pool, err = pgxpool.New(ctx, url)
+	}
 	if err != nil {
 		return errors.New("invalid database configuration")
 	}
@@ -59,11 +72,13 @@ func commandFlags(name string) *flag.FlagSet {
 
 func runCommand(ctx context.Context, pool *pgxpool.Pool, args []string, out io.Writer, lookup func(string) (string, bool)) error {
 	if len(args) == 0 {
-		return errors.New("usage: setup-notices init|bind-webhook|inspect|retry-failed|master-key|secret|migrate-secrets|settings|enable-agent|disable-agent|github-account|github-repo|github-check|behavior|telegram|trace|runs|profile|memory|llm|source|contact|report-prefs|report-template|workflow|execution|status|retention|assistant|worker|policy")
+		return errors.New("usage: setup-notices init|seed|bind-webhook|inspect|retry-failed|master-key|secret|migrate-secrets|settings|enable-agent|disable-agent|github-account|github-repo|github-check|behavior|telegram|trace|runs|profile|memory|llm|source|contact|report-prefs|report-template|workflow|execution|status|retention|assistant|worker|policy")
 	}
 	switch args[0] {
 	case "init":
 		return initNotices(ctx, pool, args[1:], out)
+	case "seed":
+		return seedCommand(ctx, pool, args[1:], out)
 	case "master-key":
 		return masterKeyInit(args[1:], out)
 	case "secret":

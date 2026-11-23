@@ -5,8 +5,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/domain"
+	"github.com/LDKhangg/nexus-hub/internal/obs"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/labstack/echo/v4"
@@ -82,9 +84,12 @@ func (h *WebhookHandler) HandleWebhook(c echo.Context) error {
 		}
 		events[i].WorkspaceID = integration.WorkspaceID
 		events[i].IntegrationID = integration.ID
+		events[i].CorrelationID = obs.Correlation(ctx)
 	}
+	started := time.Now()
 	result, err := h.acceptor.Accept(ctx, events)
 	if err != nil {
+		obs.Logger(ctx).Warn("webhook event store failed", "integration_id", integration.ID, "event_count", len(events), "duration_ms", time.Since(started).Milliseconds(), "error_code", "store_failed")
 		return respond(http.StatusServiceUnavailable, "service unavailable")
 	}
 	status := "queued"
@@ -94,5 +99,6 @@ func (h *WebhookHandler) HandleWebhook(c echo.Context) error {
 			status = "duplicate"
 		}
 	}
+	obs.Logger(ctx).Info("webhook events stored", "integration_id", integration.ID, "accepted", result.Accepted, "duplicates", result.Duplicates, "ignored", result.Ignored, "duration_ms", time.Since(started).Milliseconds())
 	return c.JSON(http.StatusOK, map[string]any{"status": status, "accepted": result.Accepted, "duplicates": result.Duplicates, "ignored": result.Ignored})
 }

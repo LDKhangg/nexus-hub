@@ -423,7 +423,11 @@ func (r *NoticeRepository) acceptAgentComment(ctx context.Context, q *sqlc.Queri
 		return false, err
 	}
 	if role == "external_user" {
-		if _, err := q.UpsertPendingAgentJob(ctx, sqlc.UpsertPendingAgentJobParams{WorkspaceID: workspace, SourceIntegrationID: source, ThreadID: thread, WindowSecs: r.debounce.Window.Seconds(), MaxWaitSecs: r.debounce.MaxWait.Seconds()}); err != nil {
+		if _, err := q.UpsertPendingAgentJob(ctx, sqlc.UpsertPendingAgentJobParams{
+			WorkspaceID: workspace, SourceIntegrationID: source, ThreadID: thread,
+			WindowSecs: r.debounce.Window.Seconds(), MaxWaitSecs: r.debounce.MaxWait.Seconds(),
+			CorrelationID: pgtype.Text{String: e.CorrelationID, Valid: e.CorrelationID != ""},
+		}); err != nil {
 			return false, err
 		}
 	}

@@ -152,6 +152,9 @@ func (r *Runner) Close() error {
 // GitPath returns the verified git binary path.
 func (r *Runner) GitPath() string { return r.gitPath }
 
+// Available reports whether commands can reach a verified git runner.
+func (r *Runner) Available() bool { return r != nil && r.unavailable == "" && r.gitPath != "" }
+
 var allowedSubcommands = map[string]bool{
 	// read
 	"rev-parse": true, "cat-file": true, "ls-tree": true, "grep": true, "show": true, "log": true,
