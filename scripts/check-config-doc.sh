@@ -24,10 +24,10 @@ fi
 for dir in "$root/cmd" "$root/internal"; do
   if [ -d "$dir" ]; then
     find "$dir" -type f -name '*.go' ! -name '*_test.go' -exec \
-      grep -hEo 'os\.(Getenv|LookupEnv)\("[^"]+"' {} + >> "$tmp/env-source-raw"
+      grep -hEo '(os\.(Getenv|LookupEnv)|syscall\.Getenv)\(("[^"]+"|`[^`]+`)' {} + >> "$tmp/env-source-raw"
   fi
 done
-sed 's/^os\.[^(]*("//; s/"$//' "$tmp/env-source-raw" | sort -u > "$tmp/env-source"
+sed 's/^[^(]*(\(["`]\)//; s/["`]$//' "$tmp/env-source-raw" | sort -u > "$tmp/env-source"
 sed -n '/^## Process environment$/,/^## Runtime settings$/s/^| `\([^`]*\)` |.*/\1/p' \
   "$root/docs/configuration.md" > "$tmp/env-docs-raw"
 sort "$tmp/env-docs-raw" > "$tmp/env-docs"
