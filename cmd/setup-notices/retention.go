@@ -87,7 +87,7 @@ func writeRetentionResult(out io.Writer, result behavior.RetentionResult) {
 	writeRetentionCounts(out, result.Counts)
 	if result.Partial {
 		if result.PartialReason == behavior.RetentionPartialDeadline {
-			fmt.Fprintln(out, "status=partial (deadline reached, more rows may remain)")
+			fmt.Fprintln(out, "status=partial (time limit reached, more rows may remain)")
 		} else {
 			fmt.Fprintln(out, "status=partial (cap reached, more rows may remain)")
 		}

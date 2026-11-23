@@ -1,0 +1,4 @@
+# Fake test fixture.
+a5ad06f092ff88304e69498b7a8452ed97c09035:cmd/setup-notices/workflow_test.go:github-pat:254
+# Fake test fixture.
+95ee60dda4676757d238880333e06ccfbaa26cc2:internal/agent/sanitizer_test.go:private-key:37
