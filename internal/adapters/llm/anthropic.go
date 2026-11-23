@@ -141,6 +141,7 @@ func (a *Anthropic) GenerateJSON(ctx context.Context, req *domain.JSONRequest) (
 	if err := json.Unmarshal(req.Schema, &schema); err != nil || schema == nil {
 		return nil, errors.New("anthropic json: invalid schema")
 	}
+	schema = anthropicOutputSchema(schema)
 	model := req.Model
 	if model == "" {
 		model = a.defaultModel
@@ -182,6 +183,94 @@ func (a *Anthropic) GenerateJSON(ctx context.Context, req *domain.JSONRequest) (
 		out.Stop = domain.StopToolUse
 	}
 	return out, nil
+}
+
+// anthropicOutputSchema copies a JSON schema and moves constraints unsupported
+// by Anthropic structured output into descriptions. Callers retain the full
+// schema for client-side validation.
+func anthropicOutputSchema(schema map[string]any) map[string]any {
+	return copyAnthropicSchemaValue(schema).(map[string]any)
+}
+
+func copyAnthropicSchemaValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(value))
+		for key, child := range value {
+			out[key] = copyAnthropicSchemaValue(child)
+		}
+
+		constraints := []string{
+			"minLength", "maxLength", "minimum", "maximum",
+			"exclusiveMinimum", "exclusiveMaximum", "multipleOf", "maxItems",
+		}
+		var notes []string
+		for _, key := range constraints {
+			if constraint, ok := out[key]; ok {
+				notes = append(notes, key+": "+schemaConstraintValue(constraint))
+				delete(out, key)
+			}
+		}
+		if constraint, ok := out["minItems"]; ok && schemaNumberGreaterThanOne(constraint) {
+			notes = append(notes, "minItems: "+schemaConstraintValue(constraint))
+			delete(out, "minItems")
+		}
+		if len(notes) > 0 {
+			description, _ := out["description"].(string)
+			if description != "" {
+				description += "\n"
+			}
+			out["description"] = description + strings.Join(notes, "\n")
+		}
+		return out
+	case []any:
+		out := make([]any, len(value))
+		for i, child := range value {
+			out[i] = copyAnthropicSchemaValue(child)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func schemaConstraintValue(value any) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Sprint(value)
+	}
+	return string(encoded)
+}
+
+func schemaNumberGreaterThanOne(value any) bool {
+	switch value := value.(type) {
+	case float64:
+		return value > 1
+	case float32:
+		return value > 1
+	case int:
+		return value > 1
+	case int8:
+		return value > 1
+	case int16:
+		return value > 1
+	case int32:
+		return value > 1
+	case int64:
+		return value > 1
+	case uint:
+		return value > 1
+	case uint8:
+		return value > 1
+	case uint16:
+		return value > 1
+	case uint32:
+		return value > 1
+	case uint64:
+		return value > 1
+	default:
+		return false
+	}
 }
 
 var (

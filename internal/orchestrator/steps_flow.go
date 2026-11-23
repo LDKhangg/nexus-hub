@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/LDKhangg/nexus-hub/internal/domain"
+	"github.com/LDKhangg/nexus-hub/internal/obs"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
 )
 
@@ -441,6 +442,16 @@ func (r *stepRun) apply(d DecisionRecord, text string) (workflow.StepResult, err
 
 // planError maps a failed Plan or Evaluate call.
 func (r *stepRun) planError(err error) (workflow.StepResult, error) {
+	errorCode, retryable := llmCallError(err)
+	obs.Logger(r.ctx).Error("orchestrator llm call failed",
+		"component", "orchestrator",
+		"execution_id", r.id,
+		"step_key", r.key,
+		"attempt", r.sc.Attempt,
+		"error_code", errorCode,
+		"retryable", retryable,
+	)
+
 	var be *BudgetExceededError
 	switch {
 	case errors.As(err, &be):
@@ -457,6 +468,38 @@ func (r *stepRun) planError(err error) (workflow.StepResult, error) {
 		return r.failDecision(ReasonLLMError)
 	}
 	return r.failStep(ReasonLLMError, true)
+}
+
+type llmHTTPError interface {
+	HTTPStatusCode() int
+	IsRetryable() bool
+}
+
+func llmCallError(err error) (string, bool) {
+	var httpErr llmHTTPError
+	if errors.As(err, &httpErr) {
+		if status := httpErr.HTTPStatusCode(); status > 0 {
+			return "llm_status_" + strconv.Itoa(status), httpErr.IsRetryable()
+		}
+		return "llm_unknown", httpErr.IsRetryable()
+	}
+	if errors.Is(err, ErrInvalidOutput) {
+		return "llm_invalid_output", false
+	}
+	var budgetErr *BudgetExceededError
+	if errors.As(err, &budgetErr) || isBudgetExceeded(err) {
+		return "llm_budget", false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "llm_timeout", true
+	}
+	if llmErr, ok := domain.AsLLMError(err); ok {
+		if llmErr.Code == domain.LLMCodeTimeout {
+			return "llm_timeout", llmErr.Retryable
+		}
+		return "llm_unknown", llmErr.Retryable
+	}
+	return "llm_unknown", true
 }
 
 // --- owner waits ---
