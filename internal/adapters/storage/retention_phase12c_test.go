@@ -385,7 +385,7 @@ func TestPhase12cRetentionSharedSkipLimit(t *testing.T) {
 	}
 }
 
-// TC-C-FIX-4 (REQ-11): dry-run rolls back, reports exact or partial counts, and fails busy instead of hanging.
+// TC-C-FIX-4/8/9 (REQ-11): dry-run rolls back, reports exact or partial counts, and fails busy instead of hanging.
 func TestPhase12cRetentionDryRunBoundsAndBusyLock(t *testing.T) {
 	e := newWFEnv(t)
 	ctx, pool := e.ctx, e.pool
@@ -403,28 +403,28 @@ func TestPhase12cRetentionDryRunBoundsAndBusyLock(t *testing.T) {
 		}
 	}
 	rules := behavior.RetentionRules{OutboundDays: 30}
-	insertOutbound("retention-dry-exact-", 3)
-	dry, err := store.SweepRetentionDryRun(ctx, workspaceA, rules, now, 1)
-	if err != nil || dry.Partial || dry.Counts["outbound_actions"] != 3 {
+	insertOutbound("retention-dry-exact-", 9)
+	dry, err := store.SweepRetentionDryRun(ctx, workspaceA, rules, now, 2)
+	if err != nil || dry.Partial || dry.Counts["outbound_actions"] != 9 {
 		t.Fatalf("exact dry-run = %+v, %v", dry, err)
 	}
-	if e.count(`SELECT count(*) FROM outbound_actions`) != 3 {
+	if e.count(`SELECT count(*) FROM outbound_actions`) != 9 {
 		t.Fatal("exact dry-run deleted rows")
 	}
-	real, err := store.SweepRetention(ctx, workspaceA, rules, now, 1)
+	real, err := store.SweepRetention(ctx, workspaceA, rules, now, 2)
 	if err != nil || real.Counts["outbound_actions"] != dry.Counts["outbound_actions"] {
 		t.Fatalf("real=%+v dry=%+v err=%v", real, dry, err)
 	}
 
-	insertOutbound("retention-dry-partial-", 6)
-	partial, err := store.SweepRetentionDryRun(ctx, workspaceA, rules, now, 1)
-	if err != nil || !partial.Partial || partial.Counts["outbound_actions"] != 5 {
+	insertOutbound("retention-dry-partial-", 11)
+	partial, err := store.SweepRetentionDryRun(ctx, workspaceA, rules, now, 2)
+	if err != nil || !partial.Partial || partial.Counts["outbound_actions"] != 10 {
 		t.Fatalf("partial dry-run = %+v, %v", partial, err)
 	}
-	if e.count(`SELECT count(*) FROM outbound_actions`) != 6 {
+	if e.count(`SELECT count(*) FROM outbound_actions`) != 11 {
 		t.Fatal("partial dry-run deleted rows")
 	}
-	if _, err := store.SweepRetention(ctx, workspaceA, rules, now, 1); err != nil {
+	if _, err := store.SweepRetention(ctx, workspaceA, rules, now, 2); err != nil {
 		t.Fatal(err)
 	}
 
@@ -439,5 +439,87 @@ func TestPhase12cRetentionDryRunBoundsAndBusyLock(t *testing.T) {
 	_, err = store.SweepRetentionDryRun(busyCtx, workspaceA, behavior.RetentionRules{WorkflowDays: 90}, now, 5)
 	if !errors.Is(err, ErrRetentionBusy) {
 		t.Fatalf("locked dry-run error = %v, want %v", err, ErrRetentionBusy)
+	}
+}
+
+// TC-C-FIX-6/7 (REQ-11): only the dry-run's own deadline can produce a partial success.
+func TestPhase12cRetentionDryRunPropagatesCancellation(t *testing.T) {
+	e := newWFEnv(t)
+	ctx, pool := e.ctx, e.pool
+	store, err := NewRetentionStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	mustExec(t, ctx, pool, `INSERT INTO integrations(id,workspace_id,platform) VALUES($1,$2,'telegram')`, integrationA, workspaceA)
+	mustExec(t, ctx, pool, `INSERT INTO outbound_actions(workspace_id,integration_id,kind,payload,dedupe_key,status,updated_at)
+		VALUES($1,$2,'telegram_message','{}','retention-dry-cancel','sent',$3)`, workspaceA, integrationA, now.Add(-40*24*time.Hour))
+	rules := behavior.RetentionRules{OutboundDays: 30}
+
+	cancelledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	cancelled, err := store.SweepRetentionDryRun(cancelledCtx, workspaceA, rules, now, 1)
+	if !errors.Is(err, context.Canceled) || cancelled.Partial {
+		t.Fatalf("caller-cancelled dry-run = %+v, %v", cancelled, err)
+	}
+
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = holder.Rollback(context.Background()) })
+	if _, err := holder.Exec(ctx, `LOCK TABLE outbound_actions IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	var holderPID int
+	if err := holder.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPID); err != nil {
+		t.Fatal(err)
+	}
+	type dryRunCall struct {
+		result behavior.RetentionResult
+		err    error
+	}
+	done := make(chan dryRunCall, 1)
+	go func() {
+		result, err := store.SweepRetentionDryRun(ctx, workspaceA, rules, now, 1)
+		done <- dryRunCall{result: result, err: err}
+	}()
+
+	const blockedDryRun = `SELECT pid FROM pg_stat_activity
+		WHERE datname=current_database() AND wait_event_type='Lock'
+		AND $1::int=ANY(pg_blocking_pids(pid)) ORDER BY pid LIMIT 1`
+	var blockedPID int
+	pollDeadline := time.Now().Add(1500 * time.Millisecond)
+	for {
+		err = pool.QueryRow(ctx, blockedDryRun, holderPID).Scan(&blockedPID)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatal(err)
+		}
+		if time.Now().After(pollDeadline) {
+			t.Fatal("dry-run did not reach the table lock before lock_timeout")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var backendCancelled bool
+	if err := pool.QueryRow(ctx, `SELECT pg_cancel_backend($1)`, blockedPID).Scan(&backendCancelled); err != nil {
+		t.Fatal(err)
+	}
+	if !backendCancelled {
+		t.Fatal("PostgreSQL did not cancel the blocked dry-run backend")
+	}
+	var call dryRunCall
+	select {
+	case call = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled dry-run did not return")
+	}
+	if call.err == nil || errors.Is(call.err, ErrRetentionBusy) || call.result.Partial {
+		t.Fatalf("backend-cancelled dry-run = %+v, %v", call.result, call.err)
+	}
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
 	}
 }

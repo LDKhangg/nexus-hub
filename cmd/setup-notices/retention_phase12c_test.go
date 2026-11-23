@@ -77,7 +77,7 @@ func TestPhase12cRetentionCLI(t *testing.T) {
 	}
 	var partial bytes.Buffer
 	writeRetentionResult(&partial, behavior.RetentionResult{Counts: map[string]int64{"outbound_actions": 5}, Partial: true})
-	if got := partial.String(); !strings.Contains(got, "outbound_actions=5") || !strings.Contains(got, "status=partial (cap reached)") {
+	if got, want := partial.String(), "outbound_actions=5\nstatus=partial (cap reached, more rows may remain)\n"; got != want {
 		t.Fatalf("partial output: %s", got)
 	}
 	deleted, err := run("run", "--workspace-id", workspace)
