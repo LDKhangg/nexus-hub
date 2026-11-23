@@ -900,6 +900,28 @@ and a step could record a child's exit 143 as a normal result. A custom unit
 or a manual `kill` of a child has the same risk; stop the hub, not its
 children.
 
+### Git sandbox (Phase 12)
+
+Production git runs inside `bubblewrap`, with `git_sandbox=true` and
+`bwrap_path=/usr/bin/bwrap` by default. On Oracle Linux 9, install it with
+`dnf install bubblewrap`. Confirm `sysctl user.max_user_namespaces` is greater
+than zero before restarting the service. Keep `git_sandbox=false` only for a
+non-production development box; startup logs a warning when it is disabled.
+
+After restart, `nh status` should work and the journal should contain
+`git sandbox: ready`. `sandbox_unavailable` means the binary validation,
+namespace probe, or loopback egress proxy failed. Git tools remain visible but
+fail closed, without starting git. Check the package, `bwrap_path`, user
+namespace limit, and unit sandbox settings, then restart.
+
+Network git commands receive only an HTTPS CONNECT proxy that accepts the exact
+authority `github.com:443`; local commands have a separate network namespace.
+The network commands use `--share-net`, so the proxy and fixed GitHub remote are
+defence in depth rather than a kernel-level destination filter. The sandbox
+binds only the command workspace and its private HOME as writable. The existing
+`max_clone_bytes` preflight, watcher, and final size check enforce the workspace
+disk cap on host paths outside the sandbox.
+
 ## Conversations and control (Phase 6)
 
 Every durable execution has an owner-facing reference such as `WF-101`. Use

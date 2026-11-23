@@ -39,7 +39,10 @@ ProtectControlGroups=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LockPersonality=true
 CapabilityBoundingSet=
-SystemCallFilter=@system-service
+# Unprivileged bwrap needs mount operations and user/mount/process/network
+# namespaces; it still receives no capabilities from the service.
+SystemCallFilter=@system-service @mount
+RestrictNamespaces=user mnt pid net ipc uts cgroup
 
 MemoryMax=400M
 TasksMax=64

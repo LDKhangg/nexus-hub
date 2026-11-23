@@ -145,6 +145,7 @@ type Runner interface {
 // git runs a hardened git command and maps runner failures to tool errors.
 func git(ctx context.Context, r Runner, root string, cmd execrunner.Command, sub ...string) (execrunner.Result, error) {
 	cmd.Args = hardenedArgs(root, sub...)
+	cmd.Dir = root
 	return runGit(ctx, r, cmd)
 }
 

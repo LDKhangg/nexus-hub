@@ -53,6 +53,7 @@ type agentServices struct {
 	policy *policy.Engine
 	// policyStore holds rule sets, decisions and policy gates.
 	policyStore *storage.PolicyStore
+	gitRunner   *execrunner.Runner
 
 	conversations workflow.ConversationStore
 	// provider returns the workspace's default LLM provider.
@@ -95,6 +96,11 @@ func buildTools(s settings.Settings, resolver *secrets.Resolver, redactor *agent
 }
 
 func buildToolsWithPeople(s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, directory *storage.PeopleRepository, extra ...tools.Tool) (*tools.Registry, error) {
+	reg, _, err := buildToolRegistry(s, resolver, redactor, directory, extra...)
+	return reg, err
+}
+
+func buildToolRegistry(s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, directory *storage.PeopleRepository, extra ...tools.Tool) (*tools.Registry, *execrunner.Runner, error) {
 	apiClient := netguard.Client(s.ToolTimeout, netguard.DefaultHosts)
 	creds := githubapi.NewCredentials(apiClient, resolver, redactor, nil)
 	gh := githubapi.NewClient(apiClient, creds)
@@ -113,15 +119,36 @@ func buildToolsWithPeople(s settings.Settings, resolver *secrets.Resolver, redac
 	// Undo of a run-level reaction (/undo), also ActionOnly.
 	all = append(all, clickuptools.NewChatReactionRemoveTool(apiClient, resolver, clickupchat.New(apiClient)))
 	all = append(all, extra...)
-	if gitPath, err := resolveGit(s.GitPath); err != nil {
-		log.Print("git not found; code and workspace tools disabled")
-	} else if runner, err := execrunner.New(gitPath, s.TmpDir); err != nil {
-		log.Printf("git runner unavailable (%v); code and workspace tools disabled", err)
+	var runner *execrunner.Runner
+	gitPath, gitErr := resolveGit(s.GitPath)
+	if s.GitSandbox {
+		if gitErr == nil {
+			runner, gitErr = execrunner.NewSandboxed(gitPath, s.TmpDir, execrunner.SandboxConfig{BwrapPath: s.BwrapPath})
+		}
+		if gitErr != nil {
+			log.Print("git sandbox: unavailable; git calls fail closed with sandbox_unavailable")
+			runner = execrunner.NewUnavailable("sandbox_unavailable")
+		} else {
+			log.Print("git sandbox: ready")
+		}
 	} else {
-		all = append(all, codetools.NewReadTools(runner, s.ReposDir)...)
-		all = append(all, codetools.NewWorkspaceTools(runner, creds, s.ReposDir, s.MaxCloneBytes, redactor)...)
+		log.Print("WARNING: git_sandbox=false; use only on a non-production development box")
+		if gitErr == nil {
+			runner, gitErr = execrunner.New(gitPath, s.TmpDir)
+		}
+		if gitErr != nil {
+			log.Print("git runner: unavailable; git calls fail closed with git_unavailable")
+			runner = execrunner.NewUnavailable("git_unavailable")
+		}
 	}
-	return tools.NewRegistry(all...)
+	all = append(all, codetools.NewReadTools(runner, s.ReposDir)...)
+	all = append(all, codetools.NewWorkspaceTools(runner, creds, s.ReposDir, s.MaxCloneBytes, redactor)...)
+	reg, err := tools.NewRegistry(all...)
+	if err != nil {
+		_ = runner.Close()
+		return nil, nil, err
+	}
+	return reg, runner, nil
 }
 
 func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resolver, redactor *agent.Redactor, sender *telegram.Client, ops opsServices, extra ...tools.Tool) (agentServices, error) {
@@ -129,10 +156,16 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 	if err != nil {
 		return agentServices{}, errors.New("people directory startup failed")
 	}
-	reg, err := buildToolsWithPeople(s, resolver, redactor, directory, extra...)
+	reg, gitRunner, err := buildToolRegistry(s, resolver, redactor, directory, extra...)
 	if err != nil {
 		return agentServices{}, errors.New("tool registry startup failed")
 	}
+	built := false
+	defer func() {
+		if !built {
+			_ = gitRunner.Close()
+		}
+	}()
 	store, err := storage.NewAgentStore(pool)
 	if err != nil {
 		return agentServices{}, errors.New("agent store startup failed")
@@ -209,7 +242,8 @@ func buildAgent(pool *pgxpool.Pool, s settings.Settings, resolver *secrets.Resol
 		Policy: policyEngine,
 	})
 	worker := relay.NewActionWorker(meteredActionStore{ActionStore: actions, hub: ops.hub}, sender, relay.WorkerSettings{PollInterval: s.NoticePollInterval, RequestTimeout: s.NoticeRequestTimeout}, conversations)
-	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, investigators: investigators, people: directory, store: store, conversations: conversations, policy: policyEngine, policyStore: policyStore}, nil
+	built = true
+	return agentServices{orchestrator: orch, actions: worker, known: known, reg: reg, limits: limits, provider: provider, investigators: investigators, people: directory, store: store, conversations: conversations, policy: policyEngine, policyStore: policyStore, gitRunner: gitRunner}, nil
 }
 
 // policyKnownActions is the closed set of names a rule set may use: the

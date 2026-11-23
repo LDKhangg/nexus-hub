@@ -112,6 +112,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	defer ag.gitRunner.Close()
 	notices.SetKnownTools(ag.known)
 	// Telegram inbound: the handler only verifies, gates and stores; the
 	// inbox worker does the work. Behavior commands create pending runs;

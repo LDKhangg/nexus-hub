@@ -29,9 +29,12 @@ type Settings struct {
 	MaxInputTokens, MaxOutputTokens       int64
 	// AllowDangerous is deprecated (Phase 9): still a known key, but it has
 	// no effect; the policy rule set decides dangerous tools.
-	AllowDangerous                  bool
-	GitPath, ReposDir, TmpDir       string
-	MaxCloneBytes                   int64
+	AllowDangerous bool
+
+	GitPath, BwrapPath, ReposDir, TmpDir string
+	GitSandbox                           bool
+	MaxCloneBytes                        int64
+
 	DebounceWindow, DebounceMaxWait time.Duration
 	NoticePollInterval              time.Duration
 	NoticeRequestTimeout            time.Duration
@@ -154,6 +157,8 @@ var specs = map[string]spec{
 	"max_output_tokens":                   {kind: kInt, def: int64(6000), min: 100, max: 200_000, set: func(s *Settings, v any) { s.MaxOutputTokens = v.(int64) }},
 	"allow_dangerous":                     {kind: kBool, def: false, set: func(s *Settings, v any) { s.AllowDangerous = v.(bool) }},
 	"git_path":                            {kind: kGitPath, def: "", set: func(s *Settings, v any) { s.GitPath = v.(string) }},
+	"bwrap_path":                          {kind: kExecPath, def: "/usr/bin/bwrap", set: func(s *Settings, v any) { s.BwrapPath = v.(string) }},
+	"git_sandbox":                         {kind: kBool, def: true, set: func(s *Settings, v any) { s.GitSandbox = v.(bool) }},
 	"repos_dir":                           {kind: kAbsPath, def: "/var/lib/nexus-hub/repos", set: func(s *Settings, v any) { s.ReposDir = v.(string) }},
 	"tmp_dir":                             {kind: kAbsPath, def: "/var/lib/nexus-hub/tmp", set: func(s *Settings, v any) { s.TmpDir = v.(string) }},
 	"max_clone_bytes":                     {kind: kInt, def: int64(2 << 30), min: 1 << 20, max: 100 << 30, set: func(s *Settings, v any) { s.MaxCloneBytes = v.(int64) }},
