@@ -5,19 +5,22 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/LDKhangg/nexus-hub/internal/obs"
 	"github.com/LDKhangg/nexus-hub/internal/tenant"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
+	logger := obs.Setup("info", os.Stderr)
+	obs.BridgeStdLog(logger)
 	if err := run(os.Args[1:], os.Stdout, os.LookupEnv); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		slog.Error("command failed", "error", err)
 		os.Exit(1)
 	}
 }

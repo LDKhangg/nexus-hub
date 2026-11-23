@@ -721,6 +721,8 @@ type TelegramUpdate struct {
 	ReplyToMessageID pgtype.Int8
 	// Telegram topic identifier only; no message body is stored.
 	MessageThreadID pgtype.Int8
+	// Request correlation ID propagated into asynchronous behavior and workflow execution.
+	CorrelationID pgtype.Text
 }
 
 // Explicit same-workspace related-to links. A link neither authorizes access nor automatically merges context. Metadata may record the confirmed URL or human decision.

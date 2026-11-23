@@ -3,10 +3,9 @@ package behavior
 import (
 	"context"
 	"errors"
-	"log"
-	"sort"
-	"strings"
 	"time"
+
+	"github.com/LDKhangg/nexus-hub/internal/obs"
 )
 
 const DefaultRetentionBatch int32 = 500
@@ -102,26 +101,15 @@ func (r *Retention) Run(ctx context.Context) error {
 func (r *Retention) runPass(ctx context.Context, now time.Time, batch int32) {
 	result, err := r.Store.SweepRetention(ctx, "", r.Rules, now, batch)
 	if err != nil {
-		log.Print("retention: pass code=database_error")
+		obs.Logger(ctx).Warn("retention pass failed", "error_code", "database_error")
 		return
 	}
-	keys := make([]string, 0, len(result.Counts))
 	for table, count := range result.Counts {
-		keys = append(keys, table)
 		if r.Metrics != nil {
 			r.Metrics.RetentionDeleted(table, count)
 		}
 	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys)+len(result.Issues))
-	for _, table := range keys {
-		parts = append(parts, table+"="+formatRetentionCount(result.Counts[table]))
-	}
-	for _, issue := range result.Issues {
-		parts = append(parts, issue.Table+"_code="+issue.Code)
-		parts = append(parts, issue.Table+"_issue_count="+formatRetentionCount(issue.Count))
-	}
-	log.Print("retention: pass " + strings.Join(parts, " "))
+	obs.Logger(ctx).Info("retention pass completed", "counts", result.Counts, "issues", result.Issues, "partial", result.Partial, "partial_reason", result.PartialReason)
 }
 
 func formatRetentionCount(n int64) string {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/LDKhangg/nexus-hub/internal/adapters/storage/sqlc"
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -247,6 +248,11 @@ func (s *BehaviorStore) RecordUpdate(ctx context.Context, workspaceID string, u 
 	if !updateNoteRe.MatchString(u.Note) {
 		return false, invalid("note")
 	}
+	if u.CorrelationID != "" {
+		if _, err := uuid.Parse(u.CorrelationID); err != nil {
+			return false, invalid("correlation id")
+		}
+	}
 	var integration pgtype.UUID
 	if u.IntegrationID != "" {
 		if integration, err = parseDBID(u.IntegrationID); err != nil {
@@ -257,6 +263,7 @@ func (s *BehaviorStore) RecordUpdate(ctx context.Context, workspaceID string, u 
 		WorkspaceID: ws, UpdateID: u.UpdateID, ChatID: u.ChatID, Kind: string(u.Kind), Command: u.Command, Args: u.Args,
 		IntegrationID: integration, Note: u.Note, TelegramMessageID: optInt8(u.MessageID), ReplyToMessageID: optInt8(u.ReplyToMessageID),
 		MessageThreadID: optInt8(u.ThreadID),
+		CorrelationID:   optText(u.CorrelationID),
 	})
 	if isNoRows(err) {
 		return false, nil
@@ -288,6 +295,7 @@ func (s *BehaviorStore) ClaimUpdate(ctx context.Context, now time.Time, lease ti
 		Kind: behavior.UpdateKind(row.Kind), Command: row.Command,
 		Args: row.Args, Note: row.Note, Attempts: int(row.Attempts),
 		ClaimToken: tok, ReceivedAt: row.ReceivedAt.Time,
+		CorrelationID: row.CorrelationID.String,
 	}, nil
 }
 

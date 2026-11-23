@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -17,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
+	"github.com/LDKhangg/nexus-hub/internal/obs"
 	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/LDKhangg/nexus-hub/internal/reporting"
 	"github.com/LDKhangg/nexus-hub/internal/secrets"
@@ -139,7 +139,7 @@ var (
 )
 
 func (h *TelegramHandler) reject(c echo.Context, integrationID, reason string) error {
-	log.Printf("telegram webhook: rejected integration=%s reason=%s", integrationID, reason)
+	obs.Logger(c.Request().Context()).Warn("telegram webhook rejected", "integration_id", integrationID, "reason", reason)
 	return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 }
 
@@ -186,7 +186,7 @@ func (h *TelegramHandler) Handle(c echo.Context) error {
 		if se != nil {
 			reason = se.Code
 		}
-		log.Printf("telegram webhook: secret unavailable integration=%s reason=%s", id, reason)
+		obs.Logger(ctx).Warn("telegram webhook secret unavailable", "integration_id", id, "reason", reason)
 		return respond(http.StatusServiceUnavailable, "service unavailable")
 	}
 	if subtle.ConstantTimeCompare([]byte(given), []byte(want)) != 1 {
@@ -270,7 +270,7 @@ func (h *TelegramHandler) process(ctx context.Context, integration tenant.Webhoo
 	}
 	if !owner {
 		n := h.ignored.Add(1)
-		log.Printf("%s: non-owner update ignored integration=%s chat=%d count=%d", label, integration.ID, u.ChatID, n)
+		obs.Logger(ctx).Info("telegram update ignored", "source", label, "integration_id", integration.ID, "chat_id", u.ChatID, "count", n, "reason", "non_owner")
 		return UpdateIgnored, nil
 	}
 	if directory, ok := h.inbox.(people.Resolver); ok {
@@ -288,6 +288,7 @@ func (h *TelegramHandler) process(ctx context.Context, integration tenant.Webhoo
 		}
 	}
 	u.WorkspaceID, u.IntegrationID, u.UpdateID = integration.WorkspaceID, integration.ID, upd.UpdateID
+	u.CorrelationID = obs.Correlation(ctx)
 	created, err := h.inbox.RecordUpdate(ctx, integration.WorkspaceID, u)
 	if err != nil {
 		return "", ErrUpdateUnavailable

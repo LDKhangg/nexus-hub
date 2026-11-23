@@ -64,7 +64,8 @@ type Event struct {
 	ChannelName string
 	// CommentID is the ClickUp ID of the comment (TriggerCommentAdded),
 	// from the source's trusted comment identity; never comment text.
-	CommentID string
+	CommentID     string
+	CorrelationID string
 }
 
 // MaxTaggedUserIDs caps Event.TaggedUserIDs.
@@ -78,7 +79,7 @@ func EventFromNormalized(e domain.NormalizedEvent) (Event, bool) {
 	}
 	ev := Event{
 		Key: e.EventKey, IntegrationID: e.IntegrationID, TaskID: e.ExternalID, ListID: e.Metadata["list_id"],
-		SenderID: e.SenderID, FromOwnBot: e.FromOwnBot,
+		SenderID: e.SenderID, FromOwnBot: e.FromOwnBot, CorrelationID: e.CorrelationID,
 	}
 	switch e.EventType {
 	case domain.EventStatusChanged:
@@ -217,6 +218,9 @@ func (m Match) RunFor(ev Event) (NewRun, bool) {
 	r, err := m.NewRun(TaskSubject(ev.TaskID), ev.Key)
 	if err != nil {
 		return NewRun{}, false
+	}
+	if ev.CorrelationID != "" {
+		r.CorrelationID = ev.CorrelationID
 	}
 	return r, true
 }

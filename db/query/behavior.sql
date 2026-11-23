@@ -313,9 +313,10 @@ SELECT * FROM public.approvals WHERE workspace_id = sqlc.arg(workspace_id) AND r
 -- name: InsertTelegramUpdate :one
 -- A repeated update_id returns no row.
 INSERT INTO public.telegram_updates(workspace_id, update_id, chat_id, kind, command, args, integration_id, note,
-                                    telegram_message_id, reply_to_message_id, message_thread_id)
+                                    telegram_message_id, reply_to_message_id, message_thread_id, correlation_id)
 VALUES (sqlc.arg(workspace_id), sqlc.arg(update_id), sqlc.arg(chat_id), sqlc.arg(kind), sqlc.arg(command), sqlc.arg(args),
-        sqlc.narg(integration_id), sqlc.arg(note), sqlc.narg(telegram_message_id), sqlc.narg(reply_to_message_id), sqlc.narg(message_thread_id))
+        sqlc.narg(integration_id), sqlc.arg(note), sqlc.narg(telegram_message_id), sqlc.narg(reply_to_message_id), sqlc.narg(message_thread_id),
+        sqlc.narg(correlation_id))
 ON CONFLICT (workspace_id, update_id) DO NOTHING
 RETURNING id;
 

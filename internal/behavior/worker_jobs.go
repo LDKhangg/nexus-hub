@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/LDKhangg/nexus-hub/internal/obs"
 )
 
 // Lease protocol constants (W6, W7).
@@ -535,14 +536,14 @@ func (w *WorkerSweeper) Run(ctx context.Context) error {
 	lastPrune := time.Time{}
 	for {
 		if _, err := w.Store.ExpireLeases(ctx); err != nil && ctx.Err() == nil {
-			log.Print("worker sweeper: lease expiry failed")
+			obs.Logger(ctx).Warn("worker lease expiry failed", "error_code", "database_error")
 		}
 		if _, err := w.Store.MarkDevicesOffline(ctx); err != nil && ctx.Err() == nil {
-			log.Print("worker sweeper: presence sweep failed")
+			obs.Logger(ctx).Warn("worker presence sweep failed", "error_code", "database_error")
 		}
 		if time.Since(lastPrune) >= time.Hour {
 			if _, err := w.Store.PruneTelemetry(ctx); err != nil && ctx.Err() == nil {
-				log.Print("worker sweeper: telemetry prune failed")
+				obs.Logger(ctx).Warn("worker telemetry prune failed", "error_code", "database_error")
 			} else {
 				lastPrune = time.Now()
 			}

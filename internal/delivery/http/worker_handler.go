@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/behavior"
+	"github.com/LDKhangg/nexus-hub/internal/obs"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 )
@@ -164,6 +166,12 @@ func (h *WorkerHandler) authenticate(next echo.HandlerFunc) echo.HandlerFunc {
 			return workerError(c, http.StatusTooManyRequests, "rate limited")
 		}
 		c.Set(workerDeviceKey, device)
+		correlationID := c.Request().Header.Get("X-Correlation-Id")
+		if _, err := uuid.Parse(correlationID); err != nil {
+			correlationID = obs.NewCorrelationID()
+		}
+		request := c.Request().WithContext(obs.WithCorrelation(c.Request().Context(), correlationID))
+		c.SetRequest(request)
 		return next(c)
 	}
 }

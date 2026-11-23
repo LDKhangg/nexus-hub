@@ -220,7 +220,10 @@ func (w *InboxWorker) processNext(ctx context.Context) (bool, error) {
 	if err != nil || u == nil {
 		return false, err
 	}
-	corr := correlationID()
+	corr := u.CorrelationID
+	if corr == "" {
+		corr = correlationID()
+	}
 	var out outcome
 	if u.Attempts > w.settings.MaxAttempts {
 		out = outcome{code: "attempts_exhausted"}

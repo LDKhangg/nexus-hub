@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/LDKhangg/nexus-hub/internal/config"
 	httpdelivery "github.com/LDKhangg/nexus-hub/internal/delivery/http"
 	"github.com/LDKhangg/nexus-hub/internal/metrics"
+	"github.com/LDKhangg/nexus-hub/internal/obs"
 	"github.com/LDKhangg/nexus-hub/internal/orchestrator"
 	"github.com/LDKhangg/nexus-hub/internal/relay"
 	"github.com/LDKhangg/nexus-hub/internal/reporting"
@@ -31,8 +33,10 @@ import (
 )
 
 func main() {
+	logger := obs.Setup("info", os.Stderr)
+	obs.BridgeStdLog(logger)
 	if err := run(); err != nil {
-		log.Print(err)
+		slog.Error("server stopped", "error_code", "startup_failed")
 		os.Exit(1)
 	}
 }
@@ -67,6 +71,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	logger := obs.Setup(s.LogLevel, os.Stderr)
+	obs.BridgeStdLog(logger)
 	if s.AllowDangerous {
 		log.Print("setting allow_dangerous is deprecated and has no effect; the policy rule set decides dangerous tools (nh policy)")
 	}
@@ -83,7 +89,7 @@ func run() error {
 	key, err := secrets.LoadMasterKey(cfg.MasterKeyFile)
 	if err != nil {
 		// Legacy env references keep working; DB credentials fail visibly.
-		log.Printf("master key unavailable (%v); only legacy env credential references will resolve", err)
+		slog.Warn("master key unavailable; only legacy env credential references will resolve", "error_code", "master_key_unavailable")
 		key = nil
 	}
 	redactor := agent.NewRedactor(nil)
@@ -290,7 +296,8 @@ func run() error {
 	handler := httpdelivery.NewWebhookHandler(integrations, httpdelivery.NewVerifiedParserFactory(resolver), relay.NewNoticeService(notices))
 	e := echo.New()
 	e.HideBanner = true
-	e.Use(middleware.RequestLogger())
+	e.Use(httpdelivery.CorrelationMiddleware)
+	e.Use(structuredRequestLogger)
 	e.Use(middleware.Recover())
 	e.Use(middleware.BodyLimit(bodyLimit))
 	e.Server.ReadHeaderTimeout = 5 * time.Second
@@ -339,10 +346,10 @@ func recoverAtStartup(ctx context.Context, passes []recoveryPass, timeout time.D
 		}
 		if err := p.run(ctx); err != nil {
 			failed++
-			log.Printf("startup recovery: %s not completed; retried by its sweeper", p.name)
+			slog.Warn("startup recovery not completed", "pass", p.name, "retry", true)
 		}
 	}
-	log.Printf("startup recovery: passes=%d failed=%d duration_ms=%d", len(passes), failed, time.Since(started).Milliseconds())
+	slog.Info("startup recovery completed", "passes", len(passes), "failed", failed, "duration_ms", time.Since(started).Milliseconds())
 }
 
 type serviceWorker interface{ Run(context.Context) error }
@@ -415,12 +422,12 @@ func runServices(ctx context.Context, e *echo.Echo, workers []serviceWorker, add
 		case <-drainTimer.C:
 			timedOut = true
 			cancelInFlight()
-			log.Printf("shutdown: timeout reached; in-flight work cancelled workers_running=%d", len(workers)-stopped)
+			slog.Warn("shutdown timeout reached", "in_flight_cancelled", true, "workers_running", len(workers)-stopped)
 			stopped += waitWorkers(workerDone, len(workers)-stopped, stopGrace)
 		}
 	}
 	cancelInFlight()
-	log.Printf("shutdown: done duration_ms=%d timed_out=%t", time.Since(started).Milliseconds(), timedOut)
+	slog.Info("shutdown completed", "duration_ms", time.Since(started).Milliseconds(), "timed_out", timedOut)
 	return result
 }
 
@@ -435,8 +442,29 @@ func waitWorkers(done <-chan error, n int, grace time.Duration) int {
 		case <-done:
 			left--
 		case <-t.C:
-			log.Printf("shutdown: workers still stopping after grace workers_running=%d", left)
+			slog.Warn("shutdown workers still stopping after grace", "workers_running", left)
 		}
 	}
 	return n
+}
+
+func structuredRequestLogger(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		started := time.Now()
+		err := next(c)
+		if err != nil {
+			c.Error(err)
+		}
+		path := c.Path()
+		if path == "" {
+			path = "unmatched"
+		}
+		obs.Logger(c.Request().Context()).Info("http request",
+			"method", c.Request().Method,
+			"path", path,
+			"status", c.Response().Status,
+			"duration_ms", time.Since(started).Milliseconds(),
+		)
+		return nil
+	}
 }

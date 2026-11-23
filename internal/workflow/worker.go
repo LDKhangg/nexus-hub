@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/LDKhangg/nexus-hub/internal/obs"
 )
 
 // Clock is the worker's only source of time. Tests and embedded runtimes can
@@ -216,6 +218,11 @@ func (w *Worker) ProcessNext(ctx context.Context) (bool, error) {
 }
 
 func (w *Worker) execute(ctx context.Context, job *Job) error {
+	ctx = obs.WithCorrelation(ctx, job.Execution.CorrelationID)
+	ctx = obs.WithExecution(ctx, job.ExecutionID)
+	started := w.clock.Now()
+	logger := obs.Logger(ctx)
+	logger.Info("workflow step started", "job_id", job.ID, "step_key", job.StepKey, "attempt", job.Attempts)
 	executor, ok := w.registry.executor(job.Step.Kind)
 	if !ok {
 		return w.fail(ctx, job, ReasonNonRetryable, nil, Usage{})
@@ -304,10 +311,18 @@ func (w *Worker) execute(ctx context.Context, job *Job) error {
 		request.WaitState = result.WaitState
 		request.WaitReferences = result.WaitReferences
 		request.Reason = ReasonStepWaiting
-		return w.store.WaitJob(ctx, request)
+		err := w.store.WaitJob(ctx, request)
+		if err == nil {
+			logger.Info("workflow step waiting", "job_id", job.ID, "step_key", job.StepKey, "attempt", job.Attempts, "state", result.WaitState, "duration_ms", w.clock.Now().Sub(started).Milliseconds())
+		}
+		return err
 	}
 	request.Reason = ReasonStepSucceeded
-	return w.store.CompleteJob(ctx, request)
+	err := w.store.CompleteJob(ctx, request)
+	if err == nil {
+		logger.Info("workflow step completed", "job_id", job.ID, "step_key", job.StepKey, "attempt", job.Attempts, "state", JobCompleted, "duration_ms", w.clock.Now().Sub(started).Milliseconds())
+	}
+	return err
 }
 
 // releaseLease ends the lease of a job whose step was cut off by shutdown,
@@ -336,23 +351,31 @@ func (w *Worker) retryOrFail(ctx context.Context, job *Job, reason ReasonCode, c
 	if w.settings.OnStepFailure != nil {
 		w.settings.OnStepFailure(normalizedReason(reason, ReasonStepRetry), false)
 	}
-	return w.store.RetryJob(ctx, JobResultRequest{
+	err := w.store.RetryJob(ctx, JobResultRequest{
 		JobCheckpointRequest: JobCheckpointRequest{JobID: job.ID, WorkspaceID: job.WorkspaceID,
 			ExecutionID: job.ExecutionID, StepKey: job.StepKey, ExpectedAttempt: job.Attempts,
 			ClaimToken: job.ClaimToken, At: now, Checkpoint: checkpoint, Usage: usage},
 		Reason: normalizedReason(reason, ReasonStepRetry), RetryAt: now.Add(delays[index]),
 	})
+	if err == nil {
+		obs.Logger(ctx).Warn("workflow step retry scheduled", "job_id", job.ID, "step_key", job.StepKey, "attempt", job.Attempts, "reason", normalizedReason(reason, ReasonStepRetry))
+	}
+	return err
 }
 
 func (w *Worker) fail(ctx context.Context, job *Job, reason ReasonCode, checkpoint *Checkpoint, usage Usage) error {
 	if w.settings.OnStepFailure != nil {
 		w.settings.OnStepFailure(normalizedReason(reason, ReasonNonRetryable), true)
 	}
-	return w.store.FailJob(ctx, JobResultRequest{JobCheckpointRequest: JobCheckpointRequest{
+	err := w.store.FailJob(ctx, JobResultRequest{JobCheckpointRequest: JobCheckpointRequest{
 		JobID: job.ID, WorkspaceID: job.WorkspaceID, ExecutionID: job.ExecutionID,
 		StepKey: job.StepKey, ExpectedAttempt: job.Attempts, ClaimToken: job.ClaimToken,
 		At: w.clock.Now(), Checkpoint: checkpoint, Usage: usage,
 	}, Reason: normalizedReason(reason, ReasonNonRetryable)})
+	if err == nil {
+		obs.Logger(ctx).Error("workflow step failed", "job_id", job.ID, "step_key", job.StepKey, "attempt", job.Attempts, "reason", normalizedReason(reason, ReasonNonRetryable))
+	}
+	return err
 }
 
 func normalizedReason(reason, fallback ReasonCode) ReasonCode {

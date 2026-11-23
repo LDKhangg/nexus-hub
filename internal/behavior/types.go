@@ -354,6 +354,7 @@ type InboundUpdate struct {
 	Attempts         int
 	ClaimToken       string
 	ReceivedAt       time.Time
+	CorrelationID    string // request UUID propagated through asynchronous work
 }
 
 // Profile is the owner's personalization.

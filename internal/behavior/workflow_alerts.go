@@ -3,10 +3,11 @@ package behavior
 import (
 	"context"
 	"errors"
-	"log"
 	"regexp"
 	"sync"
 	"time"
+
+	"github.com/LDKhangg/nexus-hub/internal/obs"
 )
 
 // Phase 12 REQ-10: Telegram alerts for stuck and failed workflow
@@ -219,7 +220,7 @@ func (w *WorkflowAlerts) Kick() {
 // detail and retried on the next tick.
 func (w *WorkflowAlerts) Run(ctx context.Context) error {
 	if !w.Enabled {
-		log.Print("workflow alerts: off (alerts_enabled is false)")
+		obs.Logger(ctx).Info("workflow alerts disabled", "reason", "setting_disabled")
 		<-ctx.Done()
 		return nil
 	}
@@ -265,7 +266,7 @@ func (w *WorkflowAlerts) Scan(ctx context.Context) {
 	sent, err := w.Store.CountAlertsSentSince(ctx, now.Add(-alertWindow))
 	if err != nil {
 		if ctx.Err() == nil {
-			log.Print("workflow alerts: rate window read failed")
+			obs.Logger(ctx).Warn("workflow alert rate window read failed", "error_code", "rate_window_read_failed")
 		}
 		return
 	}
@@ -273,7 +274,7 @@ func (w *WorkflowAlerts) Scan(ctx context.Context) {
 	retries, err := w.Store.ListAlertRetries(ctx, now, alertRetryLimit)
 	if err != nil {
 		if ctx.Err() == nil {
-			log.Print("workflow alerts: retry scan failed")
+			obs.Logger(ctx).Warn("workflow alert retry scan failed", "error_code", "retry_scan_failed")
 		}
 	}
 	for _, a := range retries {
@@ -283,11 +284,11 @@ func (w *WorkflowAlerts) Scan(ctx context.Context) {
 		if a.Obsolete && a.State != AlertFailed {
 			if err := w.Store.MarkAlertObsolete(ctx, a); err != nil {
 				if ctx.Err() == nil {
-					log.Printf("workflow alerts: obsolete mark failed state=%s execution_id=%d", a.State, a.ExecutionID)
+					obs.Logger(ctx).Warn("workflow alert obsolete mark failed", "state", a.State, "execution_id", a.ExecutionID, "error_code", "obsolete_mark_failed")
 				}
 				continue
 			}
-			log.Printf("workflow alerts: retry dropped; condition ended state=%s execution_id=%d", a.State, a.ExecutionID)
+			obs.Logger(ctx).Info("workflow alert retry dropped", "state", a.State, "execution_id", a.ExecutionID, "reason", "condition_ended")
 			continue
 		}
 		// Over the cap a due retry waits for room in the window; it is
@@ -315,7 +316,7 @@ func (w *WorkflowAlerts) Scan(ctx context.Context) {
 	})
 	if err != nil {
 		if ctx.Err() == nil {
-			log.Print("workflow alerts: candidate scan failed")
+			obs.Logger(ctx).Warn("workflow alert candidate scan failed", "error_code", "candidate_scan_failed")
 		}
 		return
 	}
@@ -344,7 +345,7 @@ func (w *WorkflowAlerts) handle(ctx context.Context, a WorkflowAlert, now time.T
 		claimed, err := w.Store.SuppressAlert(ctx, a, now)
 		if err != nil {
 			if ctx.Err() == nil {
-				log.Printf("workflow alerts: claim failed state=%s", a.State)
+				obs.Logger(ctx).Warn("workflow alert claim failed", "state", a.State, "error_code", "claim_failed")
 			}
 			return false
 		}
@@ -354,13 +355,13 @@ func (w *WorkflowAlerts) handle(ctx context.Context, a WorkflowAlert, now time.T
 		if w.Metrics != nil {
 			w.Metrics.AlertSuppressed()
 		}
-		log.Printf("workflow alerts: suppressed by hourly cap state=%s execution_id=%d", a.State, a.ExecutionID)
+		obs.Logger(ctx).Info("workflow alert suppressed", "state", a.State, "execution_id", a.ExecutionID, "reason", "hourly_cap")
 		return false
 	}
 	claimed, err := w.Store.ClaimAlert(ctx, a, now)
 	if err != nil {
 		if ctx.Err() == nil {
-			log.Printf("workflow alerts: claim failed state=%s", a.State)
+			obs.Logger(ctx).Warn("workflow alert claim failed", "state", a.State, "error_code", "claim_failed")
 		}
 		return false
 	}
@@ -383,12 +384,12 @@ func (w *WorkflowAlerts) attempt(ctx context.Context, a WorkflowAlert, now time.
 	defer cancel()
 	if sendErr == nil {
 		if err := w.Store.MarkAlertSent(mctx, a, now); err != nil {
-			log.Printf("workflow alerts: sent; mark failed state=%s execution_id=%d", a.State, a.ExecutionID)
+			obs.Logger(ctx).Warn("workflow alert sent but mark failed", "state", a.State, "execution_id", a.ExecutionID, "error_code", "sent_mark_failed")
 		}
 		if w.Metrics != nil {
 			w.Metrics.AlertSent(string(a.State))
 		}
-		log.Printf("workflow alerts: sent state=%s execution_id=%d", a.State, a.ExecutionID)
+		obs.Logger(ctx).Info("workflow alert sent", "state", a.State, "execution_id", a.ExecutionID)
 		return true
 	}
 	code := alertSendErrorCode(sendErr)
@@ -398,17 +399,17 @@ func (w *WorkflowAlerts) attempt(ctx context.Context, a WorkflowAlert, now time.
 		next = now.Add(d)
 	}
 	if err := w.Store.MarkAlertAttemptFailed(mctx, a, code, next); err != nil {
-		log.Printf("workflow alerts: send failed; attempt not recorded state=%s execution_id=%d", a.State, a.ExecutionID)
+		obs.Logger(ctx).Warn("workflow alert failure not recorded", "state", a.State, "execution_id", a.ExecutionID, "error_code", "attempt_mark_failed")
 		return false
 	}
 	if next.IsZero() {
 		if m, ok := w.Metrics.(alertFailureMetrics); ok {
 			m.AlertFailed()
 		}
-		log.Printf("workflow alerts: send failed for good state=%s execution_id=%d attempts=%d code=%s", a.State, a.ExecutionID, attempts, code)
+		obs.Logger(ctx).Warn("workflow alert permanently failed", "state", a.State, "execution_id", a.ExecutionID, "attempt", attempts, "error_code", code)
 		return false
 	}
-	log.Printf("workflow alerts: send failed; retried later state=%s execution_id=%d attempts=%d code=%s", a.State, a.ExecutionID, attempts, code)
+	obs.Logger(ctx).Warn("workflow alert send failed", "state", a.State, "execution_id", a.ExecutionID, "attempt", attempts, "error_code", code, "retry", true)
 	return false
 }
 
@@ -439,7 +440,7 @@ func (w *WorkflowAlerts) sendSummaries(ctx context.Context, now time.Time) {
 	list, err := w.Store.ListAlertSummaries(ctx, now)
 	if err != nil {
 		if ctx.Err() == nil {
-			log.Print("workflow alerts: summary read failed")
+			obs.Logger(ctx).Warn("workflow alert summary read failed", "error_code", "summary_read_failed")
 		}
 		return
 	}
@@ -462,7 +463,7 @@ func (w *WorkflowAlerts) sendSummaries(ctx context.Context, now time.Time) {
 			}
 			w.summaryRetry = now.Add(d)
 			w.mu.Unlock()
-			log.Printf("workflow alerts: summary send failed; retried later code=%s", alertSendErrorCode(err))
+			obs.Logger(ctx).Warn("workflow alert summary send failed", "error_code", alertSendErrorCode(err), "retry", true)
 			return
 		}
 		w.mu.Lock()
@@ -472,10 +473,10 @@ func (w *WorkflowAlerts) sendSummaries(ctx context.Context, now time.Time) {
 		err := w.Store.MarkAlertsSummarised(mctx, s.WorkspaceID, now, now)
 		cancel()
 		if err != nil {
-			log.Print("workflow alerts: summary sent; mark failed")
+			obs.Logger(ctx).Warn("workflow alert summary sent but mark failed", "error_code", "summary_mark_failed")
 			continue
 		}
-		log.Printf("workflow alerts: summary sent suppressed=%d", s.Count)
+		obs.Logger(ctx).Info("workflow alert summary sent", "suppressed", s.Count)
 	}
 }
 
