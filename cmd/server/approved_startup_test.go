@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"os"
@@ -103,10 +104,10 @@ func TestApproved_RealServerTwoEnvStartupAndMissingKeyWarning(t *testing.T) {
 			ready := false
 			deadline := time.Now().Add(8 * time.Second)
 			for time.Now().Before(deadline) {
-				resp, err := client.Get("http://" + addr + "/startup-probe")
+				resp, err := client.Get("http://" + addr + "/healthz")
 				if err == nil {
 					resp.Body.Close()
-					if resp.StatusCode == 404 {
+					if resp.StatusCode == http.StatusOK {
 						ready = true
 						break
 					}
@@ -121,6 +122,24 @@ func TestApproved_RealServerTwoEnvStartupAndMissingKeyWarning(t *testing.T) {
 			}
 			if !ready {
 				t.Fatal("real server did not start HTTP")
+			}
+			// TC-F-9/10 (REQ-4): health is public for GET and HEAD, but readiness
+			// details are absent from the public listener.
+			head, err := client.Head("http://" + addr + "/healthz")
+			if err != nil {
+				t.Fatal(err)
+			}
+			head.Body.Close()
+			if head.StatusCode != http.StatusOK {
+				t.Fatalf("HEAD /healthz status=%d", head.StatusCode)
+			}
+			private, err := client.Get("http://" + addr + "/readyz")
+			if err != nil {
+				t.Fatal(err)
+			}
+			private.Body.Close()
+			if private.StatusCode != http.StatusNotFound {
+				t.Fatalf("public /readyz status=%d", private.StatusCode)
 			}
 			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 				t.Fatal(err)
@@ -137,9 +156,25 @@ func TestApproved_RealServerTwoEnvStartupAndMissingKeyWarning(t *testing.T) {
 			if strings.Contains(output.String(), url) {
 				t.Error("startup printed DB credentials")
 			}
-			warn := strings.Contains(output.String(), "only legacy env credential references will resolve")
+			warn := strings.Contains(output.String(), `"check":"master_key"`)
 			if warn != missing {
 				t.Error("missing-master-key warning does not match real startup state")
+			}
+			// TC-F-3/15 (REQ-1, REQ-5): real startup, request, summary and
+			// shutdown records all use one JSON envelope.
+			summary := false
+			for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
+				var record map[string]any
+				if err := json.Unmarshal([]byte(line), &record); err != nil {
+					t.Errorf("non-JSON server lifecycle line %q: %v", line, err)
+					continue
+				}
+				if record["msg"] == "readiness summary" {
+					summary = true
+				}
+			}
+			if !summary {
+				t.Error("startup readiness summary absent")
 			}
 		})
 	}
