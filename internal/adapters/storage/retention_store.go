@@ -178,6 +178,7 @@ func (s *RetentionStore) sweepRetention(ctx context.Context, txStarter retention
 type retentionBatchFn func(context.Context, int32, []int64, *int64) (map[string]int64, *behavior.RetentionIssue, []int64, error)
 
 func runRetentionGroup(ctx context.Context, result *behavior.RetentionResult, table string, batch int32, maxBatches int, skipped *int, fn retentionBatchFn) (bool, error) {
+	result.Counts[table] += 0
 	skipIDs := make([]int64, 0)
 	batchCount := 0
 	for {
