@@ -1,5 +1,11 @@
 .obsidian/
-.env
+.env*
+*.key
+*master-key*
+*master_key*
+*.dump
+*.sql.dump
+*.backup
 bin/
 .superpowers/
 .serena/

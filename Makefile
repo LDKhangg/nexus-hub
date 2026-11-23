@@ -1,4 +1,4 @@
-.PHONY: all run build tidy clean test-ci check docs-check migration-create generate
+.PHONY: all run build tidy clean test-ci check docs-check config-doc-check migration-create generate
 
 all: tidy build
 
@@ -26,6 +26,9 @@ check:
 # Every .md path named in the guides must exist (CI runs this too).
 docs-check:
 	scripts/check-doc-paths.sh
+
+config-doc-check:
+	sh scripts/check-config-doc.sh
 
 # CI only: the suite runs in GitHub Actions, not on a dev machine (AGENTS.md, CI).
 test-ci:

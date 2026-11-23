@@ -47,6 +47,8 @@ jobs:
     timeout-minutes: 10
     env:
       CODE: ${{ needs.changes.outputs.docs_only != 'true' }}
+      GOOSE_VERSION: v3.28.0
+      SQLC_VERSION: v1.30.0
     steps:
       - uses: actions/checkout@v5
         with:
@@ -86,6 +88,23 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      - name: install generation tools
+        if: env.CODE == 'true'
+        run: |
+          go install "github.com/pressly/goose/v3/cmd/goose@${GOOSE_VERSION}"
+          go install "github.com/sqlc-dev/sqlc/cmd/sqlc@${SQLC_VERSION}"
+      - name: generated code and migration drift
+        if: env.CODE == 'true'
+        run: |
+          make generate
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::generated files are stale"
+            git status --short
+            exit 1
+          fi
+          goose -dir db/migrations validate
+      - name: configuration reference
+        run: make config-doc-check
       - name: gofmt
         if: env.CODE == 'true'
         run: |
