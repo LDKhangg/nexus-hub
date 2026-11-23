@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/LDKhangg/nexus-hub/internal/behavior"
 	"github.com/google/uuid"
 )
 
@@ -52,7 +53,7 @@ func TestPhase12cRetentionCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(show, "enabled=true") || !strings.Contains(show, "outbound_days=30") ||
-		!strings.Contains(show, "candidates now (dry-run gives exact counts)") || !strings.Contains(show, "outbound_actions=1") {
+		!strings.Contains(show, "candidates now (dry-run is exact only below five batches per group)") || !strings.Contains(show, "outbound_actions=1") {
 		t.Fatalf("show output: %s", show)
 	}
 	if !strings.Contains(dry, "message_logs=1") || !strings.Contains(dry, "notification_outbox=1") ||
@@ -73,6 +74,11 @@ func TestPhase12cRetentionCLI(t *testing.T) {
 		if strings.Contains(out, "TOP-SECRET") || strings.Contains(out, workspace) || strings.Contains(out, integration) {
 			t.Fatalf("private data leaked: %s", out)
 		}
+	}
+	var partial bytes.Buffer
+	writeRetentionResult(&partial, behavior.RetentionResult{Counts: map[string]int64{"outbound_actions": 5}, Partial: true})
+	if got := partial.String(); !strings.Contains(got, "outbound_actions=5") || !strings.Contains(got, "status=partial (cap reached)") {
+		t.Fatalf("partial output: %s", got)
 	}
 	deleted, err := run("run", "--workspace-id", workspace)
 	if err != nil || deleted != dry {
