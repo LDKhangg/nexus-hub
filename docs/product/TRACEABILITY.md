@@ -217,27 +217,27 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | NFR-022 | Prompt-injection defenses và trust-boundary checks. | 2, 12 | IN_PROGRESS | Phase 2: sanitizer + policy boundary |
 | NFR-023 | Không cho workflow hoặc message nội dung không tin cậy chỉnh sửa system policy. | 9 | IN_PROGRESS | Phase 9: no workflow, model or message path can change policy (Test PASS (CI 44363609327, 3014 tests) + Review APPROVE on feature/phase9 code 9bb65d5 (tests 3b8421e); fakes only; VERIFIED on merge) |
 | NFR-024 | Có data retention và deletion controls. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12c retention sweeper + nh retention |
-| NFR-025 | Structured logs. | 3 | PENDING |  |
-| NFR-026 | Correlation IDs. | 3 | PENDING |  |
+| NFR-025 | Structured logs. | 3 | IN_PROGRESS | Phase F (feature/phaseF, head a58b320, CI 45144063548; report reports/2026-11-23-phaseF-report.md): JSON slog for server and nh, std log bridged, redacting handler (REQ-1, REQ-3) |
+| NFR-026 | Correlation IDs. | 3 | IN_PROGRESS | Phase F (feature/phaseF, head a58b320, CI 45144063548; report reports/2026-11-23-phaseF-report.md): UUIDv7 correlation id per webhook/Telegram/worker call, stored on inbound rows, agent jobs and executions; in every step log (REQ-2) |
 | NFR-027 | Execution timelines. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12b nh execution timeline |
 | NFR-028 | Worker status và queue depth. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12b /metrics loopback + nh status |
 | NFR-029 | Error metrics. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12b error metrics |
 | NFR-030 | LLM usage/cost tracking khi provider cung cấp dữ liệu. | 2, 12, 6a | IN_PROGRESS | Phase 2: token usage per job; Phase 6a: per-turn assistant usage log incl. router_* (8bd07d9); Phase 7a: worker usage and Claude limits in telemetry (c85e9ca, CI 44009727911; live laptop check pending); Phase 12: 12b metrics |
-| NFR-031 | Health/readiness endpoints. | 3 | PENDING |  |
+| NFR-031 | Health/readiness endpoints. | 3 | IN_PROGRESS | Phase F (feature/phaseF, head a58b320, CI 45144063548; report reports/2026-11-23-phaseF-report.md): public /healthz; /readyz on the loopback metrics listener (REQ-4) |
 | NFR-032 | Có cảnh báo hoặc notification cho stuck/failed workflows. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12b Telegram stuck/failed alerts |
-| NFR-033 | Có README. | 3 | PENDING |  |
+| NFR-033 | Có README. | 3 | IN_PROGRESS | Phase F (feature/phaseF, head a58b320, CI 45144063548; report reports/2026-11-23-phaseF-report.md): README Run it locally, docs/configuration.md, nh seed demo (REQ-6..8) |
 | NFR-034 | Có architecture documentation. | every, 10, 9 | IN_PROGRESS | docs/architecture.md predates PCC; ROADMAP.md added; Phase 6 runbook section; Phase 7b: docs/architecture.md §7 AIRuntime boundary (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending); Phase 10: runbook "Task topics and ClickUp replies (Phase 10)" incl. `/comment`; architecture note on destination resolution and message links (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge); Phase 9: runbook "Policy and approvals (Phase 9)"; architecture §9 (Test PASS (CI 44363609327, 3014 tests) + Review APPROVE on feature/phase9 code 9bb65d5 (tests 3b8421e); fakes only; VERIFIED on merge) |
-| NFR-035 | Có database migrations. | 3 | IN_PROGRESS | goose migrations 00001–00003 |
+| NFR-035 | Có database migrations. | 3 | IN_PROGRESS | goose migrations 00001–00003; Phase F (feature/phaseF, head a58b320, CI 45144063548; report reports/2026-11-23-phaseF-report.md): goose migrations through 00043; CI goose validate and generate drift check (REQ-9) |
 | NFR-036 | Có OpenAPI hoặc tài liệu API tương đương. | 11 | PENDING |  |
-| NFR-037 | Có automated tests. | 3 | IN_PROGRESS | Go tests exist; CI missing (P3) |
-| NFR-038 | Có CI pipeline. | 3 | PENDING |  |
+| NFR-037 | Có automated tests. | 3 | IN_PROGRESS | Go tests exist; CI missing (P3); Phase F (feature/phaseF, head a58b320, CI 45144063548; report reports/2026-11-23-phaseF-report.md): full suite with -race in CI on every push (3290 tests at a58b320) |
+| NFR-038 | Có CI pipeline. | 3 | IN_PROGRESS | Phase F (feature/phaseF, head a58b320, CI 45144063548; report reports/2026-11-23-phaseF-report.md): CI: gofmt, vet, build, secret scan, generate drift, config doc check, -race suite (REQ-9) |
 | NFR-039 | Có deployment instructions. | 13 | PENDING |  |
 | NFR-040 | Có recovery/runbook documentation. | 12 | IN_PROGRESS | runbooks/clickup-telegram-local.md (local only); Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): runbook Recovery (Phase 12); restore part = test debt D12-2 |
 | DEP-001 | Reproducible deployment bằng Docker Compose và/hoặc systemd cho worker runtime. | 13 | PENDING |  |
-| DEP-002 | Environment configuration document. | 3, 13 | PENDING |  |
-| DEP-003 | Secrets không commit vào repository. | 3, 13 | IN_PROGRESS | .env.example has no values; secrets in DB |
-| DEP-004 | Database migrations tự động hoặc có bước deploy rõ ràng. | 3, 13 | PENDING |  |
-| DEP-005 | Startup health checks. | 3, 13 | PENDING |  |
+| DEP-002 | Environment configuration document. | 3, 13 | IN_PROGRESS | Phase F (feature/phaseF, head a58b320, CI 45144063548; report reports/2026-11-23-phaseF-report.md): docs/configuration.md with CI drift check both ways (REQ-6) |
+| DEP-003 | Secrets không commit vào repository. | 3, 13 | IN_PROGRESS | .env.example has no values; secrets in DB; Phase F (feature/phaseF, head a58b320, CI 45144063548; report reports/2026-11-23-phaseF-report.md): .gitignore env/key/dump; CI secret scan (Phase 12); seed uses fake credentials (REQ-10) |
+| DEP-004 | Database migrations tự động hoặc có bước deploy rõ ràng. | 3, 13 | IN_PROGRESS | Phase F (feature/phaseF, head a58b320, CI 45144063548; report reports/2026-11-23-phaseF-report.md): documented deploy step: deploy.sh runs goose before the switch (Q2); local goose up in README |
+| DEP-005 | Startup health checks. | 3, 13 | IN_PROGRESS | Phase F (feature/phaseF, head a58b320, CI 45144063548; report reports/2026-11-23-phaseF-report.md): startup readiness summary, DB failure fatal, /readyz checks (REQ-4, REQ-5) |
 | DEP-006 | Graceful shutdown. | 13 | PENDING |  |
 | DEP-007 | Persistent volumes. | 13 | PENDING |  |
 | DEP-008 | Backup scheduling. | 13 | PENDING |  |
