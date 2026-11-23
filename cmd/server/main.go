@@ -70,7 +70,8 @@ func run() error {
 	}
 	s, err := settings.Load(startupCtx, settingsStore)
 	if err != nil {
-		return err
+		slog.Error("startup dependency unavailable", "component", "startup", "check", "db", "error_code", "database_unavailable")
+		return errors.New("database startup failed")
 	}
 	logger := obs.Setup(s.LogLevel, os.Stderr)
 	obs.BridgeStdLog(logger)
@@ -296,6 +297,7 @@ func run() error {
 	handler := httpdelivery.NewWebhookHandler(integrations, httpdelivery.NewVerifiedParserFactory(resolver), relay.NewNoticeService(notices))
 	e := echo.New()
 	e.HideBanner = true
+	e.HidePort = true
 	e.Use(httpdelivery.CorrelationMiddleware)
 	e.Use(structuredRequestLogger)
 	e.Use(httpdelivery.Recover)
@@ -329,7 +331,7 @@ func run() error {
 		"db", startupReadiness.Checks.DB, "migrations", startupReadiness.Checks.Migrations,
 		"master_key", startupReadiness.Checks.MasterKey, "workflow_worker", startupReadiness.Checks.WorkflowWorker,
 		"git_sandbox", startupReadiness.Checks.GitSandbox)
-	if m := listenMetrics(s.MetricsAddr, ops.hub, readiness.Handler()); m != nil {
+	if m := listenMetrics(s.MetricsAddr, ops.hub, readiness); m != nil {
 		services = append(services, m)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -400,6 +402,7 @@ func runServices(ctx context.Context, e *echo.Echo, workers []serviceWorker, add
 		return errors.New("HTTP listener startup failed")
 	}
 	e.Listener = listener
+	slog.Info("http server started", "component", "http", "addr", listener.Addr().String())
 	stopCtx, stopWorkers := context.WithCancel(ctx)
 	defer stopWorkers()
 	hardCtx, cancelInFlight := context.WithCancel(context.Background())

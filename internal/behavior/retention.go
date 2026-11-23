@@ -3,6 +3,8 @@ package behavior
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/LDKhangg/nexus-hub/internal/obs"
@@ -109,7 +111,27 @@ func (r *Retention) runPass(ctx context.Context, now time.Time, batch int32) {
 			r.Metrics.RetentionDeleted(table, count)
 		}
 	}
-	obs.Logger(ctx).Info("retention pass completed", "counts", result.Counts, "issues", result.Issues, "partial", result.Partial, "partial_reason", result.PartialReason)
+	tables := make([]string, 0, len(result.Counts))
+	for table := range result.Counts {
+		tables = append(tables, table)
+	}
+	sort.Strings(tables)
+	counts := make([]slog.Attr, 0, len(tables))
+	for _, table := range tables {
+		counts = append(counts, slog.Int64(table, result.Counts[table]))
+	}
+	attrs := []slog.Attr{
+		slog.GroupAttrs("counts", counts...),
+		slog.Bool("partial", result.Partial),
+		slog.String("partial_reason", string(result.PartialReason)),
+	}
+	for _, issue := range result.Issues {
+		attrs = append(attrs,
+			slog.String(issue.Table+"_code", issue.Code),
+			slog.Int64(issue.Table+"_issue_count", issue.Count),
+		)
+	}
+	obs.Logger(ctx).LogAttrs(ctx, slog.LevelInfo, "retention pass completed", attrs...)
 }
 
 func formatRetentionCount(n int64) string {
