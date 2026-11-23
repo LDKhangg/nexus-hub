@@ -139,13 +139,17 @@ func (s *AgentWorkflowStore) startOne(ctx context.Context, ws pgtype.UUID, now t
 	if err != nil {
 		return false, err
 	}
-	corr, err := uuid.NewRandom()
-	if err != nil {
-		return false, err
+	corr := cand.CorrelationID.String
+	if !cand.CorrelationID.Valid || corr == "" {
+		id, err := uuid.NewRandom()
+		if err != nil {
+			return false, err
+		}
+		corr = id.String()
 	}
 	batch := agent.AgentBatch{ID: cand.ID, WorkspaceID: uuidString(ws), ThreadID: uuidString(cand.ThreadID),
 		SourceIntegrationID: uuidString(cand.SourceIntegrationID)}
-	execution, err := s.workflows.StartExecutionTx(ctx, tx, agent.WorkflowStartRequest(batch, versionID, corr.String()))
+	execution, err := s.workflows.StartExecutionTx(ctx, tx, agent.WorkflowStartRequest(batch, versionID, corr))
 	if err != nil {
 		return false, err
 	}

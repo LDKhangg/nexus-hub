@@ -1,10 +1,12 @@
 -- name: UpsertPendingAgentJob :one
-INSERT INTO public.agent_jobs(workspace_id, source_integration_id, thread_id, run_at)
+INSERT INTO public.agent_jobs(workspace_id, source_integration_id, thread_id, run_at, correlation_id)
 VALUES (sqlc.arg(workspace_id), sqlc.arg(source_integration_id), sqlc.arg(thread_id),
-        now() + LEAST(make_interval(secs => sqlc.arg(window_secs)::float8), make_interval(secs => sqlc.arg(max_wait_secs)::float8)))
+        now() + LEAST(make_interval(secs => sqlc.arg(window_secs)::float8), make_interval(secs => sqlc.arg(max_wait_secs)::float8)),
+        sqlc.narg(correlation_id)::text)
 ON CONFLICT (thread_id) WHERE status = 'pending'
 DO UPDATE SET run_at = LEAST(now() + make_interval(secs => sqlc.arg(window_secs)::float8),
-                             public.agent_jobs.first_enqueued_at + make_interval(secs => sqlc.arg(max_wait_secs)::float8)),
+                              public.agent_jobs.first_enqueued_at + make_interval(secs => sqlc.arg(max_wait_secs)::float8)),
+              correlation_id = COALESCE(EXCLUDED.correlation_id, public.agent_jobs.correlation_id),
               updated_at = now()
 RETURNING id;
 
@@ -140,7 +142,7 @@ WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id)
 -- processing job at all (legacy or workflow-owned), or, first, a job a
 -- legacy claimer left processing (imported by the cutover) whose lease or
 -- retry wait has ended: an unexpired legacy lease stays unavailable.
-SELECT j.id, j.thread_id, j.source_integration_id, j.status FROM public.agent_jobs j
+SELECT j.id, j.thread_id, j.source_integration_id, j.status, j.correlation_id FROM public.agent_jobs j
 WHERE j.workspace_id = sqlc.arg(workspace_id)::uuid AND j.workflow_execution_id IS NULL
   AND ((j.status = 'pending' AND j.run_at <= sqlc.arg(at_time)::timestamptz)
     OR (j.status = 'processing' AND j.locked_until <= sqlc.arg(at_time)::timestamptz))

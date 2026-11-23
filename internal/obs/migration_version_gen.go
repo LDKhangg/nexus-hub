@@ -2,4 +2,4 @@
 
 package obs
 
-const ExpectedMigrationVersion int64 = 42
+const ExpectedMigrationVersion int64 = 43

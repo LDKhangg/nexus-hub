@@ -298,7 +298,7 @@ func run() error {
 	e.HideBanner = true
 	e.Use(httpdelivery.CorrelationMiddleware)
 	e.Use(structuredRequestLogger)
-	e.Use(middleware.Recover())
+	e.Use(httpdelivery.Recover)
 	e.Use(middleware.BodyLimit(bodyLimit))
 	e.Server.ReadHeaderTimeout = 5 * time.Second
 	e.Match([]string{http.MethodGet, http.MethodHead}, "/healthz", func(c echo.Context) error {

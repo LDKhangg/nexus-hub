@@ -430,7 +430,7 @@ func (q *Queries) LockOpenApproval(ctx context.Context, arg LockOpenApprovalPara
 }
 
 const lockOrphanAgentBatch = `-- name: LockOrphanAgentBatch :one
-SELECT id, workspace_id, source_integration_id, thread_id, status, attempts, run_at, first_enqueued_at, locked_until, claim_token, through_message_id, last_error_code, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at, updated_at, workflow_execution_id, workflow_attempt_deadline FROM public.agent_jobs
+SELECT id, workspace_id, source_integration_id, thread_id, status, attempts, run_at, first_enqueued_at, locked_until, claim_token, through_message_id, last_error_code, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at, updated_at, workflow_execution_id, workflow_attempt_deadline, correlation_id FROM public.agent_jobs
 WHERE workspace_id = $1 AND id = $2 AND status = 'processing'
   AND workflow_execution_id = $3
 FOR UPDATE
@@ -466,6 +466,7 @@ func (q *Queries) LockOrphanAgentBatch(ctx context.Context, arg LockOrphanAgentB
 		&i.UpdatedAt,
 		&i.WorkflowExecutionID,
 		&i.WorkflowAttemptDeadline,
+		&i.CorrelationID,
 	)
 	return i, err
 }

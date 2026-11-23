@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/LDKhangg/nexus-hub/internal/obs"
 	"github.com/LDKhangg/nexus-hub/internal/people"
 	"github.com/LDKhangg/nexus-hub/internal/workflow"
 	"github.com/google/uuid"
@@ -195,9 +195,6 @@ func (w *InboxWorker) RunDrain(stop, hard context.Context) error {
 	defer wg.Wait()
 	for stop.Err() == nil && hard.Err() == nil {
 		worked, err := w.processNext(hard)
-		if err != nil && hard.Err() == nil {
-			log.Print("telegram inbound: storage operation failed; pending work retained")
-		}
 		if worked && err == nil {
 			continue
 		}
@@ -217,7 +214,13 @@ type outcome struct {
 
 func (w *InboxWorker) processNext(ctx context.Context) (bool, error) {
 	u, err := w.d.Inbox.ClaimUpdate(ctx, w.now(), w.settings.Lease)
-	if err != nil || u == nil {
+	if err != nil {
+		if ctx.Err() == nil {
+			obs.Logger(ctx).Error("telegram inbound claim failed", "component", "telegram", "error_code", "claim_failed")
+		}
+		return false, err
+	}
+	if u == nil {
 		return false, err
 	}
 	corr := u.CorrelationID
@@ -228,7 +231,7 @@ func (w *InboxWorker) processNext(ctx context.Context) (bool, error) {
 	if u.Attempts > w.settings.MaxAttempts {
 		out = outcome{code: "attempts_exhausted"}
 	} else {
-		workCtx, cancel := context.WithTimeout(ctx, w.settings.Lease-time.Second)
+		workCtx, cancel := context.WithTimeout(obs.WithCorrelation(ctx, corr), w.settings.Lease-time.Second)
 		out = w.dispatch(workCtx, *u, corr)
 		cancel()
 	}
@@ -236,13 +239,20 @@ func (w *InboxWorker) processNext(ctx context.Context) (bool, error) {
 		return true, ctx.Err()
 	}
 	if out.retry && u.Attempts < w.settings.MaxAttempts {
-		log.Printf("telegram inbound: update=%d kind=%s code=%s attempt=%d corr=%s retry", u.ID, u.Kind, out.code, u.Attempts, corr)
+		obs.Logger(obs.WithCorrelation(ctx, corr)).Info("telegram inbound update retry",
+			"component", "telegram", "update_id", u.ID, "kind", u.Kind,
+			"code", out.code, "attempt", u.Attempts)
 		return true, nil // the lease ends and the update is claimed again
 	}
 	if err := w.d.Inbox.FinishUpdate(ctx, u.ID, u.ClaimToken, out.code); err != nil {
+		obs.Logger(obs.WithCorrelation(ctx, corr)).Error("telegram inbound update finish failed",
+			"component", "telegram", "update_id", u.ID, "kind", u.Kind,
+			"code", out.code, "attempt", u.Attempts, "error_code", "finish_update_failed")
 		return true, err
 	}
-	log.Printf("telegram inbound: update=%d kind=%s code=%s corr=%s", u.ID, u.Kind, out.code, corr)
+	obs.Logger(obs.WithCorrelation(ctx, corr)).Info("telegram inbound update finished",
+		"component", "telegram", "update_id", u.ID, "kind", u.Kind,
+		"code", out.code, "attempt", u.Attempts)
 	return true, nil
 }
 

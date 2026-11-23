@@ -57,6 +57,8 @@ type AgentJob struct {
 	WorkflowExecutionID pgtype.Int8
 	// Deadline of the current attempt of a workflow-owned batch; NULL otherwise.
 	WorkflowAttemptDeadline pgtype.Timestamptz
+	// Inbound request correlation ID propagated into the agent workflow execution.
+	CorrelationID pgtype.Text
 }
 
 type AppSetting struct {
