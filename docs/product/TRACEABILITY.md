@@ -4,6 +4,8 @@ Status of every PCC-001 requirement. Statuses follow PCC §10.1.2: `PENDING`, `I
 
 Snapshot: 2026-11-12. Phase 1 merged; Phase 2 under test and review. Nothing is `VERIFIED` against the PCC yet: Phase 1/2 work covers parts of the IDs marked `IN_PROGRESS`.
 
+Update 2026-11-23 (Phase 12): reliability, observability, data ops and security hardening implemented; per-batch Test PASS + Review APPROVE, final CI 45111228514 green on feature/phase12 code 7c25c37; touched IDs IN_PROGRESS until merge. Gate B and Gate C evidence: reports/2026-11-23-phase12-report.md and reports/2026-11-23-phase12-gate-c.md. NFR-006 restore drill = test debt D12-1.
+
 Update 2026-11-19 (Phase 9): policy engine and approvals implemented, Test PASS (CI 44363609327) + Review APPROVE on feature/phase9 code 9bb65d5; touched IDs noted per row, IN_PROGRESS until merge. FR-117 (UI) stays Phase 11.
 
 Update 2026-11-18 (Phase 10): task topics and ClickUp outbound implemented, Test PASS (CI 44332870926) + Review APPROVE on feature/phase10 code a507263; touched IDs noted per row, IN_PROGRESS until merge. FR-134, FR-136, FR-137 moved to Phase 10b (unchanged).
@@ -191,38 +193,38 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | UI-028 | Protected write operations. | 11 | PENDING |  |
 | UI-029 | Không hiển thị credentials nguyên bản. | 11 | PENDING |  |
 | UI-030 | Responsive mobile layout cho status và approvals. | 11 | PENDING |  |
-| NFR-001 | Không mất acknowledged inbound events khi process restart. | 12 | PENDING |  |
-| NFR-002 | Có crash recovery. | 12 | PENDING |  |
-| NFR-003 | Có durable queues. | 12 | PENDING |  |
-| NFR-004 | Có idempotency strategy. | 12 | PENDING |  |
-| NFR-005 | Có graceful shutdown. | 2, 12 | IN_PROGRESS | Phase 1/2: runServices graceful shutdown |
-| NFR-006 | Có database backup và restore đã được thử nghiệm. | 12 | PENDING |  |
-| NFR-007 | Với local database khỏe mạnh, webhook handler có p95 dưới 500ms, không tính external provider processing. | 12 | PENDING |  |
+| NFR-001 | Không mất acknowledged inbound events khi process restart. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12a store-then-ack + dedup |
+| NFR-002 | Có crash recovery. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12a reconciler/sweeper resume |
+| NFR-003 | Có durable queues. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12a durable queues, leases |
+| NFR-004 | Có idempotency strategy. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12a dedup + idempotency keys |
+| NFR-005 | Có graceful shutdown. | 2, 12 | IN_PROGRESS | Phase 1/2: runServices graceful shutdown; Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12a shutdown_timeout drain |
+| NFR-006 | Có database backup và restore đã được thử nghiệm. | 12 | IN_PROGRESS | Phase 12: restore drill not done — test debt D12-1 (test-debt/phase12-backup-restore.md); manual pg_dump steps in runbook |
+| NFR-007 | Với local database khỏe mạnh, webhook handler có p95 dưới 500ms, không tính external provider processing. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): load test p95 59.2 ms (loadtest-2026-11-20.json) |
 | NFR-008 | Sau khi webhook được xác thực và ghi nhận, việc tạo execution không cần chờ LLM hoàn tất. | 1, 4 | IN_PROGRESS | Phase 1/2: ingest does not wait for LLM |
 | NFR-009 | Ít nhất hai worker tasks độc lập có thể thực thi đồng thời. | 8 | PENDING |  |
-| NFR-010 | Tối thiểu 100 workflow executions được lưu/truy vấn ổn định trong bài test MVP. | 12 | PENDING |  |
+| NFR-010 | Tối thiểu 100 workflow executions được lưu/truy vấn ổn định trong bài test MVP. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): load test 120 executions |
 | NFR-011 | UI không bị block bởi workflow dài. | 11 | PENDING |  |
-| NFR-012 | Có configurable resource quotas và backpressure. | 8, 12 | PENDING |  |
-| NFR-013 | HTTPS cho public endpoints. | 12 | PENDING |  |
+| NFR-012 | Có configurable resource quotas và backpressure. | 8, 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12a queue/workspace caps (multi-slot stays Phase 8) |
+| NFR-013 | HTTPS cho public endpoints. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12d HTTPS via Cloudflare tunnel documented, Gate C report |
 | NFR-014 | Authentication cho Admin UI. | 11 | PENDING |  |
 | NFR-015 | Webhook authenticity verification. | 1, 4 | IN_PROGRESS | Phase 1: ClickUp signature verification |
 | NFR-016 | Secrets encryption at rest và secret redaction. | 2 | IN_PROGRESS | Phase 2: encryption at rest + redactor |
-| NFR-017 | Least privilege cho integrations. | 12 | PENDING |  |
+| NFR-017 | Least privilege cho integrations. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12d git bwrap sandbox + github.com-only proxy; live check pending |
 | NFR-018 | Không expose management endpoints không xác thực. | 11 | PENDING |  |
 | NFR-019 | Sandboxed/restricted worker execution. | 2, 7a, 8, 12 | IN_PROGRESS | Phase 2: hardened git-only runner; Phase 7a: file-tools-only claude, no creds for executor/tests (c85e9ca, CI 44009727911; live laptop check pending) |
 | NFR-020 | Chống path traversal và command injection tại tool boundaries. | 2, 12 | IN_PROGRESS | Phase 2: path/argument checks in tools |
 | NFR-021 | Audit privileged actions. | 2, 12 | IN_PROGRESS | Phase 2: tool_runs audit |
 | NFR-022 | Prompt-injection defenses và trust-boundary checks. | 2, 12 | IN_PROGRESS | Phase 2: sanitizer + policy boundary |
 | NFR-023 | Không cho workflow hoặc message nội dung không tin cậy chỉnh sửa system policy. | 9 | IN_PROGRESS | Phase 9: no workflow, model or message path can change policy (Test PASS (CI 44363609327, 3014 tests) + Review APPROVE on feature/phase9 code 9bb65d5 (tests 3b8421e); fakes only; VERIFIED on merge) |
-| NFR-024 | Có data retention và deletion controls. | 12 | PENDING |  |
+| NFR-024 | Có data retention và deletion controls. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12c retention sweeper + nh retention |
 | NFR-025 | Structured logs. | 3 | PENDING |  |
 | NFR-026 | Correlation IDs. | 3 | PENDING |  |
-| NFR-027 | Execution timelines. | 12 | PENDING |  |
-| NFR-028 | Worker status và queue depth. | 12 | PENDING |  |
-| NFR-029 | Error metrics. | 12 | PENDING |  |
-| NFR-030 | LLM usage/cost tracking khi provider cung cấp dữ liệu. | 2, 12, 6a | IN_PROGRESS | Phase 2: token usage per job; Phase 6a: per-turn assistant usage log incl. router_* (8bd07d9); Phase 7a: worker usage and Claude limits in telemetry (c85e9ca, CI 44009727911; live laptop check pending) |
+| NFR-027 | Execution timelines. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12b nh execution timeline |
+| NFR-028 | Worker status và queue depth. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12b /metrics loopback + nh status |
+| NFR-029 | Error metrics. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12b error metrics |
+| NFR-030 | LLM usage/cost tracking khi provider cung cấp dữ liệu. | 2, 12, 6a | IN_PROGRESS | Phase 2: token usage per job; Phase 6a: per-turn assistant usage log incl. router_* (8bd07d9); Phase 7a: worker usage and Claude limits in telemetry (c85e9ca, CI 44009727911; live laptop check pending); Phase 12: 12b metrics |
 | NFR-031 | Health/readiness endpoints. | 3 | PENDING |  |
-| NFR-032 | Có cảnh báo hoặc notification cho stuck/failed workflows. | 12 | PENDING |  |
+| NFR-032 | Có cảnh báo hoặc notification cho stuck/failed workflows. | 12 | IN_PROGRESS | Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): 12b Telegram stuck/failed alerts |
 | NFR-033 | Có README. | 3 | PENDING |  |
 | NFR-034 | Có architecture documentation. | every, 10, 9 | IN_PROGRESS | docs/architecture.md predates PCC; ROADMAP.md added; Phase 6 runbook section; Phase 7b: docs/architecture.md §7 AIRuntime boundary (feature/phase7b e4c979b, CI 44225394222, Review APPROVE; fake provider; live /plan check pending); Phase 10: runbook "Task topics and ClickUp replies (Phase 10)" incl. `/comment`; architecture note on destination resolution and message links (Test PASS (CI 44332870926, 2803 tests) + Review APPROVE on feature/phase10 code a507263 (tests 658559f); fakes only; live ClickUp checks U1–U3 pending; VERIFIED on merge); Phase 9: runbook "Policy and approvals (Phase 9)"; architecture §9 (Test PASS (CI 44363609327, 3014 tests) + Review APPROVE on feature/phase9 code 9bb65d5 (tests 3b8421e); fakes only; VERIFIED on merge) |
 | NFR-035 | Có database migrations. | 3 | IN_PROGRESS | goose migrations 00001–00003 |
@@ -230,7 +232,7 @@ Update 2026-11-13: Phases 2, 3, 3d, 3c, 3e merged to main (6c9a0a6); CI 43394889
 | NFR-037 | Có automated tests. | 3 | IN_PROGRESS | Go tests exist; CI missing (P3) |
 | NFR-038 | Có CI pipeline. | 3 | PENDING |  |
 | NFR-039 | Có deployment instructions. | 13 | PENDING |  |
-| NFR-040 | Có recovery/runbook documentation. | 12 | IN_PROGRESS | runbooks/clickup-telegram-local.md (local only) |
+| NFR-040 | Có recovery/runbook documentation. | 12 | IN_PROGRESS | runbooks/clickup-telegram-local.md (local only); Phase 12 (feature/phase12, code 7c25c37, CI 45111228514; report reports/2026-11-23-phase12-report.md): runbook Recovery (Phase 12); restore part = test debt D12-2 |
 | DEP-001 | Reproducible deployment bằng Docker Compose và/hoặc systemd cho worker runtime. | 13 | PENDING |  |
 | DEP-002 | Environment configuration document. | 3, 13 | PENDING |  |
 | DEP-003 | Secrets không commit vào repository. | 3, 13 | IN_PROGRESS | .env.example has no values; secrets in DB |
