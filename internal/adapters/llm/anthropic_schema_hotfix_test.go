@@ -50,6 +50,70 @@ func TestAnthropicOutputSchema_DeepConstraintsAndCopyIsolation(t *testing.T) {
 	}
 }
 
+// TC-HS-7 (REQ-1): only schema nodes lose unsupported constraints. Property
+// names and literal annotation values that resemble constraints stay intact.
+func TestAnthropicOutputSchema_DistinguishesSchemaNodesFromLiterals(t *testing.T) {
+	original := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"maxLength": map[string]any{"type": "string", "maxLength": float64(7)},
+			"minimum":   map[string]any{"type": "number", "minimum": float64(2)},
+		},
+		"enum":     []any{"maxLength", map[string]any{"minimum": float64(3)}},
+		"const":    map[string]any{"maximum": float64(4)},
+		"default":  map[string]any{"multipleOf": float64(5)},
+		"examples": []any{map[string]any{"maxItems": float64(6)}},
+		"anyOf": []any{
+			map[string]any{"type": "string", "minLength": float64(1)},
+		},
+		"items": map[string]any{"type": "array", "maxItems": float64(8)},
+		"$defs": map[string]any{
+			"bounded": map[string]any{"type": "number", "maximum": float64(9)},
+		},
+	}
+	before := mustMarshalSchema(t, original)
+	transformed := anthropicOutputSchema(original)
+
+	properties := transformed["properties"].(map[string]any)
+	if _, ok := properties["maxLength"]; !ok {
+		t.Fatal("property named maxLength was removed")
+	}
+	if _, ok := properties["minimum"]; !ok {
+		t.Fatal("property named minimum was removed")
+	}
+	for _, key := range []string{"enum", "const", "default", "examples"} {
+		if !reflect.DeepEqual(transformed[key], original[key]) {
+			t.Errorf("literal %s changed: got %#v want %#v", key, transformed[key], original[key])
+		}
+	}
+
+	nodes := []struct {
+		name       string
+		node       map[string]any
+		constraint string
+	}{
+		{"property maxLength", properties["maxLength"].(map[string]any), "maxLength: 7"},
+		{"property minimum", properties["minimum"].(map[string]any), "minimum: 2"},
+		{"anyOf", transformed["anyOf"].([]any)[0].(map[string]any), "minLength: 1"},
+		{"items", transformed["items"].(map[string]any), "maxItems: 8"},
+		{"$defs", transformed["$defs"].(map[string]any)["bounded"].(map[string]any), "maximum: 9"},
+	}
+	for _, tc := range nodes {
+		keyword := strings.SplitN(tc.constraint, ":", 2)[0]
+		if _, exists := tc.node[keyword]; exists {
+			t.Errorf("%s: constraint %s remains", tc.name, keyword)
+		}
+		if description, _ := tc.node["description"].(string); !strings.Contains(description, tc.constraint) {
+			t.Errorf("%s: description %q lacks %q", tc.name, description, tc.constraint)
+		}
+	}
+
+	transformed["enum"].([]any)[1].(map[string]any)["minimum"] = float64(99)
+	if after := mustMarshalSchema(t, original); !reflect.DeepEqual(after, before) {
+		t.Fatal("transform mutated or aliased the input schema")
+	}
+}
+
 // TC-HS-3 (REQ-2): the wire request carries only the transformed schema, and
 // a fake Anthropic 400 becomes safe, non-retryable API metadata.
 func TestAnthropicGenerateJSON_TransformsWireSchemaAndMaps400(t *testing.T) {
