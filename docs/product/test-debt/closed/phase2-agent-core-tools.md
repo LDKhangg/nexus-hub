@@ -30,3 +30,10 @@
 
 - Git network traffic is not behind netguard; no OS disk quota (from the
   review-fixes plan).
+
+## Closed: waived by the owner
+
+2026-11-23: the owner closed stage 1 (GĐ1) and waived all open test debt
+("skip luôn"). The open items in this file are not proven; they are closed as
+waived, not as passed, and the PCC IDs they cover stay unverified in
+`TRACEABILITY.md`.

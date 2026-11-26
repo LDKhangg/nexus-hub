@@ -20,6 +20,10 @@ type APIError struct {
 
 func (e *APIError) Error() string { return fmt.Sprintf("anthropic: http %d", e.StatusCode) }
 
+// HTTPStatusCode and IsRetryable expose only safe failure metadata to callers.
+func (e *APIError) HTTPStatusCode() int { return e.StatusCode }
+func (e *APIError) IsRetryable() bool   { return e.Retryable }
+
 // safeErr strips upstream bodies from SDK errors.
 func safeErr(err error) error {
 	var apiErr *anthropic.Error

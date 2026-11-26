@@ -11,3 +11,10 @@ Status: CLOSED 2026-11-17 — TD-CA-1..3 paid in Phase 7a Batch A (see `docs/pro
   - TD-CA-2: `before`/`after` as number, bool, array or `{}` never fail decoding; status callbacks with such values still error `missing new status`; assignee additions without a user id are still skipped.
   - TD-CA-3: no Reviewer check of `80606b9` (the `UnmarshalJSON` never fails; non-object values give a non-nil empty value).
 - Pay first in the next Phase Brief (Phase 7a Batch A).
+
+## Closed: waived by the owner
+
+2026-11-23: the owner closed stage 1 (GĐ1) and waived all open test debt
+("skip luôn"). The open items in this file are not proven; they are closed as
+waived, not as passed, and the PCC IDs they cover stay unverified in
+`TRACEABILITY.md`.
