@@ -193,40 +193,90 @@ func anthropicOutputSchema(schema map[string]any) map[string]any {
 }
 
 func copyAnthropicSchemaValue(value any) any {
+	schema, ok := value.(map[string]any)
+	if !ok {
+		return copyAnthropicSchemaLiteral(value)
+	}
+
+	out := make(map[string]any, len(schema))
+	for key, child := range schema {
+		switch key {
+		case "properties", "patternProperties", "$defs", "definitions":
+			out[key] = copyAnthropicNamedSchemas(child)
+		case "items", "additionalProperties", "not", "if", "then", "else":
+			if _, ok := child.(map[string]any); ok {
+				out[key] = copyAnthropicSchemaValue(child)
+			} else {
+				out[key] = copyAnthropicSchemaLiteral(child)
+			}
+		case "anyOf", "oneOf", "allOf", "prefixItems":
+			out[key] = copyAnthropicSchemaList(child)
+		default:
+			out[key] = copyAnthropicSchemaLiteral(child)
+		}
+	}
+
+	constraints := []string{
+		"minLength", "maxLength", "minimum", "maximum",
+		"exclusiveMinimum", "exclusiveMaximum", "multipleOf", "maxItems",
+	}
+	var notes []string
+	for _, key := range constraints {
+		if constraint, ok := out[key]; ok {
+			notes = append(notes, key+": "+schemaConstraintValue(constraint))
+			delete(out, key)
+		}
+	}
+	if constraint, ok := out["minItems"]; ok && schemaNumberGreaterThanOne(constraint) {
+		notes = append(notes, "minItems: "+schemaConstraintValue(constraint))
+		delete(out, "minItems")
+	}
+	if len(notes) > 0 {
+		description, _ := out["description"].(string)
+		if description != "" {
+			description += "\n"
+		}
+		out["description"] = description + strings.Join(notes, "\n")
+	}
+	return out
+}
+
+func copyAnthropicNamedSchemas(value any) any {
+	named, ok := value.(map[string]any)
+	if !ok {
+		return copyAnthropicSchemaLiteral(value)
+	}
+	out := make(map[string]any, len(named))
+	for name, schema := range named {
+		out[name] = copyAnthropicSchemaValue(schema)
+	}
+	return out
+}
+
+func copyAnthropicSchemaList(value any) any {
+	list, ok := value.([]any)
+	if !ok {
+		return copyAnthropicSchemaLiteral(value)
+	}
+	out := make([]any, len(list))
+	for i, schema := range list {
+		out[i] = copyAnthropicSchemaValue(schema)
+	}
+	return out
+}
+
+func copyAnthropicSchemaLiteral(value any) any {
 	switch value := value.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(value))
 		for key, child := range value {
-			out[key] = copyAnthropicSchemaValue(child)
-		}
-
-		constraints := []string{
-			"minLength", "maxLength", "minimum", "maximum",
-			"exclusiveMinimum", "exclusiveMaximum", "multipleOf", "maxItems",
-		}
-		var notes []string
-		for _, key := range constraints {
-			if constraint, ok := out[key]; ok {
-				notes = append(notes, key+": "+schemaConstraintValue(constraint))
-				delete(out, key)
-			}
-		}
-		if constraint, ok := out["minItems"]; ok && schemaNumberGreaterThanOne(constraint) {
-			notes = append(notes, "minItems: "+schemaConstraintValue(constraint))
-			delete(out, "minItems")
-		}
-		if len(notes) > 0 {
-			description, _ := out["description"].(string)
-			if description != "" {
-				description += "\n"
-			}
-			out["description"] = description + strings.Join(notes, "\n")
+			out[key] = copyAnthropicSchemaLiteral(child)
 		}
 		return out
 	case []any:
 		out := make([]any, len(value))
 		for i, child := range value {
-			out[i] = copyAnthropicSchemaValue(child)
+			out[i] = copyAnthropicSchemaLiteral(child)
 		}
 		return out
 	default:

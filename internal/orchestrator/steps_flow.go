@@ -446,7 +446,7 @@ func (r *stepRun) planError(err error) (workflow.StepResult, error) {
 	obs.Logger(r.ctx).Error("orchestrator llm call failed",
 		"component", "orchestrator",
 		"execution_id", r.id,
-		"step_key", r.key,
+		"step", r.key,
 		"attempt", r.sc.Attempt,
 		"error_code", errorCode,
 		"retryable", retryable,
